@@ -1,0 +1,78 @@
+services:
+  # --- Cérebro & API (FastAPI) ---
+  api:
+    build: ./backend
+    container_name: cortai_api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      - db
+      - redis
+      - minio
+
+  # --- Operários (Celery Worker) ---
+  worker:
+    build: ./backend
+    container_name: cortai_worker
+    command: celery -A app.worker.celery_app worker --loglevel=info
+    volumes:
+      - ./backend:/app
+    env_file: .env
+    depends_on:
+      - redis
+      - db
+
+  # --- Banco de Dados (PostgreSQL) ---
+  db:
+    image: postgres:16-alpine
+    container_name: cortai_db
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # --- Fila de Mensagens (Redis) ---
+  redis:
+    image: redis:7-alpine
+    container_name: cortai_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # --- Storage (MinIO) ---
+  minio:
+    image: minio/minio:latest
+    container_name: cortai_minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+
+  # --- IA Local (Ollama) ---
+  ollama:
+    image: ollama/ollama:latest
+    container_name: cortai_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  ollama_data:
