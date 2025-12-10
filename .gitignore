@@ -1,0 +1,58 @@
+# --- Segurança (CRÍTICO) ---
+# Jamais suba arquivos de ambiente com senhas!
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets.json
+
+# --- Binários e Executáveis do Sistema ---
+# FFmpeg e outros executáveis não devem ir para o repo
+ffmpeg.exe
+ffprobe.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# --- Python & Backend ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv
+.pytest_cache/
+venv/
+env/
+ENV/
+dist/
+build/
+*.egg-info/
+
+# --- Frontend (Next.js) ---
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.DS_Store
+*.log
+.npm
+.yarn-integrity
+
+# --- IDEs e Editores ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- CortAI Específico (Dados e Storage) ---
+# Ignora o conteúdo, mas mantém a pasta se tiver .gitkeep
+storage/*
+!storage/.gitkeep
+
+# Dados persistentes do Docker 
+postgres_data/
+redis_data/
+minio_data/
+ollama_data/
