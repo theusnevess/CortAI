@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.api.v1.endpoints import videos
 
 # --- Inicialização da Aplicação ---
 # Criando a instância principal do FastAPI.
@@ -25,6 +26,8 @@ app.add_middleware(
     allow_methods=["*"],        
     allow_headers=["*"],        
 )
+
+app.include_router(videos.router, prefix="/api/v1/videos", tags=["videos"])
 
 # --- Rotas (Endpoints) ---
 

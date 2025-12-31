@@ -11,6 +11,8 @@ alembic==1.13.1          # Migrações de banco
 asyncpg==0.29.0          # Driver Async (Alta performance)
 psycopg2-binary==2.9.9   # Driver Sync (Para Celery/Sync tasks)
 
+minio==7.2.4
+
 # --- Async Tasks & Queue ---
 celery==5.3.6
 redis==5.0.1
@@ -22,9 +24,11 @@ passlib[bcrypt]==1.7.4
 python-dotenv==1.0.1
 
 # --- Video Processing & AI Utils ---
-yt-dlp==2023.11.16       # Download de vídeos
+# Use uma versão recente do yt-dlp para pegar correções de extractors e assinatura
+yt-dlp[ejs]>=2025.01.01       # Download de vídeos com extras (EJS challenge solver)
 ffmpeg-python==0.2.0     # Wrapper para FFmpeg
 moviepy==1.0.3           # Edição programática
+playwright               # Controla navegadores headless (usado por yt-dlp em páginas JS/Cloudflare)
 openai==1.13.3           # Client compatível com Ollama
 
 # --- Utilities ---

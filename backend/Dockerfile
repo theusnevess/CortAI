@@ -20,6 +20,23 @@ RUN apt-get update && apt-get install -y \
     libpq-dev \
     ffmpeg \
     curl \
+    nodejs \
+    npm \
+    quickjs \
+    duktape \
+    libnss3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libxrandr2 \
+    libxss1 \
+    libasound2 \
+    fonts-liberation \
+    libgbm1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libgtk-3-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Instalação de Dependências Python ---
@@ -29,6 +46,9 @@ COPY requirements.txt .
 # Instalamos as libs sem cache para manter a imagem leve
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
+
+# Se o Playwright estiver listado em requirements, instala os navegadores necessários
+RUN python -m playwright install --with-deps
 
 # --- Cópia do Código Fonte ---
 # Copiamos todo o conteúdo da pasta backend para dentro do container
