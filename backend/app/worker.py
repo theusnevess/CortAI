@@ -9,8 +9,17 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 celery_app = Celery(
     "cortai_worker",    # 'cortai_worker' é o nome interno da aplicação
     broker=REDIS_URL,   # Onde as tarefas são enfileiradas (Redis)
-    backend=REDIS_URL   # Onde os resultados são salvos (Redis)
+    backend=REDIS_URL,  # Onde os resultados são salvos (Redis)
+
+    # Inclui explicitamente o módulo de tasks para garantir que o worker
+    # registre tarefas definidas em `app.tasks.*` (ex: collector.process_video)
+    include=[
+        "app.tasks.collector_tasks",
+    ]
 )
+
+# Autodiscover tasks também (compatibilidade extra)
+celery_app.autodiscover_tasks(["app.tasks"], force=True)
 
 # Configurações de robustez e segurança
 celery_app.conf.update(
