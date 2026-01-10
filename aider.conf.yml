@@ -1,0 +1,11 @@
+model: ollama/qwen2.5-coder:7b
+
+edit-format: diff
+
+pretty: true
+show-diffs: true
+
+auto-commits: false
+dirty-commits: false
+
+git: true
