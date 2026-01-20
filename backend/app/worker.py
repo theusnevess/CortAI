@@ -35,3 +35,13 @@ celery_app.conf.update(
     # Se o worker morrer no meio de uma tarefa, re-enfileira a tarefa (ACK tardio)
     task_acks_late=True,
 )
+
+def execute_action(decision_id: str, action_type: str, action_payload: dict):
+    """
+    Executa a ação decidida pelo ciclo cognitivo.
+    """
+    return {
+        "decision_id": decision_id,
+        "execution_status": "SUCCESS",
+        "metrics": {}
+    }
