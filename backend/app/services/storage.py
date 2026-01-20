@@ -129,3 +129,18 @@ class MinioService:
 
             # Relança o erro para que o Worker saiba que a tarefa falhou
             raise e
+
+    def download_file(self, object_name: str, file_path: str):
+        """
+        Baixa um arquivo do MinIO para o disco local.
+
+        Parâmetros:
+        - object_name: nome do objeto no bucket (ex: raw/video.mp4)
+        - file_path: caminho local onde salvar (ex: /tmp/video.mp4)
+        """
+        try:
+            self.client.fget_object(self.bucket_name, object_name, file_path)
+            return file_path
+        except S3Error as e:
+            print(f"Erro no download do MinIO: {e}")
+            raise e

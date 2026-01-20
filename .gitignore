@@ -58,3 +58,4 @@ minio_data/
 ollama_data/
 
 cookies.txt
+.aider*

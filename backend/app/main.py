@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.endpoints import videos
+from app.cognitive_core import run_cognitive_cycle
+from app.worker import execute_action
 
 # --- Inicialização da Aplicação ---
 # Criando a instância principal do FastAPI.
@@ -61,3 +63,16 @@ def health_check():
             "api": "running",
         }
     }
+
+# Ponto único de entrada da observação
+@app.post("/observe")
+def observe(payload: dict):
+    """
+    Ponto de entrada para observações externas.
+    Recebe uma observação via payload JSON e inicia um ciclo cognitivo.
+    """
+    run_cognitive_cycle(
+        observation_payload=payload,
+        executor_callback=execute_action
+    )
+    return {"status": "accepted"} # Retorna 202 Accepted para indicar que a observação foi recebida e está sendo processada
