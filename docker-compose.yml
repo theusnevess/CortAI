@@ -1,45 +1,73 @@
+version: "3.9"
+
 services:
-  # --- Cérebro & API (FastAPI) ---
+
+  # ===============================
+  # API – FastAPI
+  # ===============================
   api:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: cortai_api
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
     volumes:
       - ./backend:/app
     ports:
       - "8000:8000"
-    env_file: .env
+    env_file:
+      - .env
     depends_on:
       - db
       - redis
       - minio
+    restart: unless-stopped
 
-  # --- Operários (Celery Worker) ---
+  # ===============================
+  # Worker – Celery
+  # ===============================
   worker:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: cortai_worker
-    command: celery -A app.worker.celery_app worker --loglevel=info
+    command: >
+      celery
+      -A app.worker.celery_app
+      worker
+      --loglevel=info
+      --concurrency=1
     volumes:
       - ./backend:/app
-    env_file: .env
+    env_file:
+      - .env
     depends_on:
       - redis
       - db
+    restart: unless-stopped
 
-  # --- Banco de Dados (PostgreSQL) ---
+  # ===============================
+  # PostgreSQL
+  # ===============================
   db:
     image: postgres:16-alpine
     container_name: cortai_db
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
     ports:
       - "5432:5432"
-    environment:
-      - POSTGRES_USER=${DB_USER}
-      - POSTGRES_PASSWORD=${DB_PASSWORD}
-      - POSTGRES_DB=${DB_NAME}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
 
-  # --- Fila de Mensagens (Redis) ---
+  # ===============================
+  # Redis
+  # ===============================
   redis:
     image: redis:7-alpine
     container_name: cortai_redis
@@ -47,29 +75,36 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    restart: unless-stopped
 
-  # --- Storage (MinIO) ---
+  # ===============================
+  # MinIO
+  # ===============================
   minio:
     image: minio/minio:latest
     container_name: cortai_minio
-    ports:
-      - "9000:9000"
-      - "9001:9001"
+    command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
     volumes:
       - minio_data:/data
+    restart: unless-stopped
 
-  # --- IA Local (Ollama) ---
+  # ===============================
+  # Ollama (LLMs locais)
+  # ===============================
   ollama:
     image: ollama/ollama:latest
     container_name: cortai_ollama
     ports:
-      - "11434:11434"
+      - "11435:11434"
     volumes:
       - ollama_data:/root/.ollama
+    restart: unless-stopped
 
 volumes:
   postgres_data:

@@ -1,84 +1,49 @@
 # =========================================================
-# CortAI Backend - Dockerfile (Produção)
-# Python 3.11 + FFmpeg + Whisper + Playwright
+# CortAI - Dockerfile 
 # =========================================================
 
 FROM python:3.11-slim
 
 # -------------------------
-# Variáveis de ambiente
+# Environment
 # -------------------------
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_NO_CACHE_DIR=1
 
 # -------------------------
-# Diretório de trabalho
+# Workdir
 # -------------------------
 WORKDIR /app
 
 # -------------------------
-# Dependências do sistema
+# System dependencies
 # -------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # Build / Python native deps
     build-essential \
-    pkg-config \
-    libpq-dev \
-    curl \
-    ca-certificates \
-
-    # FFmpeg + PyAV deps
     ffmpeg \
-    libavcodec-dev \
-    libavformat-dev \
-    libavdevice-dev \
-    libavfilter-dev \
-    libavutil-dev \
-    libswresample-dev \
-    libswscale-dev \
-
-    # Playwright runtime deps
-    libnss3 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxrandr2 \
-    libgbm1 \
-    libasound2 \
-    libpangocairo-1.0-0 \
-    libgtk-3-0 \
-
+    libsndfile1 \
+    git \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
 # -------------------------
-# Dependências Python
+# Python dependencies
 # -------------------------
 COPY requirements.txt .
-
-RUN python -m pip install --upgrade pip && \
-    python -m pip install -r requirements.txt
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
 # -------------------------
-# Playwright (Browsers)
-# -------------------------
-RUN python -m playwright install --with-deps
-
-# -------------------------
-# Código da aplicação
+# Application code
 # -------------------------
 COPY . .
 
 # -------------------------
-# Porta exposta (FastAPI)
+# Python path
 # -------------------------
-EXPOSE 8000
+ENV PYTHONPATH=/app
 
 # -------------------------
-# Comando padrão
-# (sobrescrito pelo docker-compose se necessário)
+# Default command (debug)
 # -------------------------
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["bash"]

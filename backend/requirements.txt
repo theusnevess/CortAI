@@ -12,6 +12,11 @@ asyncpg==0.29.0          # Driver Async (Alta performance)
 psycopg2-binary==2.9.9   # Driver Sync (Para Celery/Sync tasks)
 
 minio==7.2.4
+numpy
+librosa
+faster-whisper
+pydantic
+soundfile
 
 # --- Async Tasks & Queue ---
 celery==5.3.6
