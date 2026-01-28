@@ -11,13 +11,11 @@ STATE_LOG_PATH = "storage/state_log.jsonl"
 
 def persist_state_from_observation(observation: Observation) -> None:
     """
-    Constrói e persiste um State determinístico derivado
-    exclusivamente de uma única Observation.
-
-    - Append-only
-    - Derivação explícita
-    - Sem leitura de histórico
-    - Sem decisão ou execução
+    Persiste o estado derivado de uma observação em um arquivo de log.
+    Args: 
+        observation (Observation): A observação a partir da qual o estado será derivado.
+    Returns:
+        None
     """
     os.makedirs(os.path.dirname(STATE_LOG_PATH), exist_ok=True)
 

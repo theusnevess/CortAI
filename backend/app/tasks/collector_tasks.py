@@ -73,7 +73,7 @@ def process_video_task(video_id: str, url: str):
 
             logger.info(f"Segmentation finished. Found {len(segments)} segments.")
             
-            # Store segment objects to map IDs later
+            # Armazenar segmentos no banco de dados
             db_segments = []
             for seg in segments:
                 logger.info(f"Persisting segment: {seg}")
@@ -87,33 +87,22 @@ def process_video_task(video_id: str, url: str):
                 db_segments.append(segment)
             session.commit()
             
-            # Refresh to get IDs
+            # Refresh para garantir que os IDs sejam carregados
             for s in db_segments:
                 session.refresh(s)
             
-            # Map internal segment_id (0, 1, 2...) to DB UUID
-            # segments list from SegmenterAgent has 'segment_id': 0, 1...
-            # We need to pass the DB UUID to the transcriber or map it back.
-            # Simpler approach: construct a map based on index since order is preserved
-            
-            # Add DB UUID to the segments list passed to transcriber
+            # Adiciona o db_id aos segmentos para referência futura 
             for i, seg in enumerate(segments):
                 if i < len(db_segments):
                     seg['db_id'] = str(db_segments[i].id)
 
             logger.info("Segments committed to DB.")
-
-            # Validate transcriptions structure
-
-            # Better approach: 
-            # The TranscriberAgent takes 'segment_id' from input and returns it.
-            # So if we put the DB UUID into 'segment_id' field of the input dict, we get it back.
             
-            # Prepare segments for transcriber with UUID as identification
+            # Prepara input para transcrição
             transcriber_input = []
             for i, seg in enumerate(segments):
                 transcriber_input.append({
-                    "segment_id": str(db_segments[i].id), # Pass UUID here!
+                    "segment_id": str(db_segments[i].id), # Usa o UUID do DB
                     "start_time": seg["start_time"],
                     "end_time": seg["end_time"]
                 })
@@ -121,7 +110,7 @@ def process_video_task(video_id: str, url: str):
             transcriber = TranscriberAgent()
             transcriptions = transcriber.transcribe(local_file_path, transcriber_input)
 
-            # Update segments using UUID
+            # Atualizar transcrições no banco de dados
             for trans in transcriptions:
                 seg_uuid = trans['segment_id']
                 text = trans['text']
@@ -129,17 +118,17 @@ def process_video_task(video_id: str, url: str):
                 if text:
                     logger.info(f"Updating segment {seg_uuid} (Type: {type(seg_uuid)}) with text length: {len(text)}")
                     try:
-                        # Ensure UUID format
+                        # Garante que seg_uuid é um UUID válido
                         real_uuid = uuid.UUID(str(seg_uuid))
                         
-                        # Execute Update
+                        # Atualiza usando query update
                         updated_rows = session.query(VideoSegment).filter(VideoSegment.id == real_uuid).update({"transcript_text": text})
                         logger.info(f"Updated {updated_rows} rows for segment {real_uuid}")
                         
                         if updated_rows == 0:
                             logger.warning(f"⚠️ Initial update failed for {real_uuid}. Trying commit and retry.")
                             session.commit()
-                            # Fallback: fetch and update object directly
+                            # Tenta novamente após commit
                             seg_obj = session.get(VideoSegment, real_uuid)
                             if seg_obj:
                                 seg_obj.transcript_text = text
