@@ -288,6 +288,10 @@ def run_once() -> None:
 
         # Processa a ação
         try:
+            state["_action"] = {
+                "type": a["type"],
+                "payload": a.get("payload", {}),
+            }
             state = agent.process(state, a["payload"])
         except TypeError as e:
             _append_jsonl(
