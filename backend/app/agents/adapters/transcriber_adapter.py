@@ -2,21 +2,34 @@ from app.agents.transcriber.service import TranscriberAgent
 
 
 class TranscriberAdapter:
-    def process(self, state: dict, payload: dict) -> dict:
+    def process(self, state: dict, payload: dict | None = None) -> dict:
         """
-        Processa o payload para transcrever áudio usando o TranscriberAgent.
-        Args:   
-            state (dict): O estado atual do processo.
-            payload (dict): O payload contendo os dados necessários para a transcrição.
+        Adapta o estado para o agente transcritor e atualiza o estado com as transcrições.
+        Args:
+            state (dict): O estado atual contendo informações necessárias para a transcrição.
         Returns:
-            dict: O estado atualizado com os resultados da transcrição. 
+            dict: O estado atualizado com as transcrições.
+        Raises: 
+            ValueError: Se campos obrigatórios estiverem ausentes ou se o agente retornar dados inválidos.
         """
-        if "audio_path" not in payload:
-            raise TypeError("MissingField: payload.audio_path")
-        segments = state.get("artifacts", {}).get("segments")
-        if segments is None:
-            raise TypeError("MissingField: state.artifacts.segments")
-        transcriptions = TranscriberAgent().transcribe(payload["audio_path"], segments)
+        payload = payload or state.get("_action", {}).get("payload", {})
+
+        audio_local_path = payload.get("audio_local_path") or state.get("audio_local_path")
+        if not isinstance(audio_local_path, str) or not audio_local_path:
+            raise ValueError("MissingField: audio_local_path")
+
+        segments = state.get("segments")
+        if not isinstance(segments, list):
+            segments = payload.get("segments")
+        if not isinstance(segments, list):
+            raise ValueError("MissingField: segments not found in state or payload")
+
+        transcriptions = TranscriberAgent().transcribe(audio_local_path, segments)
+        if not isinstance(transcriptions, list):
+            raise ValueError("InvalidAgentReturn: TranscriberAgent returned non-list")
+
+        state["transcriptions"] = transcriptions
         state.setdefault("artifacts", {})
-        state["artifacts"]["transcriptions"] = transcriptions
+        state["artifacts"]["transcriptions_ready"] = True
         return state
+
