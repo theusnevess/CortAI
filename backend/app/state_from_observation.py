@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, Any
 
-from schemas.observation import Observation
+from app.schemas.observation import Observation
 
 STATE_LOG_PATH = "storage/state_log.jsonl"
 

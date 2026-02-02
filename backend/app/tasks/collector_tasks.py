@@ -4,8 +4,13 @@ from app.agents.segmenter.service import SegmenterAgent # Importa o agente segme
 from app.agents.transcriber.service import TranscriberAgent # Importa o agente transcritor
 from app.db.models import Video, VideoSegment # Importa os modelos Video e VideoSegment
 from app.services.storage import MinioService # Serviço de armazenamento MinIO
+from app.observations import persist_observation
+from app.schemas.observation import Observation
+from app.state_from_observation import persist_state_from_observation
 import os
 import uuid
+import json
+from datetime import datetime
 from sqlalchemy import create_engine # create_engine para criar engine de DB
 from sqlalchemy.orm import sessionmaker # sessionmaker para criar sessões
 import logging
@@ -13,6 +18,41 @@ import logging
 # Configuração de Logs
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Logs cognitivos
+OUTCOME_LOG_PATH = "storage/outcome_log.jsonl"
+
+
+def _get_last_outcome_id() -> str | None:
+    if not os.path.exists(OUTCOME_LOG_PATH):
+        return None
+    last_id = None
+    with open(OUTCOME_LOG_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(record, dict) and record.get("outcome_id"):
+                last_id = record.get("outcome_id")
+    return last_id
+
+
+def _append_minimal_outcome(outcome_id: str, process_id: str) -> None:
+    os.makedirs(os.path.dirname(OUTCOME_LOG_PATH), exist_ok=True)
+    record = {
+        "outcome_id": outcome_id,
+        "timestamp": datetime.utcnow().isoformat(),
+        "process_id": process_id,
+        "source_decision_id": "",
+        "execution_status": "external",
+        "metrics": {"origin": "celery"},
+    }
+    with open(OUTCOME_LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
 
 # Cria engine síncrona usando DATABASE_URL (para uso em workers)
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://cortai_admin:cortai_secret_pass_123@db:5432/cortai_db")
@@ -151,6 +191,33 @@ def process_video_task(video_id: str, url: str):
 
             # Remove arquivo temporário
             os.remove(local_file_path)
+            # --- Observation (sucesso) ---
+            process_id = f"P_VIDEO_{video_id}"
+            source_outcome_id = _get_last_outcome_id()
+            if not source_outcome_id:
+                source_outcome_id = str(uuid.uuid4())
+                _append_minimal_outcome(source_outcome_id, process_id)
+
+            observation = Observation(
+                observation_id=str(uuid.uuid4()),
+                timestamp=datetime.utcnow().isoformat(),
+                process_id=process_id,
+                source_outcome_id=source_outcome_id,
+                facts={
+                    "video_id": str(video.id),
+                    "source_url": url,
+                    "status_final": video.status,
+                    "raw_video_minio_path": video.file_path,
+                    "segments_count": len(segments),
+                    "transcriptions_count": len(transcriptions),
+                    "duration": video.duration,
+                },
+            )
+            persist_observation(observation)
+            try:
+                persist_state_from_observation(observation)
+            except Exception as e:
+                logger.error(f"Failed to persist state from observation: {e}")
 
         return {"status": "completed", "data": result}
 
@@ -171,6 +238,34 @@ def process_video_task(video_id: str, url: str):
         except Exception:
             pass
         # Repropaga para visibilidade (Celery / logs)
+        # --- Observation (falha) ---
+        try:
+            process_id = f"P_VIDEO_{video_id}"
+            source_outcome_id = _get_last_outcome_id()
+            if not source_outcome_id:
+                source_outcome_id = str(uuid.uuid4())
+                _append_minimal_outcome(source_outcome_id, process_id)
+
+            observation = Observation(
+                observation_id=str(uuid.uuid4()),
+                timestamp=datetime.utcnow().isoformat(),
+                process_id=process_id,
+                source_outcome_id=source_outcome_id,
+                facts={
+                    "video_id": str(video_id),
+                    "source_url": url,
+                    "status_final": "failed",
+                    "error": str(e),
+                    "raw_video_minio_path": (video.file_path if video else None),
+                },
+            )
+            persist_observation(observation)
+            try:
+                persist_state_from_observation(observation)
+            except Exception as e:
+                logger.error(f"Failed to persist state from observation: {e}")
+        except Exception:
+            pass
         raise e
     finally:
         session.close()
