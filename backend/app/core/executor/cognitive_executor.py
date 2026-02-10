@@ -4,6 +4,12 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from contextlib import contextmanager
+
+try:
+    import fcntl
+except Exception:  # pragma: no cover
+    fcntl = None
 
 # Permite imports do pacote "app" quando executado via `python backend/app/cognitive_executor.py`
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +20,21 @@ if str(APP_ROOT) not in sys.path:
 DECISION_LOG_PATH = Path("storage/decision_log.jsonl")
 STATE_LOG_PATH = Path("storage/state_log.jsonl")
 OUTCOME_LOG_PATH = Path("storage/outcome_log.jsonl")
+
+
+@contextmanager
+def _jsonl_lock(path: Path, exclusive: bool):
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        if fcntl is not None:
+            mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            fcntl.flock(lock_file.fileno(), mode)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _utc_iso() -> str:
@@ -32,13 +53,14 @@ def _append_jsonl(path: Path, record: Dict[str, Any]) -> None:
         record (Dict[str, Any]): O registro a ser adicionado.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+", encoding="utf-8") as f:
-        if path.exists() and path.stat().st_size > 0:
-            f.seek(0, 2)
-            f.seek(f.tell() - 1)
-            if f.read(1) != "\n":
-                f.write("\n")
-        f.write(json.dumps(record) + "\n")
+    with _jsonl_lock(path, exclusive=True):
+        with path.open("a+", encoding="utf-8") as f:
+            if path.exists() and path.stat().st_size > 0:
+                f.seek(0, 2)
+                f.seek(f.tell() - 1)
+                if f.read(1) != "\n":
+                    f.write("\n")
+            f.write(json.dumps(record) + "\n")
 
 
 def _append_state(state: Dict[str, Any]) -> None:
@@ -60,10 +82,11 @@ def _read_last_jsonl_record(path: Path) -> Optional[Dict[str, Any]]:
     if not path.exists():
         return None
     last = None
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                last = line
+    with _jsonl_lock(path, exclusive=False):
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    last = line
     return json.loads(last) if last else None
 
 
