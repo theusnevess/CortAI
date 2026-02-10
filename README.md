@@ -113,3 +113,5 @@ Nenhuma integração externa deve ser feita antes disso.
 Este projeto não é um playground experimental.
 
 Qualquer alteração fora do fluxo definido quebra garantias arquiteturais e invalida rastreabilidade.
+
+---
