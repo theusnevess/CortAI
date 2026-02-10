@@ -18,6 +18,15 @@ jobs:
 
       - name: Compose up (api + db)
         run: |
+          if [ ! -f .env ]; then
+            cat > .env <<'EOF'
+DB_NAME=cortai_db
+DB_USER=cortai_admin
+DB_PASSWORD=cortai_secret_pass_123
+MINIO_ROOT_USER=minioadmin
+MINIO_ROOT_PASSWORD=minioadmin123
+EOF
+          fi
           docker compose up -d --build db cortai_api
           sleep 10
 
