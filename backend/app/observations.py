@@ -1,31 +1,35 @@
 import json
+import logging
 import os
-from typing import Optional
-from datetime import datetime
 from contextlib import contextmanager
+from datetime import datetime
 
-# Importa fcntl para bloqueio de arquivos, mas lida com a ausência em sistemas não Unix (como Windows) definindo fcntl como None se a importação falhar. 
-# O bloqueio de arquivos é usado para garantir que apenas um processo acesse um arquivo JSONL específico por vez, evitando corrupção de dados em cenários de concorrência.
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.db.models import ObservationRecord
+from app.schemas.observation import Observation
+
 try:
     import fcntl
-except Exception:  
+except Exception:
     fcntl = None
-
-from app.schemas.observation import Observation
 
 AUDIT_LOG_PATH = "storage/audit_log.jsonl"
 OUTCOME_LOG_PATH = "storage/outcome_log.jsonl"
 OBSERVATION_LOG_PATH = "storage/observation_log.jsonl"
 
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://cortai_admin:cortai_secret_pass_123@db:5432/cortai_db",
+)
+_engine = None
+_SessionLocal = None
+logger = logging.getLogger(__name__)
+
 
 @contextmanager
 def _jsonl_lock(path: str, exclusive: bool):
-    """
-    Context manager para criar um bloqueio baseado em arquivo para operações de leitura e escrita em arquivos JSONL. O bloqueio é implementado usando a biblioteca fcntl, que é compatível com sistemas Unix. O bloqueio pode ser exclusivo (para escrita) ou compartilhado (para leitura), dependendo do parâmetro 'exclusive'. O contexto garante que o bloqueio seja adquirido antes de acessar o arquivo e liberado após a operação, mesmo que ocorra uma exceção durante o acesso ao arquivo.      
-    Args:
-        path (str): O caminho do arquivo JSONL para o qual o bloqueio deve ser criado.
-        exclusive (bool): Indica se o bloqueio deve ser exclusivo (True) para escrita ou compartilhado (False) para leitura.
-    """
     lock_dir = os.path.join("storage", "locks")
     os.makedirs(lock_dir, exist_ok=True)
     lock_path = os.path.join(lock_dir, f"{os.path.basename(path)}.lock")
@@ -41,10 +45,6 @@ def _jsonl_lock(path: str, exclusive: bool):
 
 
 def _outcome_exists(outcome_id: str) -> bool:
-    """
-    Verifica se um Outcome com o ID informado existe no audit_log.
-    Garante rastreabilidade Observation -> Outcome.
-    """
     def _scan_log(path: str, require_type: bool) -> bool:
         if not os.path.exists(path):
             return False
@@ -71,11 +71,44 @@ def _outcome_exists(outcome_id: str) -> bool:
     return _scan_log(OUTCOME_LOG_PATH, require_type=False)
 
 
+def _persist_observation_postgres(observation: Observation) -> None:
+    global _engine, _SessionLocal
+    if _engine is None:
+        _engine = create_engine(DATABASE_URL)
+        _SessionLocal = sessionmaker(bind=_engine)
+
+    session = _SessionLocal()
+    try:
+        ts = datetime.fromisoformat(observation.timestamp.replace("Z", "+00:00"))
+        existing = session.get(ObservationRecord, observation.observation_id)
+        if existing:
+            existing.timestamp = ts
+            existing.process_id = observation.process_id
+            existing.source_outcome_id = observation.source_outcome_id
+            existing.facts = observation.facts or {}
+        else:
+            session.add(
+                ObservationRecord(
+                    observation_id=observation.observation_id,
+                    timestamp=ts,
+                    process_id=observation.process_id,
+                    source_outcome_id=observation.source_outcome_id,
+                    facts=observation.facts or {},
+                )
+            )
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.error(
+            "Failed to persist Observation in Postgres observation_id=%s err=%s",
+            observation.observation_id,
+            e,
+        )
+    finally:
+        session.close()
+
+
 def persist_observation(observation: Observation) -> None:
-    """
-    Persiste uma Observation de forma append-only,
-    apenas se o Outcome de origem existir.
-    """
     if not _outcome_exists(observation.source_outcome_id):
         return
 
@@ -84,3 +117,5 @@ def persist_observation(observation: Observation) -> None:
     with _jsonl_lock(OBSERVATION_LOG_PATH, exclusive=True):
         with open(OBSERVATION_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(observation.dict()) + "\n")
+
+    _persist_observation_postgres(observation)
