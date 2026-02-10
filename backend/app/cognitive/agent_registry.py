@@ -1,10 +1,4 @@
-# backend/app/cognitive/agent_registry.py
-
-from app.agents.adapters.collector_adapter import CollectorAdapter
-from app.agents.adapters.segment_adapter import SegmenterAdapter
-from app.agents.adapters.transcriber_adapter import TranscriberAdapter
-from app.agents.adapters.file_writer_adapter import FileWriterAgentAdapter
-from app.agents.adapters.audio_extractor_adapter import AudioExtractorAdapter
+import importlib
 
 
 class AgentRegistry:
@@ -13,11 +7,11 @@ class AgentRegistry:
         Inicializa o mapeamento de tipos de ação para seus respectivos adaptadores.
         """
         self._map = {
-            "collect_video": CollectorAdapter,
-            "segment_audio": SegmenterAdapter,
-            "transcribe_segments": TranscriberAdapter,
-            "write_artifact": FileWriterAgentAdapter,
-            "extract_audio": AudioExtractorAdapter,
+            "collect_video": "app.agents.adapters.collector_adapter:CollectorAdapter",
+            "extract_audio": "app.agents.adapters.audio_extractor_adapter:AudioExtractorAdapter",
+            "segment_audio": "app.agents.adapters.segment_adapter:SegmenterAdapter",
+            "transcribe_segments": "app.agents.adapters.transcriber_adapter:TranscriberAdapter",
+            "write_artifact": "app.agents.adapters.file_writer_adapter:FileWriterAgentAdapter",
         }
 
     def resolve(self, action):
@@ -33,5 +27,7 @@ class AgentRegistry:
         action_type = action.get("type")
         if action_type not in self._map:
             raise ValueError(f"Unknown action type: {action_type}")
-        return self._map[action_type]()
-
+        module_path, class_name = self._map[action_type].split(":", 1)
+        module = importlib.import_module(module_path)
+        cls = getattr(module, class_name)
+        return cls()
