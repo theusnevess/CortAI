@@ -1,6 +1,8 @@
 # CortAI
 
-CortAI é um **sistema cognitivo determinístico, auditável e extensível**, projetado para executar ciclos de decisão rastreáveis a partir de observações externas, mantendo **separação rígida de responsabilidades** entre núcleo, observação, planejamento e execução. Este repositório prioriza **arquitetura antes de comportamento**. Nenhuma camada possui inteligência implícita fora do que está explicitamente contratado em documentação.
+CortAI é um **sistema cognitivo determinístico, auditável e extensível**, projetado para executar ciclos de decisão rastreáveis a partir de observações externas, mantendo **separação rígida de responsabilidades** entre núcleo, observação, planejamento e execução.
+
+Este repositório prioriza **arquitetura antes de comportamento**. Nenhuma camada possui inteligência implícita fora do que está explicitamente contratado em documentação.
 
 ---
 
@@ -113,7 +115,3 @@ Nenhuma integração externa deve ser feita antes disso.
 Este projeto não é um playground experimental.
 
 Qualquer alteração fora do fluxo definido quebra garantias arquiteturais e invalida rastreabilidade.
-
----
-
-
