@@ -8,11 +8,12 @@ from app.observations import persist_observation
 from app.schemas.observation import Observation
 from app.state_from_observation import persist_state_from_observation
 from app.cognitive.cognitive_loop_runner import run_loop as run_cognitive_loop
+from app.cognitive_metrics import aggregate_daily_metrics_for_date
 import os
 import uuid
 import json
 from contextlib import contextmanager # Importa contextmanager para criar gerenciadores de contexto personalizados
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import create_engine # create_engine para criar engine de DB
 from sqlalchemy.orm import sessionmaker # sessionmaker para criar sessões
 import logging # Importa logging para registro de logs
@@ -208,6 +209,36 @@ def cognitive_loop_task(process_id: str, max_steps: int | None = None):
         if fcntl is not None:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
         lock_handle.close()
+
+
+@celery_app.task(name="cognitive.aggregate_daily_metrics")
+def aggregate_daily_metrics(target_date: str | None = None):
+    """
+    Agrega métricas diárias a partir de Observations persistidas no Postgres.
+    """
+    try:
+        if target_date:
+            metric_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+        else:
+            metric_date = (datetime.utcnow() - timedelta(days=1)).date()
+    except Exception as e:
+        logger.error(f"COGNITIVE_METRICS invalid target_date={target_date} err={e}")
+        return {"status": "error", "error": "invalid_target_date", "target_date": target_date}
+
+    try:
+        payload = aggregate_daily_metrics_for_date(metric_date)
+        logger.info(
+            "COGNITIVE_METRICS done date=%s total=%s completed=%s failed=%s blocked=%s",
+            metric_date.isoformat(),
+            payload["total_runs"],
+            payload["completed_runs"],
+            payload["failed_runs"],
+            payload["blocked_runs"],
+        )
+        return {"status": "done", **payload, "metric_date": metric_date.isoformat()}
+    except Exception as e:
+        logger.error(f"COGNITIVE_METRICS error date={metric_date.isoformat()} err={e}")
+        return {"status": "error", "error": str(e), "metric_date": metric_date.isoformat()}
 
 
 # Cria engine síncrona usando DATABASE_URL (para uso em workers)
