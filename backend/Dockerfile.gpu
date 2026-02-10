@@ -1,0 +1,55 @@
+# =========================================================
+# CortAI - GPU Dockerfile (NVIDIA CUDA support)
+# =========================================================
+
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+# -------------------------
+# Environment
+# -------------------------
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# -------------------------
+# Workdir
+# -------------------------
+WORKDIR /app
+
+# -------------------------
+# System dependencies + Python
+# -------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3-pip \
+    build-essential \
+    ffmpeg \
+    libsndfile1 \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3
+
+# -------------------------
+# Python dependencies
+# -------------------------
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# -------------------------
+# Application code
+# -------------------------
+COPY . .
+
+# -------------------------
+# Python path
+# -------------------------
+ENV PYTHONPATH=/app
+
+# -------------------------
+# Default command (debug)
+# -------------------------
+CMD ["bash"]

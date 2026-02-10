@@ -27,19 +27,19 @@ services:
     restart: unless-stopped
 
   # ===============================
-  # Worker – Celery
+  # Worker – Celery (GPU enabled)
   # ===============================
   worker:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.gpu
     container_name: cortai_worker
     command: >
       celery
       -A app.worker.celery_app
       worker
       --loglevel=info
-      --concurrency=1
+      --concurrency=4
     volumes:
       - ./backend:/app
     env_file:
@@ -48,6 +48,13 @@ services:
       - redis
       - db
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   # ===============================
   # PostgreSQL
