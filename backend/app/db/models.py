@@ -1,6 +1,6 @@
 import uuid # Gerar UUIDs únicos
 from datetime import datetime # Marcação de tempo
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Float, Integer, Text, JSON # Tipos de colunas
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Float, Integer, Text, JSON, Index # Tipos de colunas
 from sqlalchemy.dialects.postgresql import UUID # Tipo UUID específico do PostgreSQL
 from sqlalchemy.orm import relationship # Relacionamentos entre tabelas 
 from app.db.base import Base # Importa a base dos modelos 
@@ -90,3 +90,33 @@ class Clip(Base):
     created_at = Column(DateTime, default=datetime.utcnow) # Data de criação do clipe
     
     video = relationship("Video", back_populates="clips") # Relacionamento com Vídeo
+
+
+# --- Tabela de Execuções Cognitivas (Resumo) ---
+class CognitiveRun(Base):
+    __tablename__ = "cognitive_runs"
+
+    # process_id é único por execução cognitiva
+    process_id = Column(String, primary_key=True)
+
+    pipeline_status = Column(String, nullable=False, default="unknown")
+    termination_reason = Column(String, nullable=True)
+    terminated = Column(Boolean, default=False)
+
+    source_observation_id = Column(String, nullable=False)
+    source_outcome_id = Column(String, nullable=True)
+    source_decision_id = Column(String, nullable=True)
+
+    execution_status = Column(String, nullable=True)
+    actions_executed = Column(Integer, nullable=True)
+    last_action_type = Column(String, nullable=True)
+
+    video_id = Column(String, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_cognitive_runs_video_id", "video_id"),
+        Index("ix_cognitive_runs_created_at", "created_at"),
+    )
