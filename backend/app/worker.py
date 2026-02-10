@@ -1,5 +1,6 @@
 import os # Acessa as variáveis de ambiente do SO
-from celery import Celery # Cria um worker capaz de processar tarefas assíncronas
+from celery import Celery
+from celery.schedules import crontab # Cria um worker capaz de processar tarefas assíncronas
 
 # Pega o endereço do Redis das variáveis de ambiente
 # Se não houver variável, usa localhost como fallback do
@@ -34,6 +35,15 @@ celery_app.conf.update(
     
     # Se o worker morrer no meio de uma tarefa, re-enfileira a tarefa (ACK tardio)
     task_acks_late=True,
+    
+    # Agendamento diario da telemetria (ontem UTC)
+    beat_schedule={
+        "cognitive-aggregate-daily-metrics": {
+            "task": "cognitive.aggregate_daily_metrics",
+            "schedule": crontab(hour=0, minute=10),
+            "args": (None,),
+        },
+    },
 )
 
 def execute_action(decision_id: str, action_type: str, action_payload: dict):
@@ -45,3 +55,6 @@ def execute_action(decision_id: str, action_type: str, action_payload: dict):
         "execution_status": "SUCCESS",
         "metrics": {}
     }
+
+
+

@@ -57,6 +57,28 @@ services:
               capabilities: [gpu]
 
   # ===============================
+  # Beat - Celery Scheduler
+  # ===============================
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cortai_beat
+    command: >
+      celery
+      -A app.worker.celery_app
+      beat
+      --loglevel=info
+    volumes:
+      - ./backend:/app
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - db
+    restart: unless-stopped
+
+  # ===============================
   # PostgreSQL
   # ===============================
   db:
