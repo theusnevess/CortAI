@@ -1,7 +1,7 @@
 import uuid # Gerar UUIDs únicos
 from datetime import datetime # Marcação de tempo
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Float, Integer, Text, JSON, Index # Tipos de colunas
-from sqlalchemy.dialects.postgresql import UUID # Tipo UUID específico do PostgreSQL
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Float, Integer, Text, JSON, Date, Numeric, Index # Tipos de colunas
+from sqlalchemy.dialects.postgresql import UUID, JSONB # Tipo UUID específico do PostgreSQL
 from sqlalchemy.orm import relationship # Relacionamentos entre tabelas 
 from app.db.base import Base # Importa a base dos modelos 
 
@@ -120,3 +120,31 @@ class CognitiveRun(Base):
         Index("ix_cognitive_runs_video_id", "video_id"),
         Index("ix_cognitive_runs_created_at", "created_at"),
     )
+
+
+class ObservationRecord(Base):
+    __tablename__ = "observations"
+
+    observation_id = Column(String, primary_key=True)
+    timestamp = Column(DateTime, nullable=False, index=True)
+    process_id = Column(String, nullable=False, index=True)
+    source_outcome_id = Column(String, nullable=False)
+    facts = Column(JSONB, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CognitiveMetricsDaily(Base):
+    __tablename__ = "cognitive_metrics_daily"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    metric_date = Column(Date, nullable=False, unique=True)
+
+    total_runs = Column(Integer, nullable=False)
+    completed_runs = Column(Integer, nullable=False)
+    failed_runs = Column(Integer, nullable=False)
+    blocked_runs = Column(Integer, nullable=False)
+
+    avg_actions_executed = Column(Numeric(5, 2), nullable=True)
+    last_action_type_distribution = Column(JSONB, nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
