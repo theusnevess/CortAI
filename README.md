@@ -90,6 +90,30 @@ A estratégia de testes está documentada em `TEST_STRATEGY.md` e prioriza:
 
 Testes comportamentais só existem **fora** do core.
 
+### Execução Reprodutível (API Metrics)
+
+Os testes de `backend/tests/test_metrics_api.py` dependem de PostgreSQL.
+
+Local (host):
+
+```bash
+PYTHONPATH=backend \
+DATABASE_URL="postgresql://<user>:<pass>@<host>:5432/<db_test>" \
+pytest -q backend/tests/test_metrics_api.py
+```
+
+Container da API (mesmas dependências do CI):
+
+```bash
+docker exec -it cortai_api sh -lc '
+  PYTHONPATH=/app \
+  DATABASE_URL="postgresql://cortai_admin:cortai_secret_pass_123@db:5432/cortai_db" \
+  pytest -q tests/test_metrics_api.py
+'
+```
+
+Recomendado: usar banco dedicado de teste (ex.: `cortai_db_test`).
+
 ---
 
 ## 🚦 Princípios Fundamentais
