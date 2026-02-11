@@ -62,3 +62,10 @@ cookies.txt
 
 # logs/storage locais
 backend/storage/
+
+# Celery beat runtime
+backend/celerybeat-schedule
+backend/celerybeat-schedule.db
+backend/celerybeat-schedule.dat
+backend/celerybeat-schedule.dir
+backend/celerybeat-schedule.bak
