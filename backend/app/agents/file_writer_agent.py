@@ -1,108 +1,73 @@
-import json # Manipula objetos JSON
-import uuid # Gera IDs únicos
-from datetime import datetime # Trabalha com datas e horas
-from pathlib import Path # Manipula caminhos de arquivos e diretórios
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict
 
-# Define caminhos para os arquivos de log e diretório de saída
-DECISION_LOG_PATH = Path("storage/decision_log.jsonl")
-OUTCOME_LOG_PATH = Path("storage/outcome_log.jsonl")
 AGENT_OUTPUT_DIR = Path("storage/agent_output")
 
 
-def read_last_decision():
+def _pipeline_status_from_reason(termination_reason: str) -> str:
     """
-    Lê o último objeto Decision do arquivo de log decision_log.jsonl.
-    Returs
-        dict: O último objeto Decision.
-    """
-    with DECISION_LOG_PATH.open("r", encoding="utf-8") as f:
-        last_line = None
-        for line in f:
-            if line.strip():
-                last_line = line
-        if last_line is None:
-            raise RuntimeError("No decisions found in the log.")
-        return json.loads(last_line)
-
-
-def write_file_from_decision(decision):
-    """
-    Cria um arquivo de texto baseado no objeto Decision.
-    Args:   
-        decision (dict): O objeto Decision.
-    Returns:                
-        filepath (Path): O caminho do arquivo criado.
-    """
-
-    # Garante que o diretório de saída exista
-    AGENT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    file_path = AGENT_OUTPUT_DIR / f"{decision['decision_id']}.txt"
-
-    # Conteúdo do arquivo baseado na decisão
-    content = [
-        f"process_id: {decision.get('process_id')}",
-        f"decision_id: {decision.get('decision_id')}",
-        f"decision_type: {decision.get('decision_type')}",
-        f"rationale: {decision.get('rationale')}",
-        f"execution_timestamp: {datetime.utcnow().isoformat()}",
-    ]
-
-    # Escreve o conteúdo no arquivo
-    with file_path.open("w", encoding="utf-8") as f:
-        f.write("\n".join(content))
-
-    return file_path
-
-
-def build_outcome(decision, file_path):
-    """
-    Constrói um objeto Outcome baseado na decisão e no arquivo criado.
-    Args:   
-        decision (dict): O objeto Decision.
-        file_path (Path): O caminho do arquivo criado.
-    Returns:                
-        dict: O objeto Outcome.  
-    """
-
-    # Constrói o objeto Outcome
-    return {
-        "outcome_id": str(uuid.uuid4()),
-        "timestamp": datetime.utcnow().isoformat(),
-        "process_id": decision["process_id"],
-        "source_decision_id": decision["decision_id"],
-        "execution_status": "success",
-        "metrics": {
-            "file_created": True,
-            "path": str(file_path),
-        },
-    }
-
-
-def append_outcome(outcome):
-    """
-    Adiciona um Outcome ao arquivo de log outcome_log.jsonl.
+    Normaliza o status do pipeline a partir da razao de termino.
     Args:
-        outcome (dict): O objeto Outcome a ser adicionado.
+        termination_reason (str): Razao de termino do pipeline.
+    Returns:
+        str: Status canonico do pipeline.
     """
-    
-    OUTCOME_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with OUTCOME_LOG_PATH.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(outcome) + "\n")
+    if termination_reason == "video_failed":
+        return "failed"
+    if termination_reason == "pipeline_complete":
+        return "completed"
+    return "truncated"
 
 
-def main():
+def write_manifest(state: Dict[str, Any], payload: Dict[str, Any] | None = None) -> Path:
     """
-    Função principal que executa o agente de escrita de arquivos.
-    1. Lê a última decisão do log.  
-    2. Cria um arquivo baseado na decisão.
-    3. Constrói um objeto Outcome.  
-    4. Adiciona o Outcome ao log.
+    Gera um manifest deterministico do pipeline em formato JSON.
+    O arquivo e idempotente por decision_id.
+    Args:
+        state (Dict[str, Any]): Estado atual do processo.
+        payload (Dict[str, Any] | None): Payload da acao (pode conter decision_id e reason).
+    Returns:
+        Path: Caminho do manifest criado.
     """
-    decision = read_last_decision()
-    file_path = write_file_from_decision(decision)
-    outcome = build_outcome(decision, file_path)
-    append_outcome(outcome)
+    payload = payload or {}
+    action_meta = state.get("_action", {}) if isinstance(state, dict) else {}
+    decision_id = payload.get("decision_id") or action_meta.get("decision_id")
+    process_id = payload.get("process_id") or action_meta.get("process_id") or state.get("process_id")
+    termination_reason = payload.get("reason") or (state.get("artifacts") or {}).get("termination_reason")
+    pipeline_status = _pipeline_status_from_reason(str(termination_reason or ""))
 
+    artifacts = state.get("artifacts") or {}
+    raw_video_path = artifacts.get("raw_video_minio_path")
+    audio_local_path = artifacts.get("audio_local_path")
+    segments = state.get("segments") if isinstance(state.get("segments"), list) else []
+    transcriptions = (
+        state.get("transcriptions") if isinstance(state.get("transcriptions"), list) else []
+    )
 
-if __name__ == "__main__":
-    main()
+    AGENT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if not isinstance(decision_id, str) or not decision_id:
+        raise ValueError("MissingField: decision_id")
+
+    manifest_path = AGENT_OUTPUT_DIR / f"{decision_id}.json"
+    manifest = {
+        "process_id": process_id,
+        "decision_id": decision_id,
+        "pipeline_status": pipeline_status,
+        "termination_reason": termination_reason,
+        "segments_count": len(segments),
+        "transcriptions_count": len(transcriptions),
+        "artifact_paths": {
+            "manifest_path": str(manifest_path),
+        },
+        "artifacts": {
+            "raw_video_minio_path": raw_video_path,
+            "audio_local_path": audio_local_path,
+        },
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    # Idempotente por decision_id: sobrescreve o mesmo manifest de forma deterministica.
+    with manifest_path.open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=True)
+    return manifest_path

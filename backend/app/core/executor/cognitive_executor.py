@@ -314,6 +314,9 @@ def run_once() -> None:
             state["_action"] = {
                 "type": a["type"],
                 "payload": a.get("payload", {}),
+                # Metadados para artefatos finais (manifest).
+                "decision_id": dec.get("decision_id"),
+                "process_id": dec.get("process_id"),
             }
             state = agent.process(state, a["payload"])
         except TypeError as e:
