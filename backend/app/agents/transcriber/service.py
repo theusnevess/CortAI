@@ -1,4 +1,4 @@
-﻿from typing import List, Dict
+from typing import List, Dict
 import os
 import numpy as np
 import librosa
@@ -17,6 +17,14 @@ class TranscriberAgent:
         print(f"[TRANSCRIBER] device={device} compute_type={compute_type} model_size={model_size}")
 
     def transcribe(self, audio_path: str, segments: List[Dict]) -> List[Dict]:
+        """
+        Transcreve segmentos de audio usando Whisper.
+        Args:
+            audio_path: Caminho do arquivo de audio completo.
+            segments: Lista de segmentos com segment_id, start_time e end_time.
+        Returns:
+            Lista com segment_id, start_time, end_time e text.
+        """
         y, sr = librosa.load(audio_path, sr=None, mono=True)
         results: List[Dict] = []
 

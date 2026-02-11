@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 
 @contextmanager
 def _jsonl_lock(path: str, exclusive: bool):
+    """
+    Aplica lock em arquivo JSONL para leitura/escrita concorrente segura.
+    Args:
+        path: Caminho do arquivo JSONL.
+        exclusive: True para lock exclusivo (escrita), False para lock compartilhado.
+    """
     lock_dir = os.path.join("storage", "locks")
     os.makedirs(lock_dir, exist_ok=True)
     lock_path = os.path.join(lock_dir, f"{os.path.basename(path)}.lock")
@@ -45,6 +51,10 @@ def _jsonl_lock(path: str, exclusive: bool):
 
 
 def _outcome_exists(outcome_id: str) -> bool:
+    """
+    Verifica se source_outcome_id existe em audit_log ou outcome_log.
+    """
+
     def _scan_log(path: str, require_type: bool) -> bool:
         if not os.path.exists(path):
             return False
@@ -72,6 +82,9 @@ def _outcome_exists(outcome_id: str) -> bool:
 
 
 def _persist_observation_postgres(observation: Observation) -> None:
+    """
+    Persiste Observation no Postgres com semantica de upsert por observation_id.
+    """
     global _engine, _SessionLocal
     if _engine is None:
         _engine = create_engine(DATABASE_URL)
@@ -109,6 +122,9 @@ def _persist_observation_postgres(observation: Observation) -> None:
 
 
 def persist_observation(observation: Observation) -> None:
+    """
+    Persiste Observation em JSONL e Postgres mantendo guardrail de causalidade.
+    """
     if not _outcome_exists(observation.source_outcome_id):
         return
 
