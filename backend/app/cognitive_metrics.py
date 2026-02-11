@@ -2,10 +2,11 @@ import json
 import logging
 import os
 import uuid
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from typing import Any
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -22,6 +23,7 @@ DATABASE_URL = os.getenv(
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 
+DECISION_LOG_PATH = "storage/decision_log.jsonl"
 OUTCOME_LOG_PATH = "storage/outcome_log.jsonl"
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,12 @@ except Exception:
 
 @contextmanager
 def _jsonl_lock(path: str, exclusive: bool):
+    """
+    Bloqueia arquivo JSONL para leitura/escrita concorrente segura.
+    Args:
+        path (str): Caminho do arquivo JSONL.
+        exclusive (bool): True para lock exclusivo, False para compartilhado.
+    """
     lock_dir = os.path.join("storage", "locks")
     os.makedirs(lock_dir, exist_ok=True)
     lock_path = os.path.join(lock_dir, f"{os.path.basename(path)}.lock")
@@ -49,6 +57,12 @@ def _jsonl_lock(path: str, exclusive: bool):
 
 
 def _append_minimal_outcome(outcome_id: str, process_id: str) -> None:
+    """
+    Adiciona outcome minimo para manter guardrail de observacoes.
+    Args:
+        outcome_id (str): ID do outcome.
+        process_id (str): ID do processo.
+    """
     os.makedirs(os.path.dirname(OUTCOME_LOG_PATH), exist_ok=True)
     record = {
         "outcome_id": outcome_id,
@@ -64,6 +78,12 @@ def _append_minimal_outcome(outcome_id: str, process_id: str) -> None:
 
 
 def _alert_already_emitted(session, metric_date: date) -> bool:
+    """
+    Verifica se ja existe alerta para a data.
+    Args:
+        session: Sessao SQLAlchemy.
+        metric_date (date): Data alvo.
+    """
     target = metric_date.isoformat()
     existing = (
         session.query(ObservationRecord)
@@ -74,14 +94,83 @@ def _alert_already_emitted(session, metric_date: date) -> bool:
     return existing is not None
 
 
+def _alert_count_for_date(session, metric_date: date) -> int:
+    """
+    Conta alertas existentes para a data.
+    Args:
+        session: Sessao SQLAlchemy.
+        metric_date (date): Data alvo.
+    Returns:
+        int: Quantidade de alertas no dia.
+    """
+    target = metric_date.isoformat()
+    count = (
+        session.query(ObservationRecord)
+        .filter(ObservationRecord.facts["event_type"].astext == "cognitive_metrics_alert")
+        .filter(ObservationRecord.facts["metric_date"].astext == target)
+        .count()
+    )
+    return int(count or 0)
+
+
 def _safe_int(value) -> int:
+    """
+    Converte valor para int com fallback seguro.
+    """
     try:
         return int(value)
     except Exception:
         return 0
 
 
+def _parse_ts(value: str) -> datetime | None:
+    """
+    Faz parse de timestamp ISO em UTC.
+    """
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _read_jsonl_rows(path: str) -> list[dict[str, Any]]:
+    """
+    Le registros JSONL com lock compartilhado.
+    """
+    if not os.path.exists(path):
+        return []
+    rows: list[dict[str, Any]] = []
+    with _jsonl_lock(path, exclusive=False):
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        rows.append(obj)
+                except Exception:
+                    continue
+    return rows
+
+
+def _p95(values: list[int]) -> int:
+    """
+    Calcula p95 por nearest-rank.
+    """
+    if not values:
+        return 0
+    values_sorted = sorted(values)
+    k = int(0.95 * (len(values_sorted) - 1))
+    return int(values_sorted[k])
+
+
 def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
+    """
+    Agrega metricas diarias a partir de Observations (Postgres).
+    Aplica dedupe por process_id e faz upsert em cognitive_metrics_daily.
+    """
     start_dt = datetime.combine(metric_date, time.min)
     end_dt = start_dt + timedelta(days=1)
 
@@ -116,8 +205,15 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
         completed_runs = 0
         failed_runs = 0
         blocked_runs = 0
+        truncated_runs = 0
         actions_total = 0
         action_counter: Counter[str] = Counter()
+
+        max_steps_env = os.getenv("COGNITIVE_LOOP_MAX_STEPS", "10")
+        try:
+            max_steps = int(max_steps_env)
+        except Exception:
+            max_steps = 10
 
         for row in loop_finished:
             facts = row.facts or {}
@@ -136,11 +232,70 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
             action_type = facts.get("last_action_type") or "unknown"
             action_counter[action_type] += 1
 
+            terminated = facts.get("terminated")
+            actions_executed = _safe_int(facts.get("actions_executed"))
+            if (
+                execution_status == "success"
+                and terminated is not True
+                and actions_executed >= max_steps
+            ):
+                truncated_runs += 1
+
         avg_actions = Decimal("0.00")
         if total_runs > 0:
             avg_actions = (Decimal(actions_total) / Decimal(total_runs)).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP
             )
+
+        truncated_ratio = Decimal("0.00")
+        if total_runs > 0:
+            truncated_ratio = (Decimal(truncated_runs) / Decimal(total_runs)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+
+        # latency_by_action a partir de decision/outcome logs (janela UTC)
+        decisions = _read_jsonl_rows(DECISION_LOG_PATH)
+        outcomes = _read_jsonl_rows(OUTCOME_LOG_PATH)
+
+        decision_ts_by_id: dict[str, datetime] = {}
+        for d in decisions:
+            ts = _parse_ts(str(d.get("timestamp", "")))
+            if not ts:
+                continue
+            if not (start_dt <= ts < end_dt):
+                continue
+            did = d.get("decision_id")
+            if isinstance(did, str) and did:
+                decision_ts_by_id[did] = ts
+
+        latencies_ms: dict[str, list[int]] = defaultdict(list)
+        for o in outcomes:
+            ots = _parse_ts(str(o.get("timestamp", "")))
+            if not ots:
+                continue
+            if not (start_dt <= ots < end_dt):
+                continue
+            did = o.get("source_decision_id")
+            if not isinstance(did, str) or did not in decision_ts_by_id:
+                continue
+            metrics = o.get("metrics") or {}
+            action_type = metrics.get("last_action_type") or "unknown"
+            dts = decision_ts_by_id[did]
+            delta_ms = int((ots - dts).total_seconds() * 1000)
+            if delta_ms < 0:
+                continue
+            latencies_ms[str(action_type)].append(delta_ms)
+
+        latency_by_action: dict[str, dict[str, int]] = {}
+        for action_type, values in latencies_ms.items():
+            if not values:
+                continue
+            avg_ms = int(sum(values) / max(len(values), 1))
+            latency_by_action[action_type] = {
+                "n": len(values),
+                "avg_ms": avg_ms,
+                "p95_ms": _p95(values),
+            }
 
         payload = {
             "metric_date": metric_date,
@@ -148,8 +303,11 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
             "completed_runs": completed_runs,
             "failed_runs": failed_runs,
             "blocked_runs": blocked_runs,
+            "truncated_runs": truncated_runs,
+            "truncated_ratio": truncated_ratio,
             "avg_actions_executed": avg_actions,
             "last_action_type_distribution": dict(action_counter),
+            "latency_by_action": latency_by_action,
         }
 
         existing = (
@@ -162,8 +320,11 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
             existing.completed_runs = payload["completed_runs"]
             existing.failed_runs = payload["failed_runs"]
             existing.blocked_runs = payload["blocked_runs"]
+            existing.truncated_runs = payload["truncated_runs"]
+            existing.truncated_ratio = payload["truncated_ratio"]
             existing.avg_actions_executed = payload["avg_actions_executed"]
             existing.last_action_type_distribution = payload["last_action_type_distribution"]
+            existing.latency_by_action = payload["latency_by_action"]
         else:
             session.add(
                 CognitiveMetricsDaily(
@@ -173,8 +334,11 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
                     completed_runs=payload["completed_runs"],
                     failed_runs=payload["failed_runs"],
                     blocked_runs=payload["blocked_runs"],
+                    truncated_runs=payload["truncated_runs"],
+                    truncated_ratio=payload["truncated_ratio"],
                     avg_actions_executed=payload["avg_actions_executed"],
                     last_action_type_distribution=payload["last_action_type_distribution"],
+                    latency_by_action=payload["latency_by_action"],
                 )
             )
         session.commit()
@@ -185,7 +349,16 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
         failed_ratio = (failed_runs / total_runs) if total_runs else 0.0
 
         if total_runs and (blocked_runs > 0 or failed_ratio > 0.2):
-            if not _alert_already_emitted(session, metric_date):
+            max_alerts_raw = os.getenv("COGNITIVE_ALERT_MAX_PER_DAY", "5")
+            try:
+                max_alerts_per_day = int(max_alerts_raw)
+            except Exception:
+                max_alerts_per_day = 5
+
+            current_alerts = _alert_count_for_date(session, metric_date)
+            if current_alerts < max_alerts_per_day and not _alert_already_emitted(
+                session, metric_date
+            ):
                 process_id = f"P_METRICS_DAILY_{metric_date.isoformat()}"
                 source_outcome_id = str(uuid.uuid4())
                 _append_minimal_outcome(source_outcome_id, process_id)

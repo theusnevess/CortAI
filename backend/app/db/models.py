@@ -121,7 +121,7 @@ class CognitiveRun(Base):
         Index("ix_cognitive_runs_created_at", "created_at"),
     )
 
-
+# --- Tabela de Observações (Facts) ---
 class ObservationRecord(Base):
     __tablename__ = "observations"
 
@@ -129,10 +129,10 @@ class ObservationRecord(Base):
     timestamp = Column(DateTime, nullable=False, index=True)
     process_id = Column(String, nullable=False, index=True)
     source_outcome_id = Column(String, nullable=False)
-    facts = Column(JSONB, nullable=False)
+    facts = Column(JSONB, nullable=False)  # Facts sem paths, apenas resumo.
     created_at = Column(DateTime, default=datetime.utcnow)
 
-
+# --- Tabela de Métricas Diárias ---
 class CognitiveMetricsDaily(Base):
     __tablename__ = "cognitive_metrics_daily"
 
@@ -144,7 +144,11 @@ class CognitiveMetricsDaily(Base):
     failed_runs = Column(Integer, nullable=False)
     blocked_runs = Column(Integer, nullable=False)
 
+    truncated_runs = Column(Integer, nullable=False, default=0)  # Runs truncados.
+    truncated_ratio = Column(Numeric(5, 2), nullable=True)  # Razao truncada.
+
     avg_actions_executed = Column(Numeric(5, 2), nullable=True)
     last_action_type_distribution = Column(JSONB, nullable=False)
+    latency_by_action = Column(JSONB, nullable=False, default=dict)  # p95/avg por acao.
 
     created_at = Column(DateTime, default=datetime.utcnow)
