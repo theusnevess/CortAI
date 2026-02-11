@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: ["main", "develop"]
     paths:
+      - "docs/pr_checklist_observability.md"
       - "backend/app/api/v1/endpoints/metrics.py"
       - "backend/app/cognitive_metrics.py"
       - "backend/app/db/models.py"
@@ -14,6 +15,7 @@ on:
   push:
     branches: ["main", "develop"]
     paths:
+      - "docs/pr_checklist_observability.md"
       - "backend/app/api/v1/endpoints/metrics.py"
       - "backend/app/cognitive_metrics.py"
       - "backend/app/db/models.py"
