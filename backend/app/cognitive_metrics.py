@@ -77,21 +77,27 @@ def _append_minimal_outcome(outcome_id: str, process_id: str) -> None:
             f.write(json.dumps(record) + "\n")
 
 
-def _alert_already_emitted(session, metric_date: date) -> bool:
+def _alert_already_emitted(session, metric_date: date, reason: str) -> bool:
     """
-    Verifica se ja existe alerta para a data.
+    Verifica se ja existe alerta para a combinacao (data, motivo).
     Args:
         session: Sessao SQLAlchemy.
         metric_date (date): Data alvo.
+        reason (str): Motivo do alerta.
     """
     target = metric_date.isoformat()
-    existing = (
+    rows = (
         session.query(ObservationRecord)
         .filter(ObservationRecord.facts["event_type"].astext == "cognitive_metrics_alert")
         .filter(ObservationRecord.facts["metric_date"].astext == target)
-        .first()
+        .all()
     )
-    return existing is not None
+    for row in rows:
+        facts = row.facts or {}
+        reasons = facts.get("reasons")
+        if isinstance(reasons, list) and reason in reasons:
+            return True
+    return False
 
 
 def _alert_count_for_date(session, metric_date: date) -> int:
@@ -225,7 +231,7 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
                 blocked_runs += 1
             elif pipeline_status == "failed" or termination_reason == "video_failed":
                 failed_runs += 1
-            elif pipeline_status == "completed" or termination_reason == "pipeline_complete":
+            elif pipeline_status in ("completed", "published") or termination_reason == "pipeline_complete":
                 completed_runs += 1
 
             actions_total += _safe_int(facts.get("actions_executed"))
@@ -355,18 +361,22 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
             except Exception:
                 max_alerts_per_day = 5
 
-            current_alerts = _alert_count_for_date(session, metric_date)
-            if current_alerts < max_alerts_per_day and not _alert_already_emitted(
-                session, metric_date
-            ):
+            reasons_to_emit: list[str] = []
+            if blocked_runs > 0:
+                reasons_to_emit.append("blocked_runs")
+            if failed_ratio > 0.2:
+                reasons_to_emit.append("failed_ratio")
+
+            for reason in reasons_to_emit:
+                current_alerts = _alert_count_for_date(session, metric_date)
+                if current_alerts >= max_alerts_per_day:
+                    break
+                if _alert_already_emitted(session, metric_date, reason):
+                    continue
+
                 process_id = f"P_METRICS_DAILY_{metric_date.isoformat()}"
                 source_outcome_id = str(uuid.uuid4())
                 _append_minimal_outcome(source_outcome_id, process_id)
-                reasons = []
-                if blocked_runs > 0:
-                    reasons.append("blocked_runs")
-                if failed_ratio > 0.2:
-                    reasons.append("failed_ratio")
                 observation = Observation(
                     observation_id=str(uuid.uuid4()),
                     timestamp=datetime.utcnow().isoformat(),
@@ -381,7 +391,7 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
                         "blocked_runs": blocked_runs,
                         "failed_ratio": round(failed_ratio, 4),
                         "threshold": 0.2,
-                        "reasons": reasons,
+                        "reasons": [reason],
                     },
                 )
                 persist_observation(observation)
@@ -394,9 +404,9 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
                         e,
                     )
                 logger.warning(
-                    "COGNITIVE_METRICS alert emitted date=%s reasons=%s",
+                    "COGNITIVE_METRICS alert emitted date=%s reason=%s",
                     metric_date.isoformat(),
-                    ",".join(reasons),
+                    reason,
                 )
         return payload
     finally:
