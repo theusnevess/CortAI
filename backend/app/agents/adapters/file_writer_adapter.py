@@ -18,5 +18,7 @@ class FileWriterAgentAdapter:
             state.setdefault("artifacts", {})
             state["artifacts"]["write_artifact"] = True
             state["artifacts"]["manifest_path"] = str(manifest_path)
+            action_meta = state.get("_action", {}) if isinstance(state.get("_action"), dict) else {}
+            state["artifacts"]["manifest_decision_id"] = action_meta.get("decision_id")
             return state
         return {}

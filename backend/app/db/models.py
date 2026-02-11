@@ -152,3 +152,34 @@ class CognitiveMetricsDaily(Base):
     latency_by_action = Column(JSONB, nullable=False, default=dict)  # p95/avg por acao.
 
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# --- Tabela de Recibos de Publicacao ---
+class PublishReceipt(Base):
+    __tablename__ = "publish_receipts"
+
+    # Chave de idempotencia: uma linha por decisao de publicacao.
+    publish_decision_id = Column(String, primary_key=True)
+
+    process_id = Column(String, nullable=False, index=True)
+    manifest_decision_id = Column(String, nullable=True, index=True)
+
+    # Status objetivo do publish: published | blocked | failed.
+    pipeline_status = Column(String, nullable=False)
+    execution_status = Column(String, nullable=False)  # success | blocked | failed
+
+    target = Column(String, nullable=False, default="unknown")
+    external_post_id = Column(String, nullable=True)
+
+    error_type = Column(String, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    published_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_publish_receipts_process_id", "process_id"),
+        Index("ix_publish_receipts_manifest_decision_id", "manifest_decision_id"),
+        Index("ix_publish_receipts_created_at", "created_at"),
+    )

@@ -12,6 +12,7 @@ class AgentRegistry:
             "segment_audio": "app.agents.adapters.segment_adapter:SegmenterAdapter",
             "transcribe_segments": "app.agents.adapters.transcriber_adapter:TranscriberAdapter",
             "write_artifact": "app.agents.adapters.file_writer_adapter:FileWriterAgentAdapter",
+            "publish_manifest": "app.agents.adapters.publisher_adapter:PublisherAdapter",
         }
 
     def resolve(self, action):

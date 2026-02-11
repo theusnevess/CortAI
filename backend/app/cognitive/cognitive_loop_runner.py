@@ -160,12 +160,22 @@ def _compute_pipeline_status(
 ) -> str:
     """
     Enum canonico:
-      completed | failed | blocked | truncated
+      completed | failed | blocked | truncated | published
     """
     execution_status = outcome.get("execution_status")
+    metrics = outcome.get("metrics") or {}
+    last_action_type = metrics.get("last_action_type")
     artifacts = (state.get("artifacts") or {})
     termination_reason = artifacts.get("termination_reason")
 
+    if (
+        execution_status == "success"
+        and (
+            stop_reason == "published_manifest"
+            or last_action_type == "publish_manifest"
+        )
+    ):
+        return "published"
     if execution_status == "blocked":
         return "blocked"
     if execution_status == "failed":
@@ -192,8 +202,13 @@ def _build_next_action(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     facts = state.get("facts", {}) or {}
     artifacts = state.get("artifacts", {}) or {}
+    action_meta = state.get("_action", {}) or {}
 
-    if facts.get("status_final") == "failed":
+    if artifacts.get("write_artifact") is True and artifacts.get("published") is not True:
+        decision_id = artifacts.get("manifest_decision_id") or action_meta.get("decision_id")
+        action_type = "publish_manifest"
+        payload = {"decision_id": decision_id}
+    elif facts.get("status_final") == "failed":
         action_type = "write_artifact"
         payload = {
             "reason": "video_failed",
@@ -415,9 +430,13 @@ def run_loop(max_steps: int = 10, process_id: str | None = None) -> int:
 
         if action["type"] == "write_artifact":
             payload = action.get("payload", {}) or {}
-            if payload.get("reason") in ("pipeline_complete", "video_failed"):
-                stop_reason = payload.get("reason")
+            if payload.get("reason") in ("video_failed",):
+                stop_reason = "video_failed"
                 break
+
+        if action["type"] == "publish_manifest":
+            stop_reason = "published_manifest"
+            break
 
     if stop_reason is None and steps >= max_steps:
         stop_reason = "max_steps"
@@ -431,7 +450,7 @@ def run_loop(max_steps: int = 10, process_id: str | None = None) -> int:
             if (
                 final_outcome.get("execution_status") in ("failed", "blocked")
                 or artifacts.get("terminated") is True
-                or stop_reason in ("max_steps", "max_steps_reached", "already_terminated", "failed", "blocked")
+                or stop_reason in ("max_steps", "max_steps_reached", "already_terminated", "failed", "blocked", "published_manifest")
                 or artifacts.get("transcriptions_ready") is True
             ):
                 _emit_cognitive_loop_finished_observation(

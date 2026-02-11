@@ -332,6 +332,22 @@ def run_once() -> None:
             )
             return
         except Exception as e:
+            try:
+                from app.artifacts import ArtifactInvalid, ArtifactNotFound
+                if isinstance(e, ArtifactNotFound):
+                    _append_jsonl(
+                        OUTCOME_LOG_PATH,
+                        _blocked(dec["process_id"], dec["decision_id"], "ArtifactNotFound", str(e)),
+                    )
+                    return
+                if isinstance(e, ArtifactInvalid):
+                    _append_jsonl(
+                        OUTCOME_LOG_PATH,
+                        _failed(dec["process_id"], dec["decision_id"], "ArtifactInvalid", str(e)),
+                    )
+                    return
+            except Exception:
+                pass
             _append_jsonl(
                 OUTCOME_LOG_PATH,
                 _failed(dec["process_id"], dec["decision_id"], "AgentFailure", str(e)),
