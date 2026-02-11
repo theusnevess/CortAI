@@ -1,30 +1,30 @@
 # Contrato de Observabilidade (CortAI)
 
-Este documento define o contrato mínimo de observabilidade append-only do pipeline cognitivo.
-O consumo é read-only a partir de JSONL/Observations; o destino é aggregate-only no Postgres.
-Não há heurística nem lógica de decisão neste contrato.
+Este documento define o contrato minimo de observabilidade append-only do pipeline cognitivo.
+O consumo e read-only a partir de JSONL/Observations; o destino e aggregate-only no Postgres.
+Nao ha heuristica nem logica de decisao neste contrato.
 
 ## Eventos
 
 ### cognitive_loop_finished
 Fonte: Observations (JSONL + Postgres `observations`).
 
-Fatos obrigatórios:
+Fatos obrigatorios:
 - `event_type`
 - `execution_status`
-- `pipeline_status` (`completed` | `failed` | `blocked` | `truncated`)
+- `pipeline_status` (`completed` | `failed` | `blocked` | `truncated` | `published`)
 - `termination_reason` (quando existir)
 - `actions_executed`
 - `last_action_type`
 - `terminated`
 
 Proibido em `facts`:
-- Campos de caminho/path (ex.: `raw_video_minio_path`, `audio_local_path`)
+- Campos de caminho/path (ex.: `raw_video_minio_path`, `audio_local_path`, `manifest_path`)
 
 ### cognitive_metrics_alert
-Fonte: agregação de telemetria.
+Fonte: agregacao de telemetria.
 
-Fatos obrigatórios:
+Fatos obrigatorios:
 - `event_type`
 - `metric_date` (YYYY-MM-DD)
 - `reasons` (lista de strings)
@@ -35,9 +35,9 @@ Fatos opcionais:
 - `action_type`
 - `p95_ms`, `threshold_ms`, `n`
 
-## Saída do pipeline
+## Saida do pipeline
 
-`write_artifact` gera um manifest determinístico em `storage/agent_output/<decision_id>.json` com:
+`write_artifact` gera um manifest deterministico em `storage/agent_output/<decision_id>.json` com:
 - `process_id`, `decision_id`
 - `pipeline_status`, `termination_reason`
 - `segments_count`, `transcriptions_count`
@@ -45,30 +45,49 @@ Fatos opcionais:
 - `artifacts.raw_video_minio_path`, `artifacts.audio_local_path`
 - `created_at`
 
+`publish_manifest` consome apenas o manifest (manifest-only) via `decision_id`.
+
+## Receipt de publicacao
+
+A auditoria de publish e persistida em `publish_receipts` com idempotencia por
+`publish_decision_id`.
+
+Campos principais:
+- `publish_decision_id` (chave unica)
+- `process_id`
+- `manifest_decision_id`
+- `pipeline_status` (`published` | `blocked` | `failed`)
+- `execution_status` (`success` | `blocked` | `failed`)
+- `target`
+- `external_post_id` (quando existir)
+- `error_type`, `error_message` (sem paths)
+- `published_at`, `created_at`, `updated_at`
+
 ## Regras de dedupe
 
-Agregação de telemetria:
+Agregacao de telemetria:
 - Uma linha por `metric_date` em `cognitive_metrics_daily` (upsert).
 
-Emissão de alertas:
-- Um alerta por `metric_date` para razões-base.
+Emissao de alertas:
+- Dedupe por (`metric_date`, `reason`).
+- Pode haver mais de um alerta por dia quando os motivos forem diferentes.
 
-Emissão de loop finalizado:
+Emissao de loop finalizado:
 - Um `cognitive_loop_finished` por `(process_id, source_outcome_id)`.
-- Se `run_loop` receber um processo já terminado, usa stop reason `already_terminated` e tenta emitir uma vez.
-- Se o par já existir, a emissão é ignorada (dedupe).
+- Se `run_loop` receber um processo ja terminado, usa `stop_reason=already_terminated` e tenta emitir uma vez.
+- Se o par ja existir, a emissao e ignorada (dedupe).
 
-## Variáveis de ambiente
+## Variaveis de ambiente
 
 Telemetria:
-- `COGNITIVE_LOOP_MAX_STEPS` (padrão: 10)
+- `COGNITIVE_LOOP_MAX_STEPS` (padrao: 10)
 
 Alertas:
-- `COGNITIVE_ALERT_MAX_PER_DAY` (padrão: 5)
-- `COGNITIVE_ALERT_P95_TRANSCRIBE_MS` (padrão: 60000)
-- `COGNITIVE_ALERT_P95_COLLECT_MS` (padrão: 90000)
-- `COGNITIVE_ALERT_P95_EXTRACT_MS` (padrão: 30000)
-- `COGNITIVE_ALERT_P95_SEGMENT_MS` (padrão: 30000)
+- `COGNITIVE_ALERT_MAX_PER_DAY` (padrao: 5)
+- `COGNITIVE_ALERT_P95_TRANSCRIBE_MS` (padrao: 60000)
+- `COGNITIVE_ALERT_P95_COLLECT_MS` (padrao: 90000)
+- `COGNITIVE_ALERT_P95_EXTRACT_MS` (padrao: 30000)
+- `COGNITIVE_ALERT_P95_SEGMENT_MS` (padrao: 30000)
 
 ## Endpoints da API
 
