@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: ["main", "develop"]
     paths:
+      - ".github/workflows/ci-tests.yml"
       - "docs/pr_checklist_observability.md"
       - "backend/app/api/v1/endpoints/metrics.py"
       - "backend/app/cognitive_metrics.py"
@@ -15,6 +16,7 @@ on:
   push:
     branches: ["main", "develop"]
     paths:
+      - ".github/workflows/ci-tests.yml"
       - "docs/pr_checklist_observability.md"
       - "backend/app/api/v1/endpoints/metrics.py"
       - "backend/app/cognitive_metrics.py"
