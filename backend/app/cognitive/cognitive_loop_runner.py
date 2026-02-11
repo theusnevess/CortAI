@@ -1,10 +1,11 @@
 import copy
 import json
+import os
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 # Tenta importar fcntl para bloqueio de arquivos, mas se não estiver disponível (ex: em Windows), define como None para evitar erros. 
@@ -26,6 +27,7 @@ from app.state_from_observation import persist_state_from_observation
 STATE_LOG_PATH = Path("storage/state_log.jsonl")
 DECISION_LOG_PATH = Path("storage/decision_log.jsonl")
 OUTCOME_LOG_PATH = Path("storage/outcome_log.jsonl")
+OBS_LOG_PATH = Path("storage/observation_log.jsonl")
 
 
 @contextmanager
@@ -119,6 +121,66 @@ def _append_jsonl(path: Path, record: Dict[str, Any]) -> None:
             f.write(json.dumps(record) + "\n")
 
 
+def _observation_already_emitted(process_id: str, source_outcome_id: str) -> bool:
+    """
+    Dedupe minimo append-only: evita re-emissao de cognitive_loop_finished
+    para o mesmo par (process_id, source_outcome_id).
+    """
+    if not OBS_LOG_PATH.exists():
+        return False
+    try:
+        with _jsonl_lock(OBS_LOG_PATH, exclusive=False):
+            with OBS_LOG_PATH.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    facts = record.get("facts")
+                    if not isinstance(facts, dict):
+                        continue
+                    if (
+                        record.get("process_id") == process_id
+                        and record.get("source_outcome_id") == source_outcome_id
+                        and facts.get("event_type") == "cognitive_loop_finished"
+                    ):
+                        return True
+    except Exception:
+        return False
+    return False
+
+
+def _compute_pipeline_status(
+    outcome: Dict[str, Any], state: Dict[str, Any], stop_reason: Optional[str]
+) -> str:
+    """
+    Enum canonico:
+      completed | failed | blocked | truncated
+    """
+    execution_status = outcome.get("execution_status")
+    artifacts = (state.get("artifacts") or {})
+    termination_reason = artifacts.get("termination_reason")
+
+    if execution_status == "blocked":
+        return "blocked"
+    if execution_status == "failed":
+        return "failed"
+    if termination_reason == "video_failed":
+        return "failed"
+    if termination_reason == "pipeline_complete":
+        return "completed"
+    if stop_reason in ("max_steps", "max_steps_reached"):
+        return "truncated"
+    if artifacts.get("terminated") is True:
+        return "truncated"
+    return "truncated"
+
+
 def _build_next_action(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     Constrói a próxima ação a ser executada com base no estado atual. A função verifica o estado e os artefatos para determinar qual ação deve ser tomada a seguir no pipeline de processamento de vídeo, desde a coleta
@@ -170,6 +232,7 @@ def _emit_cognitive_loop_finished_observation(
     process_id: str,
     outcome: Dict[str, Any],
     state: Dict[str, Any],
+    stop_reason: Optional[str] = None,
 ) -> None:
     """
     Emite uma observação indicando que o loop cognitivo foi concluído, incluindo métricas e artefatos relevantes do estado e do resultado final. Esta função é chamada quando o loop cognitivo atinge um estado de término, seja por conclusão bem-sucedida, falha ou bloqueio. A observação emitida inclui informações sobre o status da execução, a razão para a terminação (se aplicável) e outras métricas relevantes que podem ser usadas para análise posterior ou para acionar ações adicionais.
@@ -183,12 +246,22 @@ def _emit_cognitive_loop_finished_observation(
     metrics = outcome.get("metrics") or {}
     artifacts = state.get("artifacts") or {}
     termination_reason = artifacts.get("termination_reason")
-    pipeline_status = "failed" if termination_reason == "video_failed" else "completed"
+    pipeline_status = _compute_pipeline_status(outcome, state, stop_reason)
+    source_outcome_id = outcome.get("outcome_id")
+    if not isinstance(source_outcome_id, str) or not source_outcome_id:
+        return
+    if _observation_already_emitted(process_id, source_outcome_id):
+        print(
+            f"COGNITIVE_LOOP finished_observation deduped process_id={process_id} "
+            f"source_outcome_id={source_outcome_id}"
+        )
+        return
+
     obs = Observation(
         observation_id=str(uuid.uuid4()),
         timestamp=datetime.utcnow().isoformat(),
         process_id=process_id,
-        source_outcome_id=outcome.get("outcome_id"),
+        source_outcome_id=source_outcome_id,
         facts={
             "event_type": "cognitive_loop_finished",
             "execution_status": outcome.get("execution_status"),
@@ -230,7 +303,7 @@ def run_loop(max_steps: int = 10, process_id: str | None = None) -> int:
         int: O número de etapas executadas no loop cognitivo antes de atingir um estado de término ou atingir o número máximo de etapas.
     """
     steps = 0
-    stop_reason = "max_steps"
+    stop_reason: Optional[str] = None
     target_process_id = process_id
 
     if not target_process_id:
@@ -239,27 +312,42 @@ def run_loop(max_steps: int = 10, process_id: str | None = None) -> int:
 
     print(f"COGNITIVE_LOOP start process_id={target_process_id} max_steps={max_steps}")
 
-    last_state = _read_last_jsonl_for_process_id(STATE_LOG_PATH, target_process_id)
-    if not last_state:
+    current_state = _read_last_jsonl_for_process_id(STATE_LOG_PATH, target_process_id)
+    if not current_state:
         print(f"COGNITIVE_LOOP done process_id={target_process_id} steps_executed=0 stop_reason=no_state")
         return 0
-    last_artifacts = last_state.get("artifacts", {}) or {}
-    last_facts = last_state.get("facts", {}) or {}
-    last_outcome = _read_last_jsonl_for_process_id(OUTCOME_LOG_PATH, target_process_id)
+    current_artifacts = current_state.get("artifacts", {}) or {}
+    current_facts = current_state.get("facts", {}) or {}
+    current_terminated = (
+        current_artifacts.get("terminated")
+        if "terminated" in current_artifacts
+        else current_facts.get("terminated")
+    )
+    current_termination_reason = (
+        current_artifacts.get("termination_reason")
+        if "termination_reason" in current_artifacts
+        else current_facts.get("termination_reason")
+    )
+    current_outcome = _read_last_jsonl_for_process_id(OUTCOME_LOG_PATH, target_process_id)
     skip_loop = False
-    if last_artifacts.get("terminated") is True:
-        reason = last_artifacts.get("termination_reason")
+    if current_terminated is True:
+        reason = current_termination_reason
         print(f"COGNITIVE_LOOP skip (already terminated) process_id={target_process_id} termination_reason={reason}")
-        stop_reason = "terminated"
+        stop_reason = "already_terminated"
         skip_loop = True
-    elif last_outcome and last_outcome.get("execution_status") in ("failed", "blocked"):
-        status = last_outcome.get("execution_status")
+    elif current_outcome and current_outcome.get("execution_status") in ("failed", "blocked"):
+        status = current_outcome.get("execution_status")
         print(f"COGNITIVE_LOOP skip (last outcome failed/blocked) process_id={target_process_id} status={status}")
-        stop_reason = "failed_or_blocked"
+        stop_reason = status
         skip_loop = True
     if skip_loop:
-        if last_state and _is_real_outcome_for_process(last_outcome, target_process_id):
-            _emit_cognitive_loop_finished_observation(target_process_id, last_outcome, last_state)
+        if current_state and _is_real_outcome_for_process(current_outcome, target_process_id):
+            _emit_cognitive_loop_finished_observation(
+                target_process_id,
+                current_outcome,
+                current_state,
+                stop_reason=stop_reason,
+            )
         print(
             f"COGNITIVE_LOOP done process_id={target_process_id} steps_executed=0 stop_reason={stop_reason}"
         )
@@ -267,8 +355,8 @@ def run_loop(max_steps: int = 10, process_id: str | None = None) -> int:
 
     # O loop principal do processo cognitivo, que continua até atingir um estado de término ou atingir o número máximo de etapas. 
     # Em cada etapa, o loop lê o estado atual, decide a próxima ação a ser tomada, executa essa ação e avalia o resultado para determinar se deve continuar ou parar.
-    last_state = None
-    last_outcome = None
+    last_state: Optional[Dict[str, Any]] = None
+    last_outcome: Optional[Dict[str, Any]] = None
     for step_index in range(1, max_steps + 1):
         state = _read_last_jsonl_for_process_id(STATE_LOG_PATH, target_process_id)
         if not state:
@@ -318,18 +406,21 @@ def run_loop(max_steps: int = 10, process_id: str | None = None) -> int:
         if outcome:
             if outcome.get("source_decision_id") != decision["decision_id"]:
                 print("OutcomeMismatch: last outcome not from current decision")
-                stop_reason = "failed_or_blocked"
+                stop_reason = "failed"
                 break
             status = outcome.get("execution_status")
             if status in ("blocked", "failed"):
-                stop_reason = "failed_or_blocked"
+                stop_reason = status
                 break
 
         if action["type"] == "write_artifact":
             payload = action.get("payload", {}) or {}
             if payload.get("reason") in ("pipeline_complete", "video_failed"):
-                stop_reason = "terminated"
+                stop_reason = payload.get("reason")
                 break
+
+    if stop_reason is None and steps >= max_steps:
+        stop_reason = "max_steps"
             
     # Após o loop, verifica se o processo atingiu um estado de término (conclusão, falha ou bloqueio) e emite uma observação de término do loop cognitivo com as métricas e artefatos relevantes do estado e do resultado final.
     if target_process_id:
@@ -337,11 +428,17 @@ def run_loop(max_steps: int = 10, process_id: str | None = None) -> int:
         final_outcome = last_outcome or _read_last_jsonl_for_process_id(OUTCOME_LOG_PATH, target_process_id)
         if final_state and _is_real_outcome_for_process(final_outcome, target_process_id):
             artifacts = final_state.get("artifacts") or {}
-            if final_outcome.get("execution_status") in ("failed", "blocked") or artifacts.get(
-                "terminated"
-            ) is True or artifacts.get("transcriptions_ready") is True:
+            if (
+                final_outcome.get("execution_status") in ("failed", "blocked")
+                or artifacts.get("terminated") is True
+                or stop_reason in ("max_steps", "max_steps_reached", "already_terminated", "failed", "blocked")
+                or artifacts.get("transcriptions_ready") is True
+            ):
                 _emit_cognitive_loop_finished_observation(
-                    target_process_id, final_outcome, final_state
+                    target_process_id,
+                    final_outcome,
+                    final_state,
+                    stop_reason=stop_reason,
                 )
 
     print(f"COGNITIVE_LOOP done process_id={target_process_id} steps_executed={steps} stop_reason={stop_reason}")
