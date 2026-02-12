@@ -169,6 +169,91 @@ async def test_overview_soma_bate(client, seed_daily_metric):
 
 
 @pytest.mark.anyio
+async def test_overview_ces_bad_days_in_window(client, seed_daily_metric, monkeypatch):
+    """
+    Valida contador de dias ruins de CES com janela/threshold do alerta.
+    """
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_WINDOW_DAYS", "3")
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_THRESHOLD", "90")
+
+    # 2026-02-08: ruim
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 8),
+        total_runs=10,
+        completed_runs=7,
+        failed_runs=0,
+        blocked_runs=3,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 10},
+    )
+    # 2026-02-09: sem runs (nao conta)
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 9),
+        total_runs=0,
+        completed_runs=0,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=0.0,
+        last_action_type_distribution={},
+    )
+    # 2026-02-10: bom
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=10,
+        completed_runs=10,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 10},
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={"start_date": "2026-02-08", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    summary = response.json()["summary"]
+    # Dias validos: 08(ruim), 10(bom). Ultimos 3 validos => 2 efetivos e 1 ruim.
+    assert summary["ces_window_days"] == 3
+    assert summary["ces_window_effective_days"] == 2
+    assert summary["ces_threshold"] == 90.0
+    assert summary["ces_bad_days_required"] == 3
+    assert summary["ces_bad_days_in_window"] == 1
+    assert summary["ces_bad_days_ratio"] == 0.5
+
+
+@pytest.mark.anyio
+async def test_overview_ces_window_sem_runs_ratio_null(client, seed_daily_metric, monkeypatch):
+    """
+    Valida janela CES sem dias validos: effective_days=0 e ratio nulo.
+    """
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_WINDOW_DAYS", "7")
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_THRESHOLD", "90")
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_BAD_DAYS", "3")
+
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=0,
+        completed_runs=0,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=0.0,
+        last_action_type_distribution={},
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    summary = response.json()["summary"]
+    assert summary["ces_window_days"] == 7
+    assert summary["ces_window_effective_days"] == 0
+    assert summary["ces_bad_days_in_window"] == 0
+    assert summary["ces_bad_days_ratio"] is None
+
+
+@pytest.mark.anyio
 async def test_alerts_range_vazio(client):
     """
     Valida /metrics/alerts sem registros no periodo.
