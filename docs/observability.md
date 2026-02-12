@@ -77,6 +77,23 @@ Emissao de loop finalizado:
 - Se `run_loop` receber um processo ja terminado, usa `stop_reason=already_terminated` e tenta emitir uma vez.
 - Se o par ja existir, a emissao e ignorada (dedupe).
 
+## CES v1 (latency score)
+
+Acoes canonicamente consideradas no `S_latency` e em `budgets_used`:
+- `collect_video`
+- `extract_audio`
+- `segment_audio`
+- `transcribe_segments`
+- `write_artifact`
+- `publish_manifest`
+
+Elegibilidade:
+- A acao entra no latency score apenas quando `n >= 10`.
+
+Regra:
+- `unknown` e excluido por design do latency score e de `budgets_used`.
+- `unknown` pode aparecer em `latency_by_action` (telemetria bruta), mas nao participa de `S_latency`, pesos `n_a`, budgets `B_a` ou do CES.
+
 ## Variaveis de ambiente
 
 Telemetria:
