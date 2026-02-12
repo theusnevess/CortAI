@@ -10,10 +10,22 @@ from app.db.models import ObservationRecord
 
 
 @pytest.mark.anyio
-async def test_daily_sem_dados(client):
+async def test_daily_sem_dados(client, seed_daily_metric):
     """
     Valida retorno vazio do endpoint /metrics/daily sem dados no periodo.
     """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=0,
+        completed_runs=0,
+        failed_runs=0,
+        blocked_runs=0,
+        truncated_runs=0,
+        truncated_ratio=0,
+        avg_actions_executed=0,
+        last_action_type_distribution={},
+        latency_by_action={},
+    )
     response = await client.get(
         "/api/v1/metrics/daily",
         params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
@@ -21,7 +33,14 @@ async def test_daily_sem_dados(client):
     assert response.status_code == 200
     payload = response.json()
     assert isinstance(payload.get("items"), list)
-    assert payload["items"] == []
+    assert len(payload["items"]) == 1
+    item = payload["items"][0]
+    assert item["ces_default_version"] == "CES_v1"
+    assert set(item["ces_versions"].keys()) == {"CES_v1", "CES_v2"}
+    assert item["ces"] == item["ces_versions"]["CES_v1"]["ces"]
+    assert item["ces"] is None
+    assert item["ces_versions"]["CES_v2"]["ces"] is None
+    assert item["ces_versions"]["CES_v2"]["ces_reason"] == "no_runs"
 
 
 @pytest.mark.anyio
@@ -54,6 +73,10 @@ async def test_daily_um_dia_com_uma_linha(client, seed_daily_metric):
     assert item["blocked_runs"] == 0
     assert float(item["avg_actions_executed"]) == pytest.approx(0.75)
     assert item["last_action_type_distribution"]["write_artifact"] == 3
+    assert item["ces_default_version"] == "CES_v1"
+    assert set(item["ces_versions"].keys()) == {"CES_v1", "CES_v2"}
+    assert item["ces"] == item["ces_versions"]["CES_v1"]["ces"]
+    assert isinstance(item["ces_versions"]["CES_v2"]["ces"], float)
 
 
 @pytest.mark.anyio
@@ -138,6 +161,10 @@ async def test_overview_soma_bate(client, seed_daily_metric):
     assert summary["failed_runs"] == sum(item["failed_runs"] for item in items)
     assert summary["blocked_runs"] == sum(item["blocked_runs"] for item in items)
     assert summary["alert_days"] == sum(1 for item in items if item["alerted"])
+    assert summary["ces_default_version"] == "CES_v1"
+    assert set(summary["ces_versions"].keys()) == {"CES_v1", "CES_v2"}
+    assert summary["ces"] == summary["ces_versions"]["CES_v1"]["ces"]
+    assert all(set(item["ces_versions"].keys()) == {"CES_v1", "CES_v2"} for item in items)
 
 
 @pytest.mark.anyio
