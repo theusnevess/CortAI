@@ -1,4 +1,5 @@
-from datetime import date, datetime
+import uuid
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -6,7 +7,7 @@ from sqlalchemy import delete
 
 from app.api.v1.endpoints.metrics import PROHIBITED_FACT_KEYS
 from app.cognitive_metrics import aggregate_daily_metrics_for_date
-from app.db.models import ObservationRecord
+from app.db.models import CognitiveMetricsDaily, ObservationRecord
 
 
 @pytest.mark.anyio
@@ -303,6 +304,224 @@ def test_guardrail_max_per_day_1_bloqueia_segundo_alerta(monkeypatch, sync_sessi
         )
         session.execute(
             delete(ObservationRecord).where(ObservationRecord.process_id.like("P_TEST_GUARDRAIL_%"))
+        )
+        session.commit()
+        session.close()
+
+
+def _seed_loop_finished_row(session, *, metric_date: date, process_id: str, blocked: bool) -> None:
+    """
+    Insere observation final do loop para alimentar agregacao diaria.
+    """
+    if blocked:
+        execution_status = "blocked"
+        pipeline_status = "blocked"
+        termination_reason = "blocked"
+    else:
+        execution_status = "success"
+        pipeline_status = "completed"
+        termination_reason = "pipeline_complete"
+
+    session.add(
+        ObservationRecord(
+            observation_id=str(uuid.uuid4()),
+            timestamp=datetime(metric_date.year, metric_date.month, metric_date.day, 12, 0, 0),
+            process_id=process_id,
+            source_outcome_id=str(uuid.uuid4()),
+            facts={
+                "event_type": "cognitive_loop_finished",
+                "execution_status": execution_status,
+                "pipeline_status": pipeline_status,
+                "termination_reason": termination_reason,
+                "actions_executed": 1,
+                "last_action_type": "write_artifact",
+                "terminated": True,
+            },
+        )
+    )
+
+
+def _wire_alert_persist(monkeypatch, sync_session_factory):
+    """
+    Redireciona persistencia de alerta para o banco do teste.
+    """
+    def _persist_observation_direct(observation):
+        ts = datetime.fromisoformat(observation.timestamp.replace("Z", "+00:00"))
+        local = sync_session_factory()
+        try:
+            local.merge(
+                ObservationRecord(
+                    observation_id=observation.observation_id,
+                    timestamp=ts,
+                    process_id=observation.process_id,
+                    source_outcome_id=observation.source_outcome_id,
+                    facts=observation.facts,
+                )
+            )
+            local.commit()
+        finally:
+            local.close()
+
+    monkeypatch.setattr("app.cognitive_metrics._append_minimal_outcome", lambda *_: None)
+    monkeypatch.setattr("app.cognitive_metrics.persist_state_from_observation", lambda *_: None)
+    monkeypatch.setattr("app.cognitive_metrics.persist_observation", _persist_observation_direct)
+
+
+def test_ces_regression_nao_dispara_com_6_dias(monkeypatch, sync_session_factory):
+    """
+    Nao emite alerta CES com historico insuficiente (<= 6 dias com runs).
+    """
+    _wire_alert_persist(monkeypatch, sync_session_factory)
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_ENABLED", "1")
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_THRESHOLD", "85")
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_BAD_DAYS", "3")
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_WINDOW_DAYS", "7")
+    monkeypatch.setenv("COGNITIVE_ALERT_MAX_PER_DAY", "5")
+
+    start = date(2026, 2, 20)
+    prefix = "P_CES_A_"
+    session = sync_session_factory()
+    try:
+        session.execute(delete(ObservationRecord).where(ObservationRecord.process_id.like(f"{prefix}%")))
+        session.execute(delete(ObservationRecord).where(ObservationRecord.process_id.like("P_METRICS_DAILY_%")))
+        session.execute(
+            delete(CognitiveMetricsDaily).where(
+                CognitiveMetricsDaily.metric_date >= start,
+                CognitiveMetricsDaily.metric_date < start + timedelta(days=6),
+            )
+        )
+        for i in range(6):
+            d = start + timedelta(days=i)
+            _seed_loop_finished_row(session, metric_date=d, process_id=f"{prefix}{i}", blocked=(i < 3))
+        session.commit()
+        for i in range(6):
+            aggregate_daily_metrics_for_date(start + timedelta(days=i))
+
+        count = (
+            session.query(ObservationRecord)
+            .filter(ObservationRecord.facts["event_type"].astext == "cognitive_metrics_alert")
+            .filter(ObservationRecord.facts["reasons"].contains(["ces_regression:CES_v1"]))
+            .count()
+        )
+        assert count == 0
+    finally:
+        session.execute(delete(ObservationRecord).where(ObservationRecord.process_id.like(f"{prefix}%")))
+        session.execute(delete(ObservationRecord).where(ObservationRecord.process_id.like("P_METRICS_DAILY_%")))
+        session.execute(
+            delete(CognitiveMetricsDaily).where(
+                CognitiveMetricsDaily.metric_date >= start,
+                CognitiveMetricsDaily.metric_date < start + timedelta(days=6),
+            )
+        )
+        session.commit()
+        session.close()
+
+
+def test_ces_regression_dispara_com_3_de_7(monkeypatch, sync_session_factory):
+    """
+    Emite alerta CES quando janela de 7 dias possui ao menos 3 dias ruins.
+    """
+    _wire_alert_persist(monkeypatch, sync_session_factory)
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_ENABLED", "1")
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_THRESHOLD", "85")
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_BAD_DAYS", "3")
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_WINDOW_DAYS", "7")
+    monkeypatch.setenv("COGNITIVE_ALERT_MAX_PER_DAY", "5")
+
+    start = date(2026, 3, 1)
+    target_day = start + timedelta(days=6)
+    prefix = "P_CES_B_"
+    session = sync_session_factory()
+    try:
+        session.execute(delete(ObservationRecord).where(ObservationRecord.process_id.like(f"{prefix}%")))
+        session.execute(delete(ObservationRecord).where(ObservationRecord.process_id.like("P_METRICS_DAILY_%")))
+        session.execute(
+            delete(CognitiveMetricsDaily).where(
+                CognitiveMetricsDaily.metric_date >= start,
+                CognitiveMetricsDaily.metric_date <= target_day,
+            )
+        )
+        for i in range(7):
+            d = start + timedelta(days=i)
+            _seed_loop_finished_row(session, metric_date=d, process_id=f"{prefix}{i}", blocked=(i < 3))
+        session.commit()
+        for i in range(7):
+            aggregate_daily_metrics_for_date(start + timedelta(days=i))
+
+        rows = (
+            session.query(ObservationRecord)
+            .filter(ObservationRecord.facts["event_type"].astext == "cognitive_metrics_alert")
+            .filter(ObservationRecord.facts["metric_date"].astext == target_day.isoformat())
+            .filter(ObservationRecord.facts["reasons"].contains(["ces_regression:CES_v1"]))
+            .all()
+        )
+        assert len(rows) == 1
+    finally:
+        session.execute(delete(ObservationRecord).where(ObservationRecord.process_id.like(f"{prefix}%")))
+        session.execute(delete(ObservationRecord).where(ObservationRecord.process_id.like("P_METRICS_DAILY_%")))
+        session.execute(
+            delete(CognitiveMetricsDaily).where(
+                CognitiveMetricsDaily.metric_date >= start,
+                CognitiveMetricsDaily.metric_date <= target_day,
+            )
+        )
+        session.commit()
+        session.close()
+
+
+def test_ces_regression_idempotencia_e_guardrail(monkeypatch, sync_session_factory):
+    """
+    Garante idempotencia por (metric_date, reason) e respeito ao maximo diario.
+    """
+    _wire_alert_persist(monkeypatch, sync_session_factory)
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_ENABLED", "1")
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_THRESHOLD", "85")
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_BAD_DAYS", "3")
+    monkeypatch.setenv("COGNITIVE_ALERT_CES_WINDOW_DAYS", "7")
+    monkeypatch.setenv("COGNITIVE_ALERT_MAX_PER_DAY", "1")
+
+    start = date(2026, 4, 1)
+    target_day = start + timedelta(days=6)
+    prefix = "P_CES_C_"
+    session = sync_session_factory()
+    try:
+        session.execute(delete(ObservationRecord).where(ObservationRecord.process_id.like(f"{prefix}%")))
+        session.execute(delete(ObservationRecord).where(ObservationRecord.process_id.like("P_METRICS_DAILY_%")))
+        session.execute(
+            delete(CognitiveMetricsDaily).where(
+                CognitiveMetricsDaily.metric_date >= start,
+                CognitiveMetricsDaily.metric_date <= target_day,
+            )
+        )
+        # Primeiros 6 dias criam historico ruim. Dia alvo tambem e blocked para competir com alerta blocked_runs.
+        for i in range(7):
+            d = start + timedelta(days=i)
+            _seed_loop_finished_row(session, metric_date=d, process_id=f"{prefix}{i}", blocked=(i < 3 or i == 6))
+        session.commit()
+        for i in range(7):
+            aggregate_daily_metrics_for_date(start + timedelta(days=i))
+        aggregate_daily_metrics_for_date(target_day)
+
+        day_rows = (
+            session.query(ObservationRecord)
+            .filter(ObservationRecord.facts["event_type"].astext == "cognitive_metrics_alert")
+            .filter(ObservationRecord.facts["metric_date"].astext == target_day.isoformat())
+            .all()
+        )
+        ces_rows = [
+            row for row in day_rows
+            if isinstance(row.facts.get("reasons"), list) and "ces_regression:CES_v1" in row.facts["reasons"]
+        ]
+        assert len(day_rows) == 1
+        assert len(ces_rows) in (0, 1)
+    finally:
+        session.execute(delete(ObservationRecord).where(ObservationRecord.process_id.like(f"{prefix}%")))
+        session.execute(delete(ObservationRecord).where(ObservationRecord.process_id.like("P_METRICS_DAILY_%")))
+        session.execute(
+            delete(CognitiveMetricsDaily).where(
+                CognitiveMetricsDaily.metric_date >= start,
+                CognitiveMetricsDaily.metric_date <= target_day,
+            )
         )
         session.commit()
         session.close()
