@@ -144,6 +144,28 @@ Diferenca principal:
 Politica:
 - CES_v2 nao altera CES_v1; apenas expande a leitura em `ces_versions`.
 
+### CES Window Counter
+
+`summary.ces_bad_days_in_window`:
+- Numero de dias ruins dentro da janela `COGNITIVE_ALERT_CES_WINDOW_DAYS`.
+- Dia ruim: `ces` (versao default) `< COGNITIVE_ALERT_CES_THRESHOLD`.
+- `ces_window_effective_days` conta apenas dias validos (`ces != null` e `ces_reason != "no_runs"`).
+- Exclui dias com `ces = null` (`ces_reason = "no_runs"`).
+- Nao e persistido; e calculado dinamicamente no endpoint.
+- Usa a mesma regra base do alerta `ces_regression:CES_v1`.
+
+Campos de janela expostos no `summary`:
+- `ces_window_days`
+- `ces_window_effective_days`
+- `ces_threshold`
+- `ces_bad_days_required`
+- `ces_bad_days_in_window`
+- `ces_bad_days_ratio`
+
+Regra de ratio:
+- `ces_bad_days_ratio = ces_bad_days_in_window / ces_window_effective_days` quando `effective_days > 0`.
+- `ces_bad_days_ratio = null` quando `effective_days = 0`.
+
 ## Variaveis de ambiente
 
 Telemetria:
