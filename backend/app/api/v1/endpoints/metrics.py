@@ -24,12 +24,15 @@ PROHIBITED_FACT_KEYS = {
     "thumbnail_path",
 }
 
-CES_VERSION = "CES_v1"
+CES_DEFAULT_VERSION = "CES_v1"
+CES_V1 = "CES_v1"
+CES_V2 = "CES_v2"
 CES_STATUS_WEIGHTS = {"blocked": 1.0, "failed": 0.6, "truncated": 0.3}
 CES_COMPONENT_WEIGHTS = {"status": 0.55, "actions": 0.15, "latency": 0.25, "trunc": 0.05}
 CES_ACTIONS_GOOD = 1.0
 CES_ACTIONS_BAD = 6.0
 CES_MIN_OBS_FOR_LATENCY = 10
+CES_V2_LATENCY_SLOPE = 0.7
 CES_LATENCY_ACTION_WHITELIST = {
     "collect_video",
     "extract_audio",
@@ -84,19 +87,38 @@ def _clamp(value: float, min_value: float = 0.0, max_value: float = 1.0) -> floa
     return max(min_value, min(max_value, value))
 
 
-def _compute_ces_fields(item: dict) -> dict:
+def _compute_latency_inputs(item: dict) -> tuple[dict[str, dict], int]:
     """
-    Calcula CES diario com componentes explicitos e budgets auditaveis.
-    Regras:
-    - total_runs == 0 => CES nulo com reason "no_runs"
-    - latency so considera acoes com n >= CES_MIN_OBS_FOR_LATENCY
+    Normaliza entradas de latencia para acoes elegiveis do CES.
+    """
+    latency_by_action = item.get("latency_by_action") or {}
+    eligible: dict[str, dict] = {}
+    total_n = 0
+    for action_name, payload in latency_by_action.items():
+        if not isinstance(payload, dict):
+            continue
+        if action_name not in CES_LATENCY_ACTION_WHITELIST:
+            continue
+        n_obs = int(payload.get("n") or 0)
+        p95_ms = int(payload.get("p95_ms") or 0)
+        if n_obs < CES_MIN_OBS_FOR_LATENCY or p95_ms <= 0:
+            continue
+        budget_ms = int(math.ceil(p95_ms * 1.10))
+        eligible[action_name] = {"n": n_obs, "p95_ms": p95_ms, "budget_ms": budget_ms}
+        total_n += n_obs
+    return eligible, total_n
+
+
+def _compute_ces_version(item: dict, version: str) -> dict:
+    """
+    Calcula uma versao do CES diario com componentes e budgets auditaveis.
     """
     total_runs = int(item.get("total_runs") or 0)
     if total_runs <= 0:
         return {
             "ces": None,
             "ces_reason": "no_runs",
-            "ces_version": CES_VERSION,
+            "ces_version": version,
             "ces_components": {
                 "status": None,
                 "actions": None,
@@ -132,21 +154,7 @@ def _compute_ces_fields(item: dict) -> dict:
 
     s_trunc = _clamp(1.0 - r_t)
 
-    latency_by_action = item.get("latency_by_action") or {}
-    eligible: dict[str, dict] = {}
-    total_n = 0
-    for action_name, payload in latency_by_action.items():
-        if not isinstance(payload, dict):
-            continue
-        if action_name not in CES_LATENCY_ACTION_WHITELIST:
-            continue
-        n_obs = int(payload.get("n") or 0)
-        p95_ms = int(payload.get("p95_ms") or 0)
-        if n_obs < CES_MIN_OBS_FOR_LATENCY or p95_ms <= 0:
-            continue
-        budget_ms = int(math.ceil(p95_ms * 1.10))
-        eligible[action_name] = {"n": n_obs, "p95_ms": p95_ms, "budget_ms": budget_ms}
-        total_n += n_obs
+    eligible, total_n = _compute_latency_inputs(item)
 
     if total_n <= 0:
         s_latency = 1.0
@@ -156,7 +164,14 @@ def _compute_ces_fields(item: dict) -> dict:
         budgets_used = {}
         for action_name, payload in sorted(eligible.items()):
             weight = payload["n"] / total_n
-            action_score = _clamp(payload["budget_ms"] / payload["p95_ms"])
+            if version == CES_V2:
+                ratio = payload["p95_ms"] / payload["budget_ms"]
+                if ratio <= 1.0:
+                    action_score = 1.0
+                else:
+                    action_score = _clamp(1.0 - CES_V2_LATENCY_SLOPE * (ratio - 1.0))
+            else:
+                action_score = _clamp(payload["budget_ms"] / payload["p95_ms"])
             s_latency += weight * action_score
             budgets_used[action_name] = {
                 "n": payload["n"],
@@ -176,7 +191,7 @@ def _compute_ces_fields(item: dict) -> dict:
     return {
         "ces": round(_clamp(ces_value, 0.0, 100.0), 2),
         "ces_reason": None,
-        "ces_version": CES_VERSION,
+        "ces_version": version,
         "ces_components": {
             "status": round(s_status, 4),
             "actions": round(s_actions, 4),
@@ -184,6 +199,26 @@ def _compute_ces_fields(item: dict) -> dict:
             "trunc": round(s_trunc, 4),
         },
         "budgets_used": budgets_used,
+    }
+
+
+def _compute_ces_fields(item: dict) -> dict:
+    """
+    Calcula CES versionado por item, mantendo CES_v1 como default.
+    """
+    ces_versions = {
+        CES_V1: _compute_ces_version(item, CES_V1),
+        CES_V2: _compute_ces_version(item, CES_V2),
+    }
+    default_payload = ces_versions[CES_DEFAULT_VERSION]
+    return {
+        "ces_default_version": CES_DEFAULT_VERSION,
+        "ces": default_payload["ces"],
+        "ces_version": CES_DEFAULT_VERSION,
+        "ces_reason": default_payload["ces_reason"],
+        "ces_components": default_payload["ces_components"],
+        "budgets_used": default_payload["budgets_used"],
+        "ces_versions": ces_versions,
     }
 
 
@@ -423,35 +458,58 @@ async def get_metrics_overview(
         summary["blocked_ratio"] = 0.0
         summary["truncated_ratio"] = 0.0
 
-    # CES agregado do periodo (media ponderada por total_runs).
-    items_with_runs = [item for item in items if item["ces"] is not None and item["total_runs"] > 0]
-    weighted_runs = sum(item["total_runs"] for item in items_with_runs)
-    if weighted_runs > 0:
-        summary["ces"] = round(
-            sum(float(item["ces"]) * item["total_runs"] for item in items_with_runs)
-            / weighted_runs,
-            2,
-        )
-        summary["ces_reason"] = None
-        summary["ces_version"] = CES_VERSION
-        summary["ces_components"] = {
-            key: round(
-                sum(float(item["ces_components"][key]) * item["total_runs"] for item in items_with_runs)
-                / weighted_runs,
-                4,
-            )
-            for key in ("status", "actions", "latency", "trunc")
-        }
-    else:
-        summary["ces"] = None
-        summary["ces_reason"] = "no_runs"
-        summary["ces_version"] = CES_VERSION
-        summary["ces_components"] = {
-            "status": None,
-            "actions": None,
-            "latency": None,
-            "trunc": None,
-        }
+    # CES agregado do periodo (media ponderada por total_runs) por versao.
+    ces_versions_summary: dict[str, dict] = {}
+    for version in (CES_V1, CES_V2):
+        items_with_runs = [
+            item
+            for item in items
+            if item.get("total_runs", 0) > 0
+            and isinstance(item.get("ces_versions", {}).get(version), dict)
+            and item["ces_versions"][version].get("ces") is not None
+        ]
+        weighted_runs = sum(item["total_runs"] for item in items_with_runs)
+        if weighted_runs > 0:
+            ces_versions_summary[version] = {
+                "ces": round(
+                    sum(float(item["ces_versions"][version]["ces"]) * item["total_runs"] for item in items_with_runs)
+                    / weighted_runs,
+                    2,
+                ),
+                "ces_reason": None,
+                "ces_components": {
+                    key: round(
+                        sum(
+                            float(item["ces_versions"][version]["ces_components"][key]) * item["total_runs"]
+                            for item in items_with_runs
+                        )
+                        / weighted_runs,
+                        4,
+                    )
+                    for key in ("status", "actions", "latency", "trunc")
+                },
+                "budgets_used": {},
+            }
+        else:
+            ces_versions_summary[version] = {
+                "ces": None,
+                "ces_reason": "no_runs",
+                "ces_components": {
+                    "status": None,
+                    "actions": None,
+                    "latency": None,
+                    "trunc": None,
+                },
+                "budgets_used": {},
+            }
+
+    default_summary = ces_versions_summary[CES_DEFAULT_VERSION]
+    summary["ces_default_version"] = CES_DEFAULT_VERSION
+    summary["ces"] = default_summary["ces"]
+    summary["ces_reason"] = default_summary["ces_reason"]
+    summary["ces_version"] = CES_DEFAULT_VERSION
+    summary["ces_components"] = default_summary["ces_components"]
+    summary["ces_versions"] = ces_versions_summary
 
     return {"items": items, "summary": summary}
 
