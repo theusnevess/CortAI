@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import uuid
 from collections import Counter, defaultdict
@@ -27,6 +28,16 @@ DECISION_LOG_PATH = "storage/decision_log.jsonl"
 OUTCOME_LOG_PATH = "storage/outcome_log.jsonl"
 
 logger = logging.getLogger(__name__)
+
+CES_V1_REASON = "ces_regression:CES_v1"
+CES_LATENCY_ACTION_WHITELIST = {
+    "collect_video",
+    "extract_audio",
+    "segment_audio",
+    "transcribe_segments",
+    "write_artifact",
+    "publish_manifest",
+}
 
 try:
     import fcntl
@@ -127,6 +138,82 @@ def _safe_int(value) -> int:
         return int(value)
     except Exception:
         return 0
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """
+    Converte valor para float com fallback seguro.
+    """
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _clamp(value: float, min_value: float = 0.0, max_value: float = 1.0) -> float:
+    """
+    Limita valor numerico no intervalo [min_value, max_value].
+    """
+    return max(min_value, min(max_value, value))
+
+
+def _get_int_env(name: str, default: int) -> int:
+    """
+    Le inteiro de env com fallback deterministico.
+    """
+    raw = os.getenv(name)
+    try:
+        return int(raw) if raw is not None else default
+    except Exception:
+        return default
+
+
+def _compute_ces_v1(
+    total_runs: int,
+    failed_runs: int,
+    blocked_runs: int,
+    truncated_runs: int,
+    avg_actions_executed: float,
+    latency_by_action: dict[str, dict[str, int]],
+) -> float | None:
+    """
+    Calcula CES_v1 diario de forma deterministica.
+    """
+    if total_runs <= 0:
+        return None
+
+    r_b = blocked_runs / total_runs
+    r_f = failed_runs / total_runs
+    r_t = truncated_runs / total_runs
+    s_status = _clamp(1.0 - (1.0 * r_b + 0.6 * r_f + 0.3 * r_t))
+    s_actions = _clamp((6.0 - avg_actions_executed) / (6.0 - 1.0))
+    s_trunc = _clamp(1.0 - r_t)
+
+    eligible: dict[str, dict[str, int]] = {}
+    total_n = 0
+    for action_name, payload in (latency_by_action or {}).items():
+        if action_name not in CES_LATENCY_ACTION_WHITELIST:
+            continue
+        n_obs = _safe_int(payload.get("n"))
+        p95_ms = _safe_int(payload.get("p95_ms"))
+        if n_obs < 10 or p95_ms <= 0:
+            continue
+        budget_ms = int(math.ceil(p95_ms * 1.10))
+        eligible[action_name] = {"n": n_obs, "p95_ms": p95_ms, "budget_ms": budget_ms}
+        total_n += n_obs
+
+    if total_n <= 0:
+        s_latency = 1.0
+    else:
+        s_latency = 0.0
+        for payload in eligible.values():
+            weight = payload["n"] / total_n
+            action_score = _clamp(payload["budget_ms"] / payload["p95_ms"])
+            s_latency += weight * action_score
+        s_latency = _clamp(s_latency)
+
+    ces = 100.0 * (0.55 * s_status + 0.15 * s_actions + 0.25 * s_latency + 0.05 * s_trunc)
+    return round(_clamp(ces, 0.0, 100.0), 2)
 
 
 def _parse_ts(value: str) -> datetime | None:
@@ -408,6 +495,96 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
                     metric_date.isoformat(),
                     reason,
                 )
+
+        # Avalia regressao de CES_v1 por janela movel (sem heuristica).
+        ces_alert_enabled = os.getenv("COGNITIVE_ALERT_CES_ENABLED", "1") == "1"
+        if ces_alert_enabled:
+            ces_threshold = _safe_float(os.getenv("COGNITIVE_ALERT_CES_THRESHOLD", "85"), 85.0)
+            ces_bad_days = _get_int_env("COGNITIVE_ALERT_CES_BAD_DAYS", 3)
+            ces_window_days = _get_int_env("COGNITIVE_ALERT_CES_WINDOW_DAYS", 7)
+            if ces_bad_days < 1:
+                ces_bad_days = 1
+            if ces_window_days < ces_bad_days:
+                ces_window_days = ces_bad_days
+
+            win_start = metric_date - timedelta(days=ces_window_days - 1)
+            window_rows = (
+                session.query(CognitiveMetricsDaily)
+                .filter(CognitiveMetricsDaily.metric_date >= win_start)
+                .filter(CognitiveMetricsDaily.metric_date <= metric_date)
+                .order_by(CognitiveMetricsDaily.metric_date.asc())
+                .all()
+            )
+
+            ces_samples: list[dict[str, Any]] = []
+            days_with_runs = 0
+            bad_days_in_window = 0
+            for row in window_rows:
+                row_total_runs = _safe_int(row.total_runs)
+                row_ces = _compute_ces_v1(
+                    total_runs=row_total_runs,
+                    failed_runs=_safe_int(row.failed_runs),
+                    blocked_runs=_safe_int(row.blocked_runs),
+                    truncated_runs=_safe_int(getattr(row, "truncated_runs", 0)),
+                    avg_actions_executed=_safe_float(getattr(row, "avg_actions_executed", 0)),
+                    latency_by_action=(getattr(row, "latency_by_action", {}) or {}),
+                )
+                if row_total_runs > 0:
+                    days_with_runs += 1
+                    if row_ces is not None:
+                        ces_samples.append({"date": row.metric_date.isoformat(), "ces": row_ces})
+                    if row_ces is not None and row_ces < ces_threshold:
+                        bad_days_in_window += 1
+
+            if days_with_runs >= 7 and bad_days_in_window >= ces_bad_days:
+                max_alerts_raw = os.getenv("COGNITIVE_ALERT_MAX_PER_DAY", "5")
+                try:
+                    max_alerts_per_day = int(max_alerts_raw)
+                except Exception:
+                    max_alerts_per_day = 5
+
+                current_alerts = _alert_count_for_date(session, metric_date)
+                if (
+                    current_alerts < max_alerts_per_day
+                    and not _alert_already_emitted(session, metric_date, CES_V1_REASON)
+                ):
+                    process_id = f"P_METRICS_DAILY_{metric_date.isoformat()}"
+                    source_outcome_id = str(uuid.uuid4())
+                    _append_minimal_outcome(source_outcome_id, process_id)
+                    observation = Observation(
+                        observation_id=str(uuid.uuid4()),
+                        timestamp=datetime.utcnow().isoformat(),
+                        process_id=process_id,
+                        source_outcome_id=source_outcome_id,
+                        facts={
+                            "event_type": "cognitive_metrics_alert",
+                            "metric_date": metric_date.isoformat(),
+                            "reasons": [CES_V1_REASON],
+                            "ces_version": "CES_v1",
+                            "threshold": ces_threshold,
+                            "window_days": ces_window_days,
+                            "required_bad_days": ces_bad_days,
+                            "bad_days_in_window": bad_days_in_window,
+                            "days_with_runs_in_window": days_with_runs,
+                            "ces_samples": ces_samples[-ces_window_days:],
+                        },
+                    )
+                    persist_observation(observation)
+                    try:
+                        persist_state_from_observation(observation)
+                    except Exception as e:
+                        logger.error(
+                            "COGNITIVE_METRICS ces alert state persist failed date=%s err=%s",
+                            metric_date.isoformat(),
+                            e,
+                        )
+                    logger.warning(
+                        "COGNITIVE_METRICS alert emitted date=%s reason=%s bad_days=%s window=%s",
+                        metric_date.isoformat(),
+                        CES_V1_REASON,
+                        bad_days_in_window,
+                        ces_window_days,
+                    )
         return payload
     finally:
         session.close()
