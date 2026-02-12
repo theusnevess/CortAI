@@ -34,6 +34,12 @@ Fatos obrigatorios:
 Fatos opcionais:
 - `action_type`
 - `p95_ms`, `threshold_ms`, `n`
+- `ces_version`, `window_days`, `required_bad_days`, `bad_days_in_window`, `days_with_runs_in_window`, `ces_samples`
+
+Reasons canonicamente suportados:
+- `blocked_runs`
+- `failed_ratio`
+- `ces_regression:CES_v1`
 
 ## Saida do pipeline
 
@@ -149,6 +155,10 @@ Alertas:
 - `COGNITIVE_ALERT_P95_COLLECT_MS` (padrao: 90000)
 - `COGNITIVE_ALERT_P95_EXTRACT_MS` (padrao: 30000)
 - `COGNITIVE_ALERT_P95_SEGMENT_MS` (padrao: 30000)
+- `COGNITIVE_ALERT_CES_ENABLED` (padrao: 1)
+- `COGNITIVE_ALERT_CES_THRESHOLD` (padrao: 85)
+- `COGNITIVE_ALERT_CES_BAD_DAYS` (padrao: 3)
+- `COGNITIVE_ALERT_CES_WINDOW_DAYS` (padrao: 7)
 
 ## Endpoints da API
 
