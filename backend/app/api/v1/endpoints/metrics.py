@@ -1,3 +1,4 @@
+import math
 from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,6 +22,21 @@ PROHIBITED_FACT_KEYS = {
     "video_local_path",
     "file_path",
     "thumbnail_path",
+}
+
+CES_VERSION = "CES_v1"
+CES_STATUS_WEIGHTS = {"blocked": 1.0, "failed": 0.6, "truncated": 0.3}
+CES_COMPONENT_WEIGHTS = {"status": 0.55, "actions": 0.15, "latency": 0.25, "trunc": 0.05}
+CES_ACTIONS_GOOD = 1.0
+CES_ACTIONS_BAD = 6.0
+CES_MIN_OBS_FOR_LATENCY = 10
+CES_LATENCY_ACTION_WHITELIST = {
+    "collect_video",
+    "extract_audio",
+    "segment_audio",
+    "transcribe_segments",
+    "write_artifact",
+    "publish_manifest",
 }
 
 
@@ -59,6 +75,116 @@ def _dedup_and_sort_reasons(reasons: list) -> list:
     if not isinstance(reasons, list):
         return []
     return sorted(set(str(r) for r in reasons))
+
+
+def _clamp(value: float, min_value: float = 0.0, max_value: float = 1.0) -> float:
+    """
+    Limita valor numerico no intervalo [min_value, max_value].
+    """
+    return max(min_value, min(max_value, value))
+
+
+def _compute_ces_fields(item: dict) -> dict:
+    """
+    Calcula CES diario com componentes explicitos e budgets auditaveis.
+    Regras:
+    - total_runs == 0 => CES nulo com reason "no_runs"
+    - latency so considera acoes com n >= CES_MIN_OBS_FOR_LATENCY
+    """
+    total_runs = int(item.get("total_runs") or 0)
+    if total_runs <= 0:
+        return {
+            "ces": None,
+            "ces_reason": "no_runs",
+            "ces_version": CES_VERSION,
+            "ces_components": {
+                "status": None,
+                "actions": None,
+                "latency": None,
+                "trunc": None,
+            },
+            "budgets_used": {},
+        }
+
+    blocked_runs = int(item.get("blocked_runs") or 0)
+    failed_runs = int(item.get("failed_runs") or 0)
+    truncated_runs = int(item.get("truncated_runs") or 0)
+
+    r_b = blocked_runs / total_runs
+    r_f = failed_runs / total_runs
+    r_t = truncated_runs / total_runs
+
+    s_status = _clamp(
+        1.0
+        - (
+            CES_STATUS_WEIGHTS["blocked"] * r_b
+            + CES_STATUS_WEIGHTS["failed"] * r_f
+            + CES_STATUS_WEIGHTS["truncated"] * r_t
+        )
+    )
+
+    avg_actions = float(item.get("avg_actions_executed") or 0.0)
+    denom_actions = CES_ACTIONS_BAD - CES_ACTIONS_GOOD
+    if denom_actions <= 0:
+        s_actions = 1.0
+    else:
+        s_actions = _clamp((CES_ACTIONS_BAD - avg_actions) / denom_actions)
+
+    s_trunc = _clamp(1.0 - r_t)
+
+    latency_by_action = item.get("latency_by_action") or {}
+    eligible: dict[str, dict] = {}
+    total_n = 0
+    for action_name, payload in latency_by_action.items():
+        if not isinstance(payload, dict):
+            continue
+        if action_name not in CES_LATENCY_ACTION_WHITELIST:
+            continue
+        n_obs = int(payload.get("n") or 0)
+        p95_ms = int(payload.get("p95_ms") or 0)
+        if n_obs < CES_MIN_OBS_FOR_LATENCY or p95_ms <= 0:
+            continue
+        budget_ms = int(math.ceil(p95_ms * 1.10))
+        eligible[action_name] = {"n": n_obs, "p95_ms": p95_ms, "budget_ms": budget_ms}
+        total_n += n_obs
+
+    if total_n <= 0:
+        s_latency = 1.0
+        budgets_used = {}
+    else:
+        s_latency = 0.0
+        budgets_used = {}
+        for action_name, payload in sorted(eligible.items()):
+            weight = payload["n"] / total_n
+            action_score = _clamp(payload["budget_ms"] / payload["p95_ms"])
+            s_latency += weight * action_score
+            budgets_used[action_name] = {
+                "n": payload["n"],
+                "p95_ms": payload["p95_ms"],
+                "budget_ms": payload["budget_ms"],
+                "weight": round(weight, 6),
+            }
+        s_latency = _clamp(s_latency)
+
+    ces_value = 100.0 * (
+        CES_COMPONENT_WEIGHTS["status"] * s_status
+        + CES_COMPONENT_WEIGHTS["actions"] * s_actions
+        + CES_COMPONENT_WEIGHTS["latency"] * s_latency
+        + CES_COMPONENT_WEIGHTS["trunc"] * s_trunc
+    )
+
+    return {
+        "ces": round(_clamp(ces_value, 0.0, 100.0), 2),
+        "ces_reason": None,
+        "ces_version": CES_VERSION,
+        "ces_components": {
+            "status": round(s_status, 4),
+            "actions": round(s_actions, 4),
+            "latency": round(s_latency, 4),
+            "trunc": round(s_trunc, 4),
+        },
+        "budgets_used": budgets_used,
+    }
 
 
 def _build_alerts_by_date(alert_rows: list[tuple]) -> dict[str, dict]:
@@ -184,6 +310,7 @@ async def get_daily_metrics(
             item["alerted"] = False
             item["alert_count"] = 0
             item["alert_reasons"] = []
+        item.update(_compute_ces_fields(item))
         items.append(item)
 
     return {"items": items}
@@ -273,6 +400,7 @@ async def get_metrics_overview(
             item["alerted"] = False
             item["alert_count"] = 0
             item["alert_reasons"] = []
+        item.update(_compute_ces_fields(item))
         items.append(item)
 
     # Resumo agregado do periodo.
@@ -294,6 +422,36 @@ async def get_metrics_overview(
         summary["failed_ratio"] = 0.0
         summary["blocked_ratio"] = 0.0
         summary["truncated_ratio"] = 0.0
+
+    # CES agregado do periodo (media ponderada por total_runs).
+    items_with_runs = [item for item in items if item["ces"] is not None and item["total_runs"] > 0]
+    weighted_runs = sum(item["total_runs"] for item in items_with_runs)
+    if weighted_runs > 0:
+        summary["ces"] = round(
+            sum(float(item["ces"]) * item["total_runs"] for item in items_with_runs)
+            / weighted_runs,
+            2,
+        )
+        summary["ces_reason"] = None
+        summary["ces_version"] = CES_VERSION
+        summary["ces_components"] = {
+            key: round(
+                sum(float(item["ces_components"][key]) * item["total_runs"] for item in items_with_runs)
+                / weighted_runs,
+                4,
+            )
+            for key in ("status", "actions", "latency", "trunc")
+        }
+    else:
+        summary["ces"] = None
+        summary["ces_reason"] = "no_runs"
+        summary["ces_version"] = CES_VERSION
+        summary["ces_components"] = {
+            "status": None,
+            "actions": None,
+            "latency": None,
+            "trunc": None,
+        }
 
     return {"items": items, "summary": summary}
 
