@@ -43,6 +43,32 @@ CES_LATENCY_ACTION_WHITELIST = {
 }
 
 
+def _get_int_env(name: str, default: int) -> int:
+    """
+    Le inteiro de env com fallback deterministico.
+    """
+    import os
+
+    raw = os.getenv(name)
+    try:
+        return int(raw) if raw is not None else default
+    except Exception:
+        return default
+
+
+def _get_float_env(name: str, default: float) -> float:
+    """
+    Le float de env com fallback deterministico.
+    """
+    import os
+
+    raw = os.getenv(name)
+    try:
+        return float(raw) if raw is not None else default
+    except Exception:
+        return default
+
+
 def _parse_date(value: str | None, label: str) -> date | None:
     """
     Converte string YYYY-MM-DD em date.
@@ -219,6 +245,48 @@ def _compute_ces_fields(item: dict) -> dict:
         "ces_components": default_payload["ces_components"],
         "budgets_used": default_payload["budgets_used"],
         "ces_versions": ces_versions,
+    }
+
+
+def _compute_ces_window_summary(items: list[dict]) -> dict:
+    """
+    Calcula metadados de janela CES refletindo a regra do alerta.
+    Regras:
+    - considera apenas os ultimos W dias validos do range retornado
+    - dia valido: ces != null e ces_reason != "no_runs"
+    - dia ruim: ces < threshold
+    """
+    window_days = _get_int_env("COGNITIVE_ALERT_CES_WINDOW_DAYS", 7)
+    if window_days < 1:
+        window_days = 1
+    threshold = _get_float_env("COGNITIVE_ALERT_CES_THRESHOLD", 85.0)
+    bad_days_required = _get_int_env("COGNITIVE_ALERT_CES_BAD_DAYS", 3)
+    if bad_days_required < 1:
+        bad_days_required = 1
+
+    valid_items = [
+        item
+        for item in items
+        if item.get("ces") is not None and item.get("ces_reason") != "no_runs"
+    ]
+    window_items = valid_items[-window_days:]
+    effective_days = len(window_items)
+    bad_days = 0
+    for item in window_items:
+        if float(item.get("ces")) < threshold:
+            bad_days += 1
+
+    ratio = None
+    if effective_days > 0:
+        ratio = round(bad_days / effective_days, 4)
+
+    return {
+        "ces_window_days": window_days,
+        "ces_window_effective_days": effective_days,
+        "ces_threshold": threshold,
+        "ces_bad_days_required": bad_days_required,
+        "ces_bad_days_in_window": bad_days,
+        "ces_bad_days_ratio": ratio,
     }
 
 
@@ -510,6 +578,7 @@ async def get_metrics_overview(
     summary["ces_version"] = CES_DEFAULT_VERSION
     summary["ces_components"] = default_summary["ces_components"]
     summary["ces_versions"] = ces_versions_summary
+    summary.update(_compute_ces_window_summary(items))
 
     return {"items": items, "summary": summary}
 
