@@ -77,7 +77,27 @@ Emissao de loop finalizado:
 - Se `run_loop` receber um processo ja terminado, usa `stop_reason=already_terminated` e tenta emitir uma vez.
 - Se o par ja existir, a emissao e ignorada (dedupe).
 
-## CES v1 (latency score)
+## Cognitive Efficiency Score (CES)
+
+### CES Versions
+
+Regra de versionamento:
+- `CES_v1` e congelado e imutavel.
+- Novas formulas entram como novas versoes (`CES_v2`, `CES_v3`, ...).
+- `ces_default_version` inicial: `CES_v1`.
+- Campos top-level (`ces`, `ces_version`, `ces_reason`, `ces_components`, `budgets_used`) sempre refletem a versao default.
+- `CES_v2` fica disponivel em `ces_versions`, sem alterar o default.
+
+Shape canonicamente exposto por item:
+- `ces_default_version`
+- `ces`
+- `ces_version`
+- `ces_reason`
+- `ces_components`
+- `budgets_used`
+- `ces_versions` (`CES_v1`, `CES_v2`)
+
+### CES_v1
 
 Acoes canonicamente consideradas no `S_latency` e em `budgets_used`:
 - `collect_video`
@@ -93,6 +113,30 @@ Elegibilidade:
 Regra:
 - `unknown` e excluido por design do latency score e de `budgets_used`.
 - `unknown` pode aparecer em `latency_by_action` (telemetria bruta), mas nao participa de `S_latency`, pesos `n_a`, budgets `B_a` ou do CES.
+
+Regra de dia sem execucao:
+- Se `total_runs = 0`, retorna `ces = null` e `ces_reason = "no_runs"`.
+
+### CES_v2
+
+CES_v2 usa os mesmos sinais de entrada do CES_v1 (`status`, `actions`, `latency`, `trunc`) e
+mantem as mesmas restricoes de whitelist/elegibilidade:
+- whitelist de acoes identica ao CES_v1
+- `n >= 10` para acao participar de `S_latency`
+- `unknown` excluido por design
+- `total_runs = 0` => `ces = null` e `ces_reason = "no_runs"`
+
+Diferenca principal:
+- `S_latency` usa penalizacao suave por excesso relativo ao budget da acao.
+- Para cada acao elegivel:
+  - `budget_ms = ceil(p95_ms * 1.10)`
+  - `ratio = p95_ms / budget_ms`
+  - `score_a = 1` quando `ratio <= 1`
+  - `score_a = clamp(1 - k * (ratio - 1), 0, 1)` quando `ratio > 1` (com `k = 0.7`)
+  - `S_latency` e a media ponderada por `n` das acoes elegiveis.
+
+Politica:
+- CES_v2 nao altera CES_v1; apenas expande a leitura em `ces_versions`.
 
 ## Variaveis de ambiente
 
