@@ -145,6 +145,88 @@ Diferenca principal:
 Politica:
 - CES_v2 nao altera CES_v1; apenas expande a leitura em `ces_versions`.
 
+### Cognitive Efficiency Score - Run-level
+
+Versao:
+- `CES_run_v1` (congelado e imutavel).
+- Mudancas futuras geram novas versoes (`CES_run_v2`, `CES_run_v3`, ...).
+
+Fonte de verdade:
+- Para cada `process_id`, usar o `cognitive_loop_finished` mais recente por `timestamp`.
+- Evento de fechamento: `facts.event_type = "cognitive_loop_finished"`.
+- Dedupe de emissao continua por `(process_id, source_outcome_id)`.
+
+Componentes do `CES_run_v1`:
+- `S_status` por tabela fixa:
+  - `published=1.00`
+  - `completed=0.98`
+  - `truncated=0.70`
+  - `failed=0.35`
+  - `blocked=0.10`
+  - `unknown=0.00`
+- `S_actions = clamp((6 - A) / (6 - 1), 0, 1)`, com `A = actions_executed`.
+  - Se `actions_executed` ausente: `A=0` e `S_actions=0` (fallback deterministico).
+- `S_trunc = 0` quando `pipeline_status = truncated`, senao `1`.
+- Latencia real por run:
+  - Duracao por acao: `duration_ms = outcome.timestamp - decision.timestamp`.
+  - Pareamento por `process_id` + `source_decision_id == decision_id`.
+  - Em caso de multiplos outcomes para a mesma decision, usar o mais recente por timestamp.
+  - Whitelist: `collect_video`, `extract_audio`, `segment_audio`, `transcribe_segments`, `write_artifact`, `publish_manifest`.
+  - `unknown` e excluido por design.
+  - Elegibilidade run-level: a acao entra no score quando `n >= 3` dentro do run.
+  - Budgets fixos iniciais (ms):
+    - `collect_video`: 20000
+    - `extract_audio`: 5000
+    - `segment_audio`: 8000
+    - `transcribe_segments`: 30000
+    - `write_artifact`: 3000
+    - `publish_manifest`: 3000
+  - Score por acao:
+    - `ratio = p95_ms / budget_ms`
+    - se `ratio <= 1`: `score_a = 1`
+    - se `ratio > 1`: `score_a = clamp(1 - 0.7 * (ratio - 1), 0, 1)`
+  - `S_latency` e media ponderada por `n` das acoes elegiveis.
+  - Se nao houver acao elegivel:
+    - `S_latency = 1.0`
+    - `latency_measured = false`
+    - `budgets_used = {}`
+  - Auditoria read-only do calculo:
+    - `latency_pairs_used`: pares `decision -> outcome` usados.
+    - `latency_pairs_ignored`: pares ignorados (sem match, fora da whitelist, timestamp invalido).
+    - `latency_pairs_inverted`: pares com `decision_ts > outcome_ts`.
+  - `latency_pairs_*` nao alteram o score; sao apenas telemetria de auditoria.
+  - Invariante esperado: `latency_pairs_inverted = 0`; se maior que zero, tratar como investigacao de clock drift/ordem de eventos.
+
+### Run debug view
+
+Endpoint read-only:
+- `GET /api/v1/metrics/runs/{process_id}`
+
+Contrato minimo:
+- `run_summary` com status final, CES_run, componentes e auditoria de latencia (`latency_pairs_*`).
+- `links` com `observation_id`, `source_outcome_id`, `source_decision_id`, `manifest_decision_id`, `publish_decision_id`.
+- `artifact_refs` com `manifest_path` e `publish_receipt_id`.
+- `last_error` sanitizado (`error_type`, `error_message` sem paths sensiveis).
+- `latency_breakdown` somente para acoes whitelist.
+- `missing_fields` quando algum dado opcional nao estiver disponivel.
+
+Fonte de verdade:
+- ultimo `cognitive_loop_finished` no Postgres para o `process_id`.
+
+Pesos do `CES_run_v1`:
+- `alpha=0.60` (status)
+- `beta=0.15` (actions)
+- `gamma=0.20` (latency)
+- `delta=0.05` (trunc)
+
+Formula:
+- `CES_run_v1 = 100 * (alpha*S_status + beta*S_actions + gamma*S_latency + delta*S_trunc)`
+- Clamp final em `[0, 100]`.
+
+Casos ausentes:
+- Se nao existir `cognitive_loop_finished` para o `process_id`: `ces_run = null`, `ces_run_reason = "missing_finished_observation"`.
+- Se `pipeline_status` ausente no evento: `pipeline_status = "unknown"`, `ces_run = null`, `ces_run_reason = "missing_pipeline_status"`.
+
 ### CES Window Counter
 
 `summary.ces_bad_days_in_window`:
@@ -210,4 +292,15 @@ Query params:
 curl -s "http://localhost:8000/api/v1/metrics/daily?start_date=2026-02-10&end_date=2026-02-10"
 curl -s "http://localhost:8000/api/v1/metrics/overview?days=7"
 curl -s "http://localhost:8000/api/v1/metrics/alerts?start_date=2026-02-10&end_date=2026-02-10"
+```
+
+## Evidencia operacional (smoke runtime)
+
+Data UTC: `2026-02-16T21:55:01Z`
+Commit: `3622bf2`
+
+```json
+{"process_id":"P_PUBLISH_FLOW2","pipeline_status":"completed","execution_status":"success","ces_run":98.8,"latency_measured":false,"latency_pairs":{"used":2,"ignored":0,"inverted":0},"source_outcome_id":"a45a3872-1a7d-496b-b160-296ec033121e","last_error":{"error_type":null,"error_message":null}}
+{"process_id":"P_VIDEO_6c2ff2f2-f28a-4c9f-9d5d-b4640b31d427","pipeline_status":"published","execution_status":"success","ces_run":100.0,"latency_measured":false,"latency_pairs":{"used":6,"ignored":1,"inverted":0},"source_outcome_id":"dfc94ca4-a948-4387-8fe5-4016f2182138","last_error":{"error_type":null,"error_message":null}}
+{"process_id":"P_BLOCKED_EVIDENCE_4b29ae9a","pipeline_status":"blocked","execution_status":"blocked","ces_run":31.0,"latency_measured":false,"latency_pairs":{"used":0,"ignored":1,"inverted":0},"source_outcome_id":"61d985e7-65aa-4795-a0f4-2c2a054b84ea","last_error":{"error_type":"ArtifactNotFound","error_message":"manifest nao encontrado: <path>/agent_output/MISSING_MANIFEST_6f586b602f8e4b3aa6bf662b145fde03.json"}}
 ```
