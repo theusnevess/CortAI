@@ -1,6 +1,7 @@
 import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+import json
 
 import pytest
 from sqlalchemy import delete
@@ -268,6 +269,439 @@ async def test_alerts_range_vazio(client):
     assert payload["total"] == 0
     assert payload["limit"] == 10
     assert payload["offset"] == 0
+
+
+@pytest.mark.anyio
+async def test_runs_range_vazio(client):
+    """
+    Valida /metrics/runs sem dados no periodo.
+    """
+    response = await client.get(
+        "/api/v1/metrics/runs",
+        params={"start_date": "2099-01-01", "end_date": "2099-01-01", "limit": 10, "offset": 0},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["items"] == []
+    assert payload["total"] == 0
+    assert payload["limit"] == 10
+    assert payload["offset"] == 0
+
+
+@pytest.mark.anyio
+async def test_runs_um_completed(client, seed_observation):
+    """
+    Valida CES_run_v1 para run completed.
+    """
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 12, 0, 0),
+        process_id="P_RUN_COMPLETED_1",
+        source_outcome_id="outcome-run-1",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "completed",
+            "actions_executed": 2,
+            "termination_reason": "pipeline_complete",
+        },
+    )
+    response = await client.get(
+        "/api/v1/metrics/runs",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["process_id"] == "P_RUN_COMPLETED_1"
+    assert item["pipeline_status"] == "completed"
+    assert item["ces_run_version"] == "CES_run_v1"
+    assert item["ces_run_reason"] is None
+    assert item["latency_measured"] is False
+    assert item["budgets_used"] == {}
+    assert item["ces_run_components"]["latency"] == 1.0
+    assert item["latency_pairs_used"] == 0
+    assert item["latency_pairs_ignored"] == 0
+    assert item["latency_pairs_inverted"] == 0
+    assert isinstance(item["ces_run"], float)
+
+
+@pytest.mark.anyio
+async def test_runs_dedupe_por_process_id(client, seed_observation):
+    """
+    Valida dedupe por process_id usando o registro mais recente.
+    """
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 10, 0, 0),
+        process_id="P_RUN_DEDUPE_1",
+        source_outcome_id="outcome-run-old",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "failed",
+            "actions_executed": 1,
+        },
+    )
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 12, 0, 0),
+        process_id="P_RUN_DEDUPE_1",
+        source_outcome_id="outcome-run-new",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "published",
+            "actions_executed": 1,
+        },
+    )
+    response = await client.get(
+        "/api/v1/metrics/runs",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    items = response.json()["items"]
+    selected = next(i for i in items if i["process_id"] == "P_RUN_DEDUPE_1")
+    assert selected["pipeline_status"] == "published"
+
+
+@pytest.mark.anyio
+async def test_runs_ordenacao_desc(client, seed_observation):
+    """
+    Valida ordenacao por timestamp_finished desc.
+    """
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 9, 0, 0),
+        process_id="P_RUN_ORDER_OLD",
+        source_outcome_id="outcome-order-old",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "completed",
+            "actions_executed": 1,
+        },
+    )
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 13, 0, 0),
+        process_id="P_RUN_ORDER_NEW",
+        source_outcome_id="outcome-order-new",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "completed",
+            "actions_executed": 1,
+        },
+    )
+    response = await client.get(
+        "/api/v1/metrics/runs",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    items = response.json()["items"]
+    idx_new = next(i for i, item in enumerate(items) if item["process_id"] == "P_RUN_ORDER_NEW")
+    idx_old = next(i for i, item in enumerate(items) if item["process_id"] == "P_RUN_ORDER_OLD")
+    assert idx_new < idx_old
+
+
+def _write_jsonl(path, rows):
+    """
+    Escreve linhas JSONL para fixtures de latencia em testes.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row))
+            f.write("\n")
+
+
+@pytest.mark.anyio
+async def test_runs_latency_measured_true_com_n_elegivel(client, seed_observation, monkeypatch, tmp_path):
+    """
+    Mede latencia real quando existe acao elegivel com n >= 3 no run.
+    """
+    process_id = "P_RUN_LAT_OK"
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 12, 10, 0),
+        process_id=process_id,
+        source_outcome_id="outcome-run-lat-ok",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "completed",
+            "actions_executed": 2,
+        },
+    )
+
+    monkeypatch.setenv("CORTAI_STORAGE_DIR", str(tmp_path))
+    _write_jsonl(
+        tmp_path / "decision_log.jsonl",
+        [
+            {
+                "process_id": process_id,
+                "decision_id": "d1",
+                "timestamp": "2026-02-10T12:00:00Z",
+                "action": {"type": "transcribe_segments"},
+            },
+            {
+                "process_id": process_id,
+                "decision_id": "d2",
+                "timestamp": "2026-02-10T12:01:00Z",
+                "action": {"type": "transcribe_segments"},
+            },
+            {
+                "process_id": process_id,
+                "decision_id": "d3",
+                "timestamp": "2026-02-10T12:02:00Z",
+                "action": {"type": "transcribe_segments"},
+            },
+        ],
+    )
+    _write_jsonl(
+        tmp_path / "outcome_log.jsonl",
+        [
+            {
+                "process_id": process_id,
+                "source_decision_id": "d1",
+                "timestamp": "2026-02-10T12:00:35Z",
+                "metrics": {"last_action_type": "transcribe_segments"},
+            },
+            {
+                "process_id": process_id,
+                "source_decision_id": "d2",
+                "timestamp": "2026-02-10T12:01:35Z",
+                "metrics": {"last_action_type": "transcribe_segments"},
+            },
+            {
+                "process_id": process_id,
+                "source_decision_id": "d3",
+                "timestamp": "2026-02-10T12:02:35Z",
+                "metrics": {"last_action_type": "transcribe_segments"},
+            },
+        ],
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/runs",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    item = next(i for i in response.json()["items"] if i["process_id"] == process_id)
+    assert item["latency_measured"] is True
+    assert item["budgets_used"]["transcribe_segments"]["n"] == 3
+    assert item["ces_run_components"]["latency"] < 1.0
+    assert item["latency_pairs_used"] >= 3
+    assert item["latency_pairs_inverted"] == 0
+
+
+@pytest.mark.anyio
+async def test_runs_latency_fallback_quando_n_menor_que_3(client, seed_observation, monkeypatch, tmp_path):
+    """
+    Mantem fallback de latencia quando n elegivel e insuficiente.
+    """
+    process_id = "P_RUN_LAT_LOW_N"
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 12, 10, 0),
+        process_id=process_id,
+        source_outcome_id="outcome-run-lat-low",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "completed",
+            "actions_executed": 2,
+        },
+    )
+
+    monkeypatch.setenv("CORTAI_STORAGE_DIR", str(tmp_path))
+    _write_jsonl(
+        tmp_path / "decision_log.jsonl",
+        [
+            {
+                "process_id": process_id,
+                "decision_id": "d1",
+                "timestamp": "2026-02-10T12:00:00Z",
+                "action": {"type": "transcribe_segments"},
+            },
+            {
+                "process_id": process_id,
+                "decision_id": "d2",
+                "timestamp": "2026-02-10T12:01:00Z",
+                "action": {"type": "transcribe_segments"},
+            },
+        ],
+    )
+    _write_jsonl(
+        tmp_path / "outcome_log.jsonl",
+        [
+            {
+                "process_id": process_id,
+                "source_decision_id": "d1",
+                "timestamp": "2026-02-10T12:00:05Z",
+                "metrics": {"last_action_type": "transcribe_segments"},
+            },
+            {
+                "process_id": process_id,
+                "source_decision_id": "d2",
+                "timestamp": "2026-02-10T12:01:05Z",
+                "metrics": {"last_action_type": "transcribe_segments"},
+            },
+        ],
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/runs",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    item = next(i for i in response.json()["items"] if i["process_id"] == process_id)
+    assert item["latency_measured"] is False
+    assert item["ces_run_components"]["latency"] == 1.0
+    assert item["budgets_used"] == {}
+    assert item["latency_pairs_used"] == 2
+    assert item["latency_pairs_inverted"] == 0
+
+
+@pytest.mark.anyio
+async def test_runs_latency_exclui_unknown(client, seed_observation, monkeypatch, tmp_path):
+    """
+    Garante que unknown nao participa do score de latencia do run.
+    """
+    process_id = "P_RUN_LAT_UNKNOWN"
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 12, 10, 0),
+        process_id=process_id,
+        source_outcome_id="outcome-run-lat-unknown",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "completed",
+            "actions_executed": 2,
+        },
+    )
+
+    monkeypatch.setenv("CORTAI_STORAGE_DIR", str(tmp_path))
+    _write_jsonl(
+        tmp_path / "decision_log.jsonl",
+        [
+            {
+                "process_id": process_id,
+                "decision_id": "d1",
+                "timestamp": "2026-02-10T12:00:00Z",
+                "action": {"type": "transcribe_segments"},
+            },
+            {
+                "process_id": process_id,
+                "decision_id": "d2",
+                "timestamp": "2026-02-10T12:01:00Z",
+                "action": {"type": "transcribe_segments"},
+            },
+            {
+                "process_id": process_id,
+                "decision_id": "d3",
+                "timestamp": "2026-02-10T12:02:00Z",
+                "action": {"type": "transcribe_segments"},
+            },
+            {
+                "process_id": process_id,
+                "decision_id": "u1",
+                "timestamp": "2026-02-10T12:03:00Z",
+                "action": {"type": "unknown"},
+            },
+            {
+                "process_id": process_id,
+                "decision_id": "u2",
+                "timestamp": "2026-02-10T12:04:00Z",
+                "action": {"type": "unknown"},
+            },
+            {
+                "process_id": process_id,
+                "decision_id": "u3",
+                "timestamp": "2026-02-10T12:05:00Z",
+                "action": {"type": "unknown"},
+            },
+        ],
+    )
+    _write_jsonl(
+        tmp_path / "outcome_log.jsonl",
+        [
+            {
+                "process_id": process_id,
+                "source_decision_id": "d1",
+                "timestamp": "2026-02-10T12:00:35Z",
+                "metrics": {"last_action_type": "transcribe_segments"},
+            },
+            {
+                "process_id": process_id,
+                "source_decision_id": "d2",
+                "timestamp": "2026-02-10T12:01:35Z",
+                "metrics": {"last_action_type": "transcribe_segments"},
+            },
+            {
+                "process_id": process_id,
+                "source_decision_id": "d3",
+                "timestamp": "2026-02-10T12:02:35Z",
+                "metrics": {"last_action_type": "transcribe_segments"},
+            },
+            {
+                "process_id": process_id,
+                "source_decision_id": "u1",
+                "timestamp": "2026-02-10T12:03:50Z",
+                "metrics": {"last_action_type": "unknown"},
+            },
+            {
+                "process_id": process_id,
+                "source_decision_id": "u2",
+                "timestamp": "2026-02-10T12:04:50Z",
+                "metrics": {"last_action_type": "unknown"},
+            },
+            {
+                "process_id": process_id,
+                "source_decision_id": "u3",
+                "timestamp": "2026-02-10T12:05:50Z",
+                "metrics": {"last_action_type": "unknown"},
+            },
+        ],
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/runs",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    item = next(i for i in response.json()["items"] if i["process_id"] == process_id)
+    assert item["latency_measured"] is True
+    assert "transcribe_segments" in item["budgets_used"]
+    assert "unknown" not in item["budgets_used"]
+    assert item["latency_pairs_used"] == 3
+
+
+@pytest.mark.anyio
+async def test_run_debug_not_found(client):
+    """
+    Retorna 404 quando process_id nao possui cognitive_loop_finished.
+    """
+    response = await client.get("/api/v1/metrics/runs/P_RUN_DEBUG_NOT_FOUND")
+    assert response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_run_debug_view_basica(client, seed_observation):
+    """
+    Retorna visao de debug read-only para um run existente.
+    """
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 16, 0, 0),
+        process_id="P_RUN_DEBUG_1",
+        source_outcome_id="outcome-run-debug-1",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "blocked",
+            "execution_status": "blocked",
+            "source_decision_id": "decision-run-debug-1",
+            "actions_executed": 1,
+        },
+    )
+    response = await client.get("/api/v1/metrics/runs/P_RUN_DEBUG_1")
+    assert response.status_code == 200
+    payload = response.json()
+    run_summary = payload["run_summary"]
+    assert run_summary["process_id"] == "P_RUN_DEBUG_1"
+    assert run_summary["pipeline_status"] == "blocked"
+    assert run_summary["execution_status"] == "blocked"
+    assert isinstance(run_summary["latency_pairs_used"], int)
+    assert isinstance(run_summary["latency_pairs_ignored"], int)
+    assert isinstance(run_summary["latency_pairs_inverted"], int)
+    assert payload["links"]["observation_id"] is not None
+    assert payload["links"]["source_outcome_id"] == "outcome-run-debug-1"
+    assert "latency_breakdown" in payload
+    assert isinstance(payload["missing_fields"], list)
 
 
 @pytest.mark.anyio

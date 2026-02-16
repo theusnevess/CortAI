@@ -1,11 +1,15 @@
 import math
-from datetime import date, datetime, timedelta
+import json
+import os
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import CognitiveMetricsDaily, ObservationRecord
+from app.db.models import CognitiveMetricsDaily, ObservationRecord, PublishReceipt
 from app.db.session import get_db
 
 router = APIRouter()
@@ -27,6 +31,7 @@ PROHIBITED_FACT_KEYS = {
 CES_DEFAULT_VERSION = "CES_v1"
 CES_V1 = "CES_v1"
 CES_V2 = "CES_v2"
+CES_RUN_V1 = "CES_run_v1"
 CES_STATUS_WEIGHTS = {"blocked": 1.0, "failed": 0.6, "truncated": 0.3}
 CES_COMPONENT_WEIGHTS = {"status": 0.55, "actions": 0.15, "latency": 0.25, "trunc": 0.05}
 CES_ACTIONS_GOOD = 1.0
@@ -41,6 +46,25 @@ CES_LATENCY_ACTION_WHITELIST = {
     "write_artifact",
     "publish_manifest",
 }
+CES_RUN_STATUS_SCORE = {
+    "published": 1.00,
+    "completed": 0.98,
+    "truncated": 0.70,
+    "failed": 0.35,
+    "blocked": 0.10,
+    "unknown": 0.00,
+}
+CES_RUN_LATENCY_MIN_OBS = 3
+CES_RUN_LATENCY_SLOPE = 0.7
+CES_RUN_BUDGETS_MS = {
+    "collect_video": 20000,
+    "extract_audio": 5000,
+    "segment_audio": 8000,
+    "transcribe_segments": 30000,
+    "write_artifact": 3000,
+    "publish_manifest": 3000,
+}
+MANIFEST_OUTPUT_DIR = "agent_output"
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -111,6 +135,212 @@ def _clamp(value: float, min_value: float = 0.0, max_value: float = 1.0) -> floa
     Limita valor numerico no intervalo [min_value, max_value].
     """
     return max(min_value, min(max_value, value))
+
+
+def _safe_int(value, default: int = 0) -> int:
+    """
+    Converte valor para int com fallback seguro.
+    """
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """
+    Converte valor para float com fallback seguro.
+    """
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    """
+    Converte timestamp ISO para datetime.
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except Exception:
+        return None
+
+
+def _p95(values: list[int]) -> int:
+    """
+    Calcula p95 por nearest-rank.
+    """
+    if not values:
+        return 0
+    ordered = sorted(values)
+    idx = int(0.95 * (len(ordered) - 1))
+    return int(ordered[idx])
+
+
+def _read_jsonl_rows(path: Path) -> list[dict]:
+    """
+    Le arquivo JSONL com fallback seguro.
+    """
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                rows.append(obj)
+    return rows
+
+
+def _get_storage_paths() -> tuple[Path, Path]:
+    """
+    Resolve caminhos dos logs de decision/outcome.
+    """
+    base = Path(os.getenv("CORTAI_STORAGE_DIR", "storage"))
+    return base / "decision_log.jsonl", base / "outcome_log.jsonl"
+
+
+def _build_run_latency_map(run_anchors: dict[str, dict]) -> dict[str, dict]:
+    """
+    Calcula latencia real por run a partir de decision/outcome logs.
+    """
+    if not run_anchors:
+        return {}
+
+    process_ids = set(run_anchors.keys())
+    decision_path, outcome_path = _get_storage_paths()
+    decisions = _read_jsonl_rows(decision_path)
+    outcomes = _read_jsonl_rows(outcome_path)
+
+    decisions_by_pid: dict[str, list[dict]] = {}
+    for row in decisions:
+        pid = row.get("process_id")
+        did = row.get("decision_id")
+        ts = _parse_ts(row.get("timestamp"))
+        if pid not in process_ids or not isinstance(did, str) or ts is None:
+            continue
+        finished_ts = run_anchors[pid]["timestamp_finished"]
+        if ts > finished_ts:
+            continue
+        action = row.get("action") if isinstance(row.get("action"), dict) else {}
+        action_type = action.get("type") or row.get("action_type") or "unknown"
+        decisions_by_pid.setdefault(pid, []).append(
+            {"decision_id": did, "timestamp": ts, "action_type": str(action_type)}
+        )
+
+    latest_outcome_by_key: dict[tuple[str, str], dict] = {}
+    for row in outcomes:
+        pid = row.get("process_id")
+        sid = row.get("source_decision_id")
+        ots = _parse_ts(row.get("timestamp"))
+        if pid not in process_ids or not isinstance(sid, str) or ots is None:
+            continue
+        finished_ts = run_anchors[pid]["timestamp_finished"]
+        if ots > finished_ts:
+            continue
+        key = (pid, sid)
+        prev = latest_outcome_by_key.get(key)
+        if prev is None or ots >= prev["timestamp"]:
+            metrics_payload = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            latest_outcome_by_key[key] = {
+                "timestamp": ots,
+                "last_action_type": metrics_payload.get("last_action_type"),
+            }
+
+    result: dict[str, dict] = {}
+    for pid in process_ids:
+        action_durations: dict[str, list[int]] = {}
+        pairs_used = 0
+        pairs_ignored = 0
+        pairs_inverted = 0
+
+        decisions_for_pid = decisions_by_pid.get(pid, [])
+        decision_ids = {d["decision_id"] for d in decisions_for_pid}
+        for outcome_decision_id in latest_outcome_by_key.keys():
+            out_pid, out_sid = outcome_decision_id
+            if out_pid != pid:
+                continue
+            if out_sid not in decision_ids:
+                pairs_ignored += 1
+
+        for decision in decisions_for_pid:
+            out = latest_outcome_by_key.get((pid, decision["decision_id"]))
+            if not out:
+                pairs_ignored += 1
+                continue
+            delta_ms = int((out["timestamp"] - decision["timestamp"]).total_seconds() * 1000)
+            if delta_ms < 0:
+                pairs_ignored += 1
+                pairs_inverted += 1
+                continue
+            action_type = out.get("last_action_type") or decision["action_type"] or "unknown"
+            if action_type not in CES_RUN_BUDGETS_MS:
+                pairs_ignored += 1
+                continue
+            action_durations.setdefault(str(action_type), []).append(delta_ms)
+            pairs_used += 1
+
+        eligible = {
+            action: durations
+            for action, durations in action_durations.items()
+            if len(durations) >= CES_RUN_LATENCY_MIN_OBS
+        }
+        if not eligible:
+            result[pid] = {
+                "latency_score": 1.0,
+                "latency_measured": False,
+                "budgets_used": {},
+                "latency_pairs_used": pairs_used,
+                "latency_pairs_ignored": pairs_ignored,
+                "latency_pairs_inverted": pairs_inverted,
+            }
+            continue
+
+        total_n = sum(len(v) for v in eligible.values())
+        latency_score = 0.0
+        budgets_used: dict[str, dict] = {}
+        for action, durations in sorted(eligible.items()):
+            n_obs = len(durations)
+            p95_ms = _p95(durations)
+            budget_ms = CES_RUN_BUDGETS_MS[action]
+            ratio = p95_ms / budget_ms if budget_ms > 0 else 1.0
+            if ratio <= 1.0:
+                action_score = 1.0
+            else:
+                action_score = _clamp(1.0 - CES_RUN_LATENCY_SLOPE * (ratio - 1.0))
+            weight = n_obs / total_n if total_n else 0.0
+            latency_score += weight * action_score
+            budgets_used[action] = {
+                "n": n_obs,
+                "p95_ms": p95_ms,
+                "budget_ms": budget_ms,
+                "ratio_a": round(ratio, 6),
+                "score_a": round(action_score, 6),
+                "weight": round(weight, 6),
+            }
+
+        result[pid] = {
+            "latency_score": round(_clamp(latency_score), 4),
+            "latency_measured": True,
+            "budgets_used": budgets_used,
+            "latency_pairs_used": pairs_used,
+            "latency_pairs_ignored": pairs_ignored,
+            "latency_pairs_inverted": pairs_inverted,
+        }
+
+    return result
 
 
 def _compute_latency_inputs(item: dict) -> tuple[dict[str, dict], int]:
@@ -288,6 +518,123 @@ def _compute_ces_window_summary(items: list[dict]) -> dict:
         "ces_bad_days_in_window": bad_days,
         "ces_bad_days_ratio": ratio,
     }
+
+
+def _compute_ces_run_fields(facts: dict, latency_payload: dict | None = None) -> dict:
+    """
+    Calcula CES run-level v1 de forma deterministica.
+    """
+    pipeline_status = (facts or {}).get("pipeline_status")
+    if not pipeline_status:
+        return {
+            "pipeline_status": "unknown",
+            "ces_run": None,
+            "ces_run_version": CES_RUN_V1,
+            "ces_run_reason": "missing_pipeline_status",
+            "ces_run_components": {
+                "status": None,
+                "actions": None,
+                "latency": None,
+                "trunc": None,
+            },
+            "latency_measured": False,
+            "budgets_used": {},
+            "latency_pairs_used": 0,
+            "latency_pairs_ignored": 0,
+            "latency_pairs_inverted": 0,
+        }
+
+    status_score = CES_RUN_STATUS_SCORE.get(str(pipeline_status), CES_RUN_STATUS_SCORE["unknown"])
+    actions_value = (facts or {}).get("actions_executed")
+    if actions_value is None:
+        actions_score = 0.0
+    else:
+        actions_int = _safe_int(actions_value)
+        actions_score = _clamp((6.0 - actions_int) / (6.0 - 1.0))
+    trunc_score = 0.0 if str(pipeline_status) == "truncated" else 1.0
+    latency_payload = latency_payload or {}
+    latency_score = _safe_float(latency_payload.get("latency_score", 1.0), 1.0)
+    latency_measured = bool(latency_payload.get("latency_measured", False))
+    budgets_used = latency_payload.get("budgets_used")
+    if not isinstance(budgets_used, dict):
+        budgets_used = {}
+    latency_pairs_used = _safe_int(latency_payload.get("latency_pairs_used"), 0)
+    latency_pairs_ignored = _safe_int(latency_payload.get("latency_pairs_ignored"), 0)
+    latency_pairs_inverted = _safe_int(latency_payload.get("latency_pairs_inverted"), 0)
+
+    ces_run = 100.0 * (
+        0.60 * status_score
+        + 0.15 * actions_score
+        + 0.20 * latency_score
+        + 0.05 * trunc_score
+    )
+    return {
+        "pipeline_status": str(pipeline_status),
+        "ces_run": round(_clamp(ces_run, 0.0, 100.0), 2),
+        "ces_run_version": CES_RUN_V1,
+        "ces_run_reason": None,
+        "ces_run_components": {
+            "status": round(status_score, 4),
+            "actions": round(actions_score, 4),
+            "latency": round(_clamp(latency_score), 4),
+            "trunc": round(trunc_score, 4),
+        },
+        "latency_measured": latency_measured,
+        "budgets_used": budgets_used,
+        "latency_pairs_used": latency_pairs_used,
+        "latency_pairs_ignored": latency_pairs_ignored,
+        "latency_pairs_inverted": latency_pairs_inverted,
+    }
+
+
+def _sanitize_error_message(message: Any) -> str | None:
+    """
+    Sanitiza mensagem de erro para evitar vazamento de paths sensiveis.
+    """
+    if not isinstance(message, str) or not message:
+        return None
+    sanitized = message
+    sanitized = sanitized.replace("\\", "/")
+    for token in ("/tmp/", "storage/", "videos-raw/", ".mp4", ".wav"):
+        if token in sanitized:
+            sanitized = sanitized.replace(token, "<path>/")
+    return sanitized[:500]
+
+
+def _find_outcome_for_process(
+    process_id: str, source_outcome_id: str | None
+) -> dict[str, Any] | None:
+    """
+    Busca outcome do processo no JSONL, preferindo o source_outcome_id do finished.
+    """
+    _, outcome_path = _get_storage_paths()
+    rows = _read_jsonl_rows(outcome_path)
+    if not rows:
+        return None
+
+    latest_for_process = None
+    latest_ts = None
+    target_by_id = None
+    for row in rows:
+        if row.get("process_id") != process_id:
+            continue
+        ts = _parse_ts(row.get("timestamp"))
+        if ts and (latest_ts is None or ts >= latest_ts):
+            latest_ts = ts
+            latest_for_process = row
+        if source_outcome_id and row.get("outcome_id") == source_outcome_id:
+            target_by_id = row
+    return target_by_id or latest_for_process
+
+
+def _manifest_path_from_decision_id(manifest_decision_id: str | None) -> str | None:
+    """
+    Resolve path canonico do manifest por decision_id.
+    """
+    if not isinstance(manifest_decision_id, str) or not manifest_decision_id:
+        return None
+    base = Path(os.getenv("ARTIFACT_OUTPUT_DIR", f"storage/{MANIFEST_OUTPUT_DIR}"))
+    return str(base / f"{manifest_decision_id}.json")
 
 
 def _build_alerts_by_date(alert_rows: list[tuple]) -> dict[str, dict]:
@@ -653,4 +1000,215 @@ async def get_alerts(
         "total": total,
         "limit": limit,
         "offset": offset,
+    }
+
+
+@router.get("/runs")
+async def get_runs(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Retorna runs por process_id deduplicados pelo ultimo cognitive_loop_finished no range.
+    """
+    start = _parse_date(start_date, "start_date")
+    end = _parse_date(end_date, "end_date")
+
+    if end is None:
+        end = datetime.utcnow().date()
+    if start is None:
+        start = end - timedelta(days=7)
+
+    if start > end:
+        raise HTTPException(status_code=400, detail="start_date must be <= end_date")
+
+    count_stmt = (
+        select(func.count(func.distinct(ObservationRecord.process_id)))
+        .where(ObservationRecord.facts["event_type"].astext == "cognitive_loop_finished")
+        .where(ObservationRecord.timestamp >= datetime.combine(start, datetime.min.time()))
+        .where(ObservationRecord.timestamp < datetime.combine(end + timedelta(days=1), datetime.min.time()))
+    )
+    total = (await db.execute(count_stmt)).scalar() or 0
+
+    stmt = (
+        select(
+            ObservationRecord.process_id,
+            ObservationRecord.observation_id,
+            ObservationRecord.timestamp,
+            ObservationRecord.facts,
+        )
+        .where(ObservationRecord.facts["event_type"].astext == "cognitive_loop_finished")
+        .where(ObservationRecord.timestamp >= datetime.combine(start, datetime.min.time()))
+        .where(ObservationRecord.timestamp < datetime.combine(end + timedelta(days=1), datetime.min.time()))
+        .order_by(desc(ObservationRecord.timestamp))
+    )
+    rows = (await db.execute(stmt)).all()
+
+    latest_by_process: dict[str, tuple] = {}
+    for process_id, observation_id, ts, facts in rows:
+        if not process_id or process_id in latest_by_process:
+            continue
+        latest_by_process[process_id] = (observation_id, ts, facts if isinstance(facts, dict) else {})
+
+    deduped = [
+        {
+            "process_id": pid,
+            "observation_id": payload[0],
+            "timestamp_finished": payload[1].isoformat() if payload[1] else None,
+            "timestamp_finished_dt": payload[1],
+            "facts": payload[2],
+        }
+        for pid, payload in latest_by_process.items()
+    ]
+
+    deduped.sort(key=lambda item: item["timestamp_finished"] or "", reverse=True)
+    paged = deduped[offset : offset + limit]
+
+    run_anchors = {}
+    for row in paged:
+        pid = row.get("process_id")
+        ts_finished = row.get("timestamp_finished_dt")
+        if not pid or not isinstance(ts_finished, datetime):
+            continue
+        if ts_finished.tzinfo is None:
+            ts_finished = ts_finished.replace(tzinfo=timezone.utc)
+        run_anchors[pid] = {"timestamp_finished": ts_finished}
+    run_latency_map = _build_run_latency_map(run_anchors)
+
+    items = []
+    for row in paged:
+        ces_payload = _compute_ces_run_fields(row["facts"], run_latency_map.get(row["process_id"]))
+        items.append(
+            {
+                "process_id": row["process_id"],
+                "timestamp_finished": row["timestamp_finished"],
+                "pipeline_status": ces_payload["pipeline_status"],
+                "ces_run": ces_payload["ces_run"],
+                "ces_run_version": ces_payload["ces_run_version"],
+                "ces_run_reason": ces_payload["ces_run_reason"],
+                "ces_run_components": ces_payload["ces_run_components"],
+                "latency_measured": ces_payload["latency_measured"],
+                "budgets_used": ces_payload["budgets_used"],
+                "latency_pairs_used": ces_payload["latency_pairs_used"],
+                "latency_pairs_ignored": ces_payload["latency_pairs_ignored"],
+                "latency_pairs_inverted": ces_payload["latency_pairs_inverted"],
+            }
+        )
+
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.get("/runs/{process_id}")
+async def get_run_debug(
+    process_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Retorna visao de debug de um run por process_id.
+    Fonte de verdade: ultimo cognitive_loop_finished no Postgres.
+    """
+    stmt = (
+        select(
+            ObservationRecord.observation_id,
+            ObservationRecord.timestamp,
+            ObservationRecord.process_id,
+            ObservationRecord.source_outcome_id,
+            ObservationRecord.facts,
+        )
+        .where(ObservationRecord.process_id == process_id)
+        .where(ObservationRecord.facts["event_type"].astext == "cognitive_loop_finished")
+        .order_by(desc(ObservationRecord.timestamp))
+        .limit(1)
+    )
+    row = (await db.execute(stmt)).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="run_not_found")
+
+    observation_id, ts, pid, source_outcome_id, facts = row
+    facts = facts if isinstance(facts, dict) else {}
+    ts_iso = ts.isoformat() if isinstance(ts, datetime) else None
+    run_anchors = {}
+    if isinstance(ts, datetime):
+        ts_anchor = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+        run_anchors[pid] = {"timestamp_finished": ts_anchor}
+    run_latency = _build_run_latency_map(run_anchors).get(pid, {})
+    ces_payload = _compute_ces_run_fields(facts, run_latency)
+
+    outcome_row = _find_outcome_for_process(pid, source_outcome_id)
+    outcome_error = outcome_row.get("error") if isinstance(outcome_row, dict) else {}
+    if not isinstance(outcome_error, dict):
+        outcome_error = {}
+    execution_status = None
+    if isinstance(outcome_row, dict):
+        execution_status = outcome_row.get("execution_status")
+    if not execution_status:
+        execution_status = facts.get("execution_status")
+
+    publish_receipt_stmt = (
+        select(PublishReceipt)
+        .where(PublishReceipt.process_id == pid)
+        .order_by(desc(PublishReceipt.created_at))
+        .limit(1)
+    )
+    publish_receipt = (await db.execute(publish_receipt_stmt)).scalars().first()
+
+    manifest_decision_id = None
+    publish_decision_id = None
+    publish_receipt_id = None
+    if publish_receipt:
+        manifest_decision_id = publish_receipt.manifest_decision_id
+        publish_decision_id = publish_receipt.publish_decision_id
+        publish_receipt_id = publish_receipt.publish_decision_id
+
+    if not manifest_decision_id and isinstance(facts.get("source_decision_id"), str):
+        manifest_decision_id = facts.get("source_decision_id")
+
+    missing_fields: list[str] = []
+    if not isinstance(source_outcome_id, str) or not source_outcome_id:
+        missing_fields.append("links.source_outcome_id")
+    if execution_status is None:
+        missing_fields.append("run_summary.execution_status")
+    if publish_receipt is None:
+        missing_fields.append("links.publish_decision_id")
+        missing_fields.append("artifact_refs.publish_receipt_id")
+
+    return {
+        "run_summary": {
+            "process_id": pid,
+            "timestamp_finished": ts_iso,
+            "pipeline_status": ces_payload["pipeline_status"],
+            "execution_status": execution_status,
+            "ces_run": ces_payload["ces_run"],
+            "ces_run_version": ces_payload["ces_run_version"],
+            "ces_run_components": ces_payload["ces_run_components"],
+            "latency_measured": ces_payload["latency_measured"],
+            "latency_pairs_used": ces_payload["latency_pairs_used"],
+            "latency_pairs_ignored": ces_payload["latency_pairs_ignored"],
+            "latency_pairs_inverted": ces_payload["latency_pairs_inverted"],
+        },
+        "links": {
+            "observation_id": observation_id,
+            "source_outcome_id": source_outcome_id,
+            "source_decision_id": facts.get("source_decision_id"),
+            "manifest_decision_id": manifest_decision_id,
+            "publish_decision_id": publish_decision_id,
+        },
+        "artifact_refs": {
+            "manifest_path": _manifest_path_from_decision_id(manifest_decision_id),
+            "publish_receipt_id": publish_receipt_id,
+        },
+        "last_error": {
+            "error_type": outcome_error.get("type") if outcome_error else None,
+            "error_message": _sanitize_error_message(outcome_error.get("message")) if outcome_error else None,
+        },
+        "latency_breakdown": ces_payload.get("budgets_used", {}),
+        "missing_fields": sorted(set(missing_fields)),
     }
