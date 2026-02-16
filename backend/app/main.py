@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.endpoints import videos, metrics
@@ -15,6 +17,10 @@ app = FastAPI(
     docs_url="/docs",  # URL da documentação (Swagger)
     redoc_url="/redoc" # URL da documentação alternativa (ReDoc)
 )
+
+APP_VERSION = os.getenv("APP_VERSION", "1.6.0")
+GIT_TAG = os.getenv("GIT_TAG")
+GIT_COMMIT = os.getenv("GIT_COMMIT")
 
 # --- Configuração de CORS (Cross-Origin Resource Sharing) ---
 # CRÍTICO: O CORS é uma medida de segurança dos navegadores.
@@ -58,12 +64,23 @@ def health_check():
     está vivo. Se essa rota não responder '200 OK', o orquestrador
     mata o container e sobe um novo[cite: 1028].
     """
-    return {
+    build_payload = {}
+    if GIT_TAG:
+        build_payload["git_tag"] = GIT_TAG
+    if GIT_COMMIT:
+        build_payload["git_commit"] = GIT_COMMIT
+
+    response = {
         "status": "ok",
+        "api_version": APP_VERSION,
+        "ces_default_version": metrics.CES_DEFAULT_VERSION,
         "services": {
             "api": "running",
-        }
+        },
     }
+    if build_payload:
+        response["build"] = build_payload
+    return response
 
 # Ponto único de entrada da observação
 @app.post("/observe")
