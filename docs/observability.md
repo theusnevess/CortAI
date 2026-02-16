@@ -89,7 +89,8 @@ Emissao de loop finalizado:
 
 Regra de versionamento:
 - `CES_v1` e congelado e imutavel.
-- Novas formulas entram como novas versoes (`CES_v2`, `CES_v3`, ...).
+- `CES_v2` e congelado e imutavel.
+- Novas formulas entram como novas versoes (`CES_v3`, `CES_v4`, ...).
 - `ces_default_version` inicial: `CES_v1`.
 - Campos top-level (`ces`, `ces_version`, `ces_reason`, `ces_components`, `budgets_used`) sempre refletem a versao default.
 - `CES_v2` fica disponivel em `ces_versions`, sem alterar o default.
