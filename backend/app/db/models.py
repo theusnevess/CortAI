@@ -154,6 +154,33 @@ class CognitiveMetricsDaily(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class MetricsEndpointDaily(Base):
+    __tablename__ = "metrics_endpoint_daily"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    metric_date = Column(Date, nullable=False)
+    endpoint = Column(String, nullable=False)
+
+    count_requests = Column(Integer, nullable=False, default=0)
+    p50_ms = Column(Integer, nullable=False, default=0)
+    p95_ms = Column(Integer, nullable=False, default=0)
+    p99_ms = Column(Integer, nullable=False, default=0)
+    error_rate = Column(Numeric(6, 4), nullable=False, default=0)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_metrics_endpoint_daily_metric_date", "metric_date"),
+        Index("ix_metrics_endpoint_daily_endpoint", "endpoint"),
+        Index(
+            "ux_metrics_endpoint_daily_metric_date_endpoint",
+            "metric_date",
+            "endpoint",
+            unique=True,
+        ),
+    )
+
+
 # --- Tabela de Recibos de Publicacao ---
 class PublishReceipt(Base):
     __tablename__ = "publish_receipts"

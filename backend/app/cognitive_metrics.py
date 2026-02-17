@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import CognitiveMetricsDaily, ObservationRecord
+from app.db.models import CognitiveMetricsDaily, MetricsEndpointDaily, ObservationRecord
 from app.observations import persist_observation
 from app.schemas.observation import Observation
 from app.state_from_observation import persist_state_from_observation
@@ -30,6 +30,12 @@ OUTCOME_LOG_PATH = "storage/outcome_log.jsonl"
 logger = logging.getLogger(__name__)
 
 CES_V1_REASON = "ces_regression:CES_v1"
+METRICS_ENDPOINT_TIMING_EVENT = "metrics_endpoint_timing"
+METRICS_SLO_ALERT_EVENT = "metrics_slo_alert"
+METRICS_SLO_THRESHOLDS = {
+    "/api/v1/metrics/runs": {"p95_ms": 800, "p99_ms": 1500},
+    "/api/v1/metrics/runs/{process_id}": {"p95_ms": 400, "p99_ms": 900},
+}
 CES_LATENCY_ACTION_WHITELIST = {
     "collect_video",
     "extract_audio",
@@ -124,6 +130,41 @@ def _alert_count_for_date(session, metric_date: date) -> int:
     count = (
         session.query(ObservationRecord)
         .filter(ObservationRecord.facts["event_type"].astext == "cognitive_metrics_alert")
+        .filter(ObservationRecord.facts["metric_date"].astext == target)
+        .count()
+    )
+    return int(count or 0)
+
+
+def _slo_alert_already_emitted(session, metric_date: date, endpoint: str, reason: str) -> bool:
+    """
+    Verifica dedupe de alerta SLO por (metric_date, endpoint, reason).
+    """
+    target = metric_date.isoformat()
+    rows = (
+        session.query(ObservationRecord)
+        .filter(ObservationRecord.facts["event_type"].astext == METRICS_SLO_ALERT_EVENT)
+        .filter(ObservationRecord.facts["metric_date"].astext == target)
+        .all()
+    )
+    for row in rows:
+        facts = row.facts or {}
+        if str(facts.get("endpoint") or "") != endpoint:
+            continue
+        reasons = facts.get("reasons")
+        if isinstance(reasons, list) and reason in reasons:
+            return True
+    return False
+
+
+def _slo_alert_count_for_date(session, metric_date: date) -> int:
+    """
+    Conta alertas SLO ja emitidos no dia.
+    """
+    target = metric_date.isoformat()
+    count = (
+        session.query(ObservationRecord)
+        .filter(ObservationRecord.facts["event_type"].astext == METRICS_SLO_ALERT_EVENT)
         .filter(ObservationRecord.facts["metric_date"].astext == target)
         .count()
     )
@@ -257,6 +298,168 @@ def _p95(values: list[int]) -> int:
     values_sorted = sorted(values)
     k = int(0.95 * (len(values_sorted) - 1))
     return int(values_sorted[k])
+
+
+def _percentile(values: list[int], p: float) -> int:
+    """
+    Calcula percentil por nearest-rank em [0, 1].
+    """
+    if not values:
+        return 0
+    if p <= 0:
+        return int(min(values))
+    if p >= 1:
+        return int(max(values))
+    values_sorted = sorted(values)
+    k = int(p * (len(values_sorted) - 1))
+    return int(values_sorted[k])
+
+
+def _to_endpoint_slug(endpoint: str) -> str:
+    """
+    Converte endpoint em slug seguro para process_id.
+    """
+    raw = str(endpoint or "unknown")
+    return (
+        raw.replace("/", "_")
+        .replace("{", "")
+        .replace("}", "")
+        .replace("-", "_")
+        .strip("_")
+        or "unknown"
+    )
+
+
+def _aggregate_metrics_endpoint_daily_and_alerts(
+    session,
+    metric_date: date,
+    rows: list[ObservationRecord],
+) -> list[dict[str, Any]]:
+    """
+    Agrega p50/p95/p99 e error_rate por endpoint e emite alertas SLO idempotentes.
+    """
+    timings_by_endpoint: dict[str, list[dict[str, int]]] = defaultdict(list)
+    for row in rows:
+        facts = row.facts if isinstance(row.facts, dict) else {}
+        if facts.get("event_type") != METRICS_ENDPOINT_TIMING_EVENT:
+            continue
+        endpoint = str(facts.get("endpoint") or "").strip()
+        if not endpoint:
+            continue
+        duration_ms = _safe_int(facts.get("duration_ms"))
+        status_code = _safe_int(facts.get("status_code"))
+        timings_by_endpoint[endpoint].append(
+            {"duration_ms": max(0, duration_ms), "status_code": status_code}
+        )
+
+    # Recalcula deterministamente para a data alvo.
+    (
+        session.query(MetricsEndpointDaily)
+        .filter(MetricsEndpointDaily.metric_date == metric_date)
+        .delete(synchronize_session=False)
+    )
+
+    aggregate_rows: list[dict[str, Any]] = []
+    for endpoint, entries in sorted(timings_by_endpoint.items()):
+        durations = [item["duration_ms"] for item in entries]
+        total = len(entries)
+        errors = sum(1 for item in entries if item["status_code"] >= 400)
+        error_rate = round((errors / total), 4) if total > 0 else 0.0
+        payload = {
+            "metric_date": metric_date.isoformat(),
+            "endpoint": endpoint,
+            "count_requests": total,
+            "p50_ms": _percentile(durations, 0.50),
+            "p95_ms": _percentile(durations, 0.95),
+            "p99_ms": _percentile(durations, 0.99),
+            "error_rate": error_rate,
+        }
+        aggregate_rows.append(payload)
+        session.add(
+            MetricsEndpointDaily(
+                id=uuid.uuid4(),
+                metric_date=metric_date,
+                endpoint=endpoint,
+                count_requests=payload["count_requests"],
+                p50_ms=payload["p50_ms"],
+                p95_ms=payload["p95_ms"],
+                p99_ms=payload["p99_ms"],
+                error_rate=Decimal(str(payload["error_rate"])).quantize(Decimal("0.0001")),
+            )
+        )
+
+    session.commit()
+
+    max_alerts_raw = os.getenv("METRICS_ALERT_MAX_PER_DAY", "5")
+    try:
+        max_alerts_per_day = int(max_alerts_raw)
+    except Exception:
+        max_alerts_per_day = 5
+
+    for payload in aggregate_rows:
+        thresholds = METRICS_SLO_THRESHOLDS.get(payload["endpoint"])
+        if not thresholds:
+            continue
+
+        reasons: list[str] = []
+        if payload["p95_ms"] > thresholds["p95_ms"]:
+            reasons.append("p95_slo_breach")
+        if payload["p99_ms"] > thresholds["p99_ms"]:
+            reasons.append("p99_slo_breach")
+        if payload["error_rate"] > 0.01:
+            reasons.append("error_rate_breach")
+        if not reasons:
+            continue
+
+        reasons_to_emit = [
+            reason
+            for reason in reasons
+            if not _slo_alert_already_emitted(session, metric_date, payload["endpoint"], reason)
+        ]
+        if not reasons_to_emit:
+            continue
+        if _slo_alert_count_for_date(session, metric_date) >= max_alerts_per_day:
+            break
+
+        endpoint_slug = _to_endpoint_slug(payload["endpoint"])
+        process_id = f"P_METRICS_SLO_{metric_date.isoformat()}_{endpoint_slug}"
+        source_outcome_id = str(uuid.uuid4())
+        _append_minimal_outcome(source_outcome_id, process_id)
+        observation = Observation(
+            observation_id=str(uuid.uuid4()),
+            timestamp=datetime.utcnow().isoformat(),
+            process_id=process_id,
+            source_outcome_id=source_outcome_id,
+            facts={
+                "event_type": METRICS_SLO_ALERT_EVENT,
+                "metric_date": metric_date.isoformat(),
+                "endpoint": payload["endpoint"],
+                "count_requests": payload["count_requests"],
+                "p95_ms": payload["p95_ms"],
+                "p99_ms": payload["p99_ms"],
+                "error_rate": payload["error_rate"],
+                "thresholds": thresholds,
+                "reasons": reasons_to_emit,
+            },
+        )
+        persist_observation(observation)
+        try:
+            persist_state_from_observation(observation)
+        except Exception as e:
+            logger.error(
+                "METRICS_SLO alert state persist failed date=%s endpoint=%s err=%s",
+                metric_date.isoformat(),
+                payload["endpoint"],
+                e,
+            )
+        logger.warning(
+            "METRICS_SLO alert emitted date=%s endpoint=%s reasons=%s",
+            metric_date.isoformat(),
+            payload["endpoint"],
+            reasons_to_emit,
+        )
+
+    return aggregate_rows
 
 
 def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
@@ -585,6 +788,8 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
                         bad_days_in_window,
                         ces_window_days,
                     )
+        endpoint_daily_rows = _aggregate_metrics_endpoint_daily_and_alerts(session, metric_date, rows)
+        payload["metrics_endpoint_daily"] = endpoint_daily_rows
         return payload
     finally:
         session.close()
