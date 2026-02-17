@@ -328,6 +328,27 @@ Query params:
 - `limit` (1..500)
 - `offset` (>= 0)
 
+### GET /api/v1/observability/report
+Query params:
+- `window_days` (default 7, max 30)
+- `timing_minutes` (default 15, max 60)
+- `limit_alerts` (default 200, max 500)
+- `limit_receipts` (default 50, max 200)
+
+Contrato minimo:
+- endpoint read-only que consolida o runbook operacional em JSON deterministico
+- inclui blocos de versao, timing, slo_daily, slo_alerts, runs, publish_receipts, checks e status
+- `status`:
+  - `FAIL` se check hard falhar (`timing_events_15m`, `daily_has_requests_7d`, `receipts_path_leaks_30d`)
+  - `WARN` quando apenas `runs.worst` estiver vazio
+  - `PASS` caso contrario
+
+Guardrails do endpoint:
+- `window_days > 30` => `400` (`error_type=RangeTooLarge`, `window_days_requested`, `window_days_max`)
+- `timing_minutes > 60` => `400` (`error_type=RangeTooLarge`, `timing_minutes_requested`, `timing_minutes_max`)
+- `limit_alerts > 500` => `400` (`error_type=LimitTooHigh`, `limit_alerts_requested`, `limit_alerts_max`)
+- `limit_receipts > 200` => `400` (`error_type=LimitTooHigh`, `limit_receipts_requested`, `limit_receipts_max`)
+
 ## Metrics SLO
 
 Escopo operacional:
@@ -386,3 +407,21 @@ Commit: `3622bf2`
 {"process_id":"P_VIDEO_6c2ff2f2-f28a-4c9f-9d5d-b4640b31d427","pipeline_status":"published","execution_status":"success","ces_run":100.0,"latency_measured":false,"latency_pairs":{"used":6,"ignored":1,"inverted":0},"source_outcome_id":"dfc94ca4-a948-4387-8fe5-4016f2182138","last_error":{"error_type":null,"error_message":null}}
 {"process_id":"P_BLOCKED_EVIDENCE_4b29ae9a","pipeline_status":"blocked","execution_status":"blocked","ces_run":31.0,"latency_measured":false,"latency_pairs":{"used":0,"ignored":1,"inverted":0},"source_outcome_id":"61d985e7-65aa-4795-a0f4-2c2a054b84ea","last_error":{"error_type":"ArtifactNotFound","error_message":"manifest nao encontrado: <path>/agent_output/MISSING_MANIFEST_6f586b602f8e4b3aa6bf662b145fde03.json"}}
 ```
+
+## Evidencia operacional - /observability/report (v1.8.2)
+
+Data UTC: `2026-02-17`
+
+- `/health`: `status=ok`, `api_version=1.8.2`, `ces_default_version=CES_v1`
+- Shape minimo do report: validado
+- Guardrails validados:
+  - `window_days=31` -> `400 RangeTooLarge` (`window_days_max=30`)
+  - `timing_minutes=61` -> `400 RangeTooLarge` (`timing_minutes_max=60`)
+  - `limit_alerts=501` -> `400 LimitTooHigh` (`limit_alerts_max=500`)
+  - `limit_receipts=201` -> `400 LimitTooHigh` (`limit_receipts_max=200`)
+- `checks`: 6 itens, todos com `id` e `pass`
+- Timing sanity: `events=29`, `bad_duration=0`
+- `slo_daily`: `has_requests=true`, `items_len=2`
+- `publish_receipts.path_leaks_30d=0`
+- `status=WARN` (contrato: `PASS|WARN|FAIL`)
+- Self-observing: `events_before=34` -> `events_after=38` apos 3 chamadas
