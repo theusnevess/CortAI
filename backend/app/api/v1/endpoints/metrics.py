@@ -64,6 +64,8 @@ CES_RUN_BUDGETS_MS = {
     "write_artifact": 3000,
     "publish_manifest": 3000,
 }
+CES_DYNAMIC_BASELINE_WINDOW_DAYS = 14
+CES_DYNAMIC_BASELINE_MIN_N = 10
 MANIFEST_OUTPUT_DIR = "agent_output"
 
 
@@ -478,6 +480,68 @@ def _compute_ces_fields(item: dict) -> dict:
     }
 
 
+def _median(values: list[int]) -> float:
+    """
+    Calcula mediana deterministica de inteiros.
+    """
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2 == 1:
+        return float(ordered[mid])
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _build_dynamic_baseline_for_date(
+    metric_date: date,
+    history_rows: list[CognitiveMetricsDaily],
+) -> dict[str, dict]:
+    """
+    Calcula baseline dinamico read-only por acao para a data alvo.
+    """
+    by_action: dict[str, list[int]] = {action: [] for action in CES_LATENCY_ACTION_WHITELIST}
+    for row in history_rows:
+        if row.metric_date >= metric_date:
+            continue
+        if row.metric_date < metric_date - timedelta(days=CES_DYNAMIC_BASELINE_WINDOW_DAYS):
+            continue
+        if int(row.total_runs or 0) <= 0:
+            continue
+        latency_payload = row.latency_by_action or {}
+        if not isinstance(latency_payload, dict):
+            continue
+        for action in CES_LATENCY_ACTION_WHITELIST:
+            action_payload = latency_payload.get(action)
+            if not isinstance(action_payload, dict):
+                continue
+            n_obs = int(action_payload.get("n") or 0)
+            p95_ms = int(action_payload.get("p95_ms") or 0)
+            if n_obs < CES_DYNAMIC_BASELINE_MIN_N or p95_ms <= 0:
+                continue
+            by_action[action].append(p95_ms)
+
+    baseline = {}
+    for action in sorted(CES_LATENCY_ACTION_WHITELIST):
+        samples = by_action.get(action, [])
+        if samples:
+            med = _median(samples)
+            budget_ms = int(math.ceil((med * 1.10) - 1e-9))
+            baseline[action] = {
+                "budget_ms": budget_ms,
+                "source": "dynamic_14d",
+                "samples_used": len(samples),
+            }
+        else:
+            baseline[action] = {
+                "budget_ms": CES_RUN_BUDGETS_MS[action],
+                "source": "fallback_fixed_v1",
+                "samples_used": 0,
+            }
+    return baseline
+
+
 def _compute_ces_window_summary(items: list[dict]) -> dict:
     """
     Calcula metadados de janela CES refletindo a regra do alerta.
@@ -710,6 +774,13 @@ async def get_daily_metrics(
         .order_by(CognitiveMetricsDaily.metric_date.desc())
     )
     rows = (await db.execute(stmt)).scalars().all()
+    baseline_stmt = (
+        select(CognitiveMetricsDaily)
+        .where(CognitiveMetricsDaily.metric_date >= start - timedelta(days=CES_DYNAMIC_BASELINE_WINDOW_DAYS))
+        .where(CognitiveMetricsDaily.metric_date <= end)
+        .order_by(CognitiveMetricsDaily.metric_date.asc())
+    )
+    baseline_rows = (await db.execute(baseline_stmt)).scalars().all()
 
     alert_stmt = (
         select(
@@ -750,6 +821,11 @@ async def get_daily_metrics(
             "alert_count": alert_count,
             "alert_reasons": alert_info["alert_reasons"] if alert_info else [],
             "alert_observation_id": alert_info["alert_observation_id"] if alert_info else None,
+            "latency_dynamic_baseline_window_days": CES_DYNAMIC_BASELINE_WINDOW_DAYS,
+            "latency_dynamic_baseline": _build_dynamic_baseline_for_date(
+                r.metric_date,
+                baseline_rows,
+            ),
         }
         # Invariantes do contrato de alerta.
         if not item["alerted"]:
@@ -801,6 +877,13 @@ async def get_metrics_overview(
         .order_by(CognitiveMetricsDaily.metric_date.asc())
     )
     rows = (await db.execute(stmt)).scalars().all()
+    baseline_stmt = (
+        select(CognitiveMetricsDaily)
+        .where(CognitiveMetricsDaily.metric_date >= start - timedelta(days=CES_DYNAMIC_BASELINE_WINDOW_DAYS))
+        .where(CognitiveMetricsDaily.metric_date <= end)
+        .order_by(CognitiveMetricsDaily.metric_date.asc())
+    )
+    baseline_rows = (await db.execute(baseline_stmt)).scalars().all()
 
     alert_stmt = (
         select(
@@ -841,6 +924,11 @@ async def get_metrics_overview(
             "alert_count": alert_count,
             "alert_reasons": alert_info["alert_reasons"] if alert_info else [],
             "alert_observation_id": alert_info["alert_observation_id"] if alert_info else None,
+            "latency_dynamic_baseline_window_days": CES_DYNAMIC_BASELINE_WINDOW_DAYS,
+            "latency_dynamic_baseline": _build_dynamic_baseline_for_date(
+                r.metric_date,
+                baseline_rows,
+            ),
         }
         if not item["alerted"]:
             item["alert_count"] = 0
