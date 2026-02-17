@@ -425,3 +425,8 @@ Data UTC: `2026-02-17`
 - `publish_receipts.path_leaks_30d=0`
 - `status=WARN` (contrato: `PASS|WARN|FAIL`)
 - Self-observing: `events_before=34` -> `events_after=38` apos 3 chamadas
+
+### Links
+
+- PR `feat/observability-report`: `https://github.com/theusnevess/CortAI/pull/new/feat/observability-report`
+- Runbook operacional v1.8.2: `https://github.com/theusnevess/CortAI/blob/v1.8.2/docs/runbook_operacional_v1.8.2.md`
