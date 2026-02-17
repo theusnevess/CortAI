@@ -277,3 +277,21 @@ Observacoes:
 - alertas idempotentes
 - sanitizacao integra
 - `ces_run` numerico quando presente
+
+## Evidencia Runtime - /api/v1/observability/report (v1.8.2)
+
+Data UTC: `2026-02-17`
+
+- `/health`: `status=ok`, `api_version=1.8.2`, `ces_default_version=CES_v1`
+- Happy path: shape minimo completo (`generated_at_utc`, `version`, `timing`, `slo_daily`, `slo_alerts`, `runs`, `publish_receipts`, `checks`, `status`)
+- Guardrails:
+  - `window_days=31` -> `400 RangeTooLarge` com `window_days_max=30`
+  - `timing_minutes=61` -> `400 RangeTooLarge` com `timing_minutes_max=60`
+  - `limit_alerts=501` -> `400 LimitTooHigh` com `limit_alerts_max=500`
+  - `limit_receipts=201` -> `400 LimitTooHigh` com `limit_receipts_max=200`
+- Checks: `checks_len=6`, todos com `id` e `pass`
+- Timing sanity: `events=29`, `bad_duration=0`
+- SLO daily: `has_requests=true`, `items_len=2`
+- Sanitizacao: `path_leaks_30d=0`
+- Status: `WARN` (valido por contrato)
+- Self-observing confirmado: `events_before=34` -> `events_after=38` apos 3 chamadas
