@@ -9,7 +9,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
 from app.db.models import CognitiveMetricsDaily, MetricsEndpointDaily, ObservationRecord
@@ -338,6 +338,9 @@ def _aggregate_metrics_endpoint_daily_and_alerts(
     """
     Agrega p50/p95/p99 e error_rate por endpoint e emite alertas SLO idempotentes.
     """
+    if not inspect(session.bind).has_table("metrics_endpoint_daily"):
+        return []
+
     timings_by_endpoint: dict[str, list[dict[str, int]]] = defaultdict(list)
     for row in rows:
         facts = row.facts if isinstance(row.facts, dict) else {}
