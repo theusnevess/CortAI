@@ -328,6 +328,46 @@ Query params:
 - `limit` (1..500)
 - `offset` (>= 0)
 
+## Metrics SLO
+
+Escopo operacional:
+- Valido para ambiente normal, com banco saudavel.
+- Exclui cenarios de debug pesado e consultas de range grande.
+
+Endpoints cobertos:
+- `GET /api/v1/metrics/runs`
+- `GET /api/v1/metrics/runs/{process_id}`
+- `GET /api/v1/metrics/overview` (telemetria opcional para acompanhamento)
+
+SLO minimo:
+- `/metrics/runs`: `p95 <= 800ms` e `p99 <= 1500ms` (com `limit <= 50`)
+- `/metrics/runs/{process_id}`: `p95 <= 400ms` e `p99 <= 900ms`
+
+Guardrails de entrada:
+- `limit_max = 200` para endpoint run-level paginado.
+- `range_max_days = 31` para endpoint run-level com janela de datas.
+
+### Event Types de SLO
+
+`metrics_endpoint_timing`:
+- Telemetria append-only por request dos endpoints de metricas alvo.
+- Shape minimo em `facts`:
+  - `endpoint`
+  - `method`
+  - `status_code`
+  - `duration_ms`
+  - `query_fingerprint`
+  - `process_id` (quando existir no path)
+  - `metric_date` (YYYY-MM-DD)
+
+`metrics_slo_alert`:
+- Alerta diario de regressao de SLO por endpoint.
+- Condicoes canonicas:
+  - `p95_ms > slo_p95` ou
+  - `p99_ms > slo_p99` ou
+  - `error_rate > 0.01`
+- Dedupe por `(metric_date, endpoint, reason)`.
+
 ## Exemplos
 
 ```bash
