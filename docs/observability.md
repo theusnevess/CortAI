@@ -90,10 +90,11 @@ Emissao de loop finalizado:
 Regra de versionamento:
 - `CES_v1` e congelado e imutavel.
 - `CES_v2` e congelado e imutavel.
+- `CES_v3` e experimental.
 - Novas formulas entram como novas versoes (`CES_v3`, `CES_v4`, ...).
 - `ces_default_version` inicial: `CES_v1`.
 - Campos top-level (`ces`, `ces_version`, `ces_reason`, `ces_components`, `budgets_used`) sempre refletem a versao default.
-- `CES_v2` fica disponivel em `ces_versions`, sem alterar o default.
+- `CES_v2` e `CES_v3` ficam disponiveis apenas em `ces_versions`, sem alterar o default.
 
 Shape canonicamente exposto por item:
 - `ces_default_version`
@@ -102,7 +103,7 @@ Shape canonicamente exposto por item:
 - `ces_reason`
 - `ces_components`
 - `budgets_used`
-- `ces_versions` (`CES_v1`, `CES_v2`)
+- `ces_versions` (`CES_v1`, `CES_v2`, `CES_v3`)
 
 ### CES_v1
 
@@ -144,6 +145,25 @@ Diferenca principal:
 
 Politica:
 - CES_v2 nao altera CES_v1; apenas expande a leitura em `ces_versions`.
+
+### CES_v3 (experimental)
+
+CES_v3 usa os mesmos sinais de entrada do CES_v1/CES_v2 (`status`, `actions`, `latency`, `trunc`) e
+mantem as mesmas restricoes de whitelist/elegibilidade:
+- whitelist de acoes identica ao CES_v1
+- `n >= 10` para acao participar de `S_latency`
+- `unknown` excluido por design
+- `total_runs = 0` => `ces = null` e `ces_reason = "no_runs"`
+
+Diferenca principal:
+- `S_latency` usa budget por acao com fonte `dynamic_baseline_14d`.
+- Regra de budget no v3:
+  - primeiro tenta `latency_dynamic_baseline[action].budget_ms` (source `dynamic_14d`);
+  - sem baseline elegivel, faz fallback para budget fixo v1 (`fixed_v1`).
+
+Politica:
+- CES_v3 e experimental e fica disponivel somente em `ces_versions`.
+- CES_v3 nao altera `ces_default_version` nem os campos top-level.
 
 ### Baseline dinamico de latencia (read-only)
 
