@@ -358,11 +358,20 @@ Escopo operacional:
 Endpoints cobertos:
 - `GET /api/v1/metrics/runs`
 - `GET /api/v1/metrics/runs/{process_id}`
-- `GET /api/v1/metrics/overview` (telemetria opcional para acompanhamento)
+- `GET /api/v1/metrics/overview`
+- `GET /api/v1/observability/report`
 
-SLO minimo:
-- `/metrics/runs`: `p95 <= 800ms` e `p99 <= 1500ms` (com `limit <= 50`)
-- `/metrics/runs/{process_id}`: `p95 <= 400ms` e `p99 <= 900ms`
+SLO real (contrato):
+- `/metrics/runs`: `p95 <= 150ms`, `p99 <= 300ms`, `error_rate <= 1%`
+- `/metrics/runs/{process_id}`: `p95 <= 200ms`, `p99 <= 400ms`, `error_rate <= 1%`
+- `/metrics/overview`: `p95 <= 120ms`, `p99 <= 250ms`, `error_rate <= 1%`
+- `/observability/report`: `p95 <= 300ms`, `p99 <= 600ms`, `error_rate <= 1%`
+
+Error budget diario:
+- `error_budget = 1%` por endpoint/dia.
+- `allowed_errors = count_requests * 0.01`.
+- `estimated_errors = count_requests * error_rate`.
+- `remaining_errors = allowed_errors - estimated_errors`.
 
 Guardrails de entrada:
 - `limit_max = 200` para endpoint run-level paginado.
@@ -388,6 +397,27 @@ Guardrails de entrada:
   - `p99_ms > slo_p99` ou
   - `error_rate > 0.01`
 - Dedupe por `(metric_date, endpoint, reason)`.
+
+### GET /api/v1/status
+
+Query params:
+- `window_days` (default 7, max 30)
+
+Contrato minimo:
+- endpoint read-only para status executivo de SLO.
+- retorna `overall_status` (`PASS|WARN|FAIL`), `slo_status`, `error_budget_remaining`, `ces_trend_status`.
+- `FAIL` quando algum endpoint com dados viola SLO.
+- `WARN` quando faltam dados para endpoint coberto no periodo.
+
+Guardrail:
+- `window_days > 30` => `400` (`error_type=RangeTooLarge`, `window_days_requested`, `window_days_max`)
+
+### CI performance gate (minimo)
+
+Pipeline CI deve validar regressao basica de performance para `/api/v1/metrics/runs`:
+- 5 warmups + 50 chamadas medidas
+- gate minimo: `p95 <= 300ms`
+- gate minimo: `error_rate <= 1%`
 
 ## Exemplos
 
