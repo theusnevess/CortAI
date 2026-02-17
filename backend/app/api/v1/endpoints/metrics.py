@@ -31,6 +31,7 @@ PROHIBITED_FACT_KEYS = {
 CES_DEFAULT_VERSION = "CES_v1"
 CES_V1 = "CES_v1"
 CES_V2 = "CES_v2"
+CES_V3 = "CES_v3"
 CES_RUN_V1 = "CES_run_v1"
 CES_STATUS_WEIGHTS = {"blocked": 1.0, "failed": 0.6, "truncated": 0.3}
 CES_COMPONENT_WEIGHTS = {"status": 0.55, "actions": 0.15, "latency": 0.25, "trunc": 0.05}
@@ -345,7 +346,7 @@ def _build_run_latency_map(run_anchors: dict[str, dict]) -> dict[str, dict]:
     return result
 
 
-def _compute_latency_inputs(item: dict) -> tuple[dict[str, dict], int]:
+def _compute_latency_inputs(item: dict, version: str) -> tuple[dict[str, dict], int]:
     """
     Normaliza entradas de latencia para acoes elegiveis do CES.
     """
@@ -361,8 +362,21 @@ def _compute_latency_inputs(item: dict) -> tuple[dict[str, dict], int]:
         p95_ms = int(payload.get("p95_ms") or 0)
         if n_obs < CES_MIN_OBS_FOR_LATENCY or p95_ms <= 0:
             continue
-        budget_ms = int(math.ceil(p95_ms * 1.10))
-        eligible[action_name] = {"n": n_obs, "p95_ms": p95_ms, "budget_ms": budget_ms}
+        baseline_payload = item.get("latency_dynamic_baseline", {})
+        baseline_action = baseline_payload.get(action_name, {}) if isinstance(baseline_payload, dict) else {}
+        if version == CES_V3:
+            budget_ms = int(baseline_action.get("budget_ms") or CES_RUN_BUDGETS_MS[action_name])
+            budget_source_raw = str(baseline_action.get("source") or "")
+            budget_source = "dynamic_14d" if budget_source_raw == "dynamic_14d" else "fixed_v1"
+        else:
+            budget_ms = int(math.ceil(p95_ms * 1.10))
+            budget_source = "fixed_ceil_1p10"
+        eligible[action_name] = {
+            "n": n_obs,
+            "p95_ms": p95_ms,
+            "budget_ms": budget_ms,
+            "budget_source": budget_source,
+        }
         total_n += n_obs
     return eligible, total_n
 
@@ -412,7 +426,7 @@ def _compute_ces_version(item: dict, version: str) -> dict:
 
     s_trunc = _clamp(1.0 - r_t)
 
-    eligible, total_n = _compute_latency_inputs(item)
+    eligible, total_n = _compute_latency_inputs(item, version)
 
     if total_n <= 0:
         s_latency = 1.0
@@ -435,6 +449,7 @@ def _compute_ces_version(item: dict, version: str) -> dict:
                 "n": payload["n"],
                 "p95_ms": payload["p95_ms"],
                 "budget_ms": payload["budget_ms"],
+                "source": payload["budget_source"],
                 "weight": round(weight, 6),
             }
         s_latency = _clamp(s_latency)
@@ -467,6 +482,7 @@ def _compute_ces_fields(item: dict) -> dict:
     ces_versions = {
         CES_V1: _compute_ces_version(item, CES_V1),
         CES_V2: _compute_ces_version(item, CES_V2),
+        CES_V3: _compute_ces_version(item, CES_V3),
     }
     default_payload = ces_versions[CES_DEFAULT_VERSION]
     return {
@@ -963,7 +979,7 @@ async def get_metrics_overview(
 
     # CES agregado do periodo (media ponderada por total_runs) por versao.
     ces_versions_summary: dict[str, dict] = {}
-    for version in (CES_V1, CES_V2):
+    for version in (CES_V1, CES_V2, CES_V3):
         items_with_runs = [
             item
             for item in items
