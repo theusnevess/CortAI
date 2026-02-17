@@ -279,7 +279,8 @@ def _emit_metrics_endpoint_timing(
     Emite telemetria append-only por request dos endpoints de metricas.
     """
     try:
-        metric_date = datetime.utcnow().date().isoformat()
+        event_ts = datetime.utcnow().isoformat()
+        metric_date = event_ts[:10]
         synthetic_process_id = f"P_METRICS_ENDPOINT_{metric_date}"
         source_outcome_id = str(uuid.uuid4())
         _append_minimal_outcome(source_outcome_id, synthetic_process_id)
@@ -291,12 +292,13 @@ def _emit_metrics_endpoint_timing(
             "duration_ms": int(max(0, duration_ms)),
             "query_fingerprint": str(query_fingerprint),
             "metric_date": metric_date,
+            "timestamp": event_ts,
         }
         if process_id:
             facts["process_id"] = process_id
         observation = Observation(
             observation_id=str(uuid.uuid4()),
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=event_ts,
             process_id=synthetic_process_id,
             source_outcome_id=source_outcome_id,
             facts=facts,

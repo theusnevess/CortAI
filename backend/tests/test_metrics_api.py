@@ -555,6 +555,7 @@ async def test_runs_emite_metrics_endpoint_timing(client, seed_observation, db_s
     assert facts["method"] == "GET"
     assert facts["status_code"] == 200
     assert isinstance(facts["duration_ms"], int)
+    assert "timestamp" in facts
     assert "query_fingerprint" in facts
     assert "metric_date" in facts
 
