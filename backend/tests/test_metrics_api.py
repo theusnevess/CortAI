@@ -82,6 +82,94 @@ async def test_daily_um_dia_com_uma_linha(client, seed_daily_metric):
 
 
 @pytest.mark.anyio
+async def test_daily_dynamic_baseline_fallback(client, seed_daily_metric):
+    """
+    Sem historico elegivel, baseline dinamico deve usar fallback fixo v1.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=3,
+        completed_runs=3,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 3},
+        latency_by_action={},
+    )
+    response = await client.get(
+        "/api/v1/metrics/daily",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    baseline = item["latency_dynamic_baseline"]
+    assert item["latency_dynamic_baseline_window_days"] == 14
+    assert baseline["write_artifact"]["source"] == "fallback_fixed_v1"
+    assert baseline["write_artifact"]["budget_ms"] == 3000
+    assert baseline["write_artifact"]["samples_used"] == 0
+
+
+@pytest.mark.anyio
+async def test_daily_dynamic_baseline_dynamic_14d(client, seed_daily_metric):
+    """
+    Com historico elegivel, baseline dinamico usa mediana p95_14d * 1.10.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 7),
+        total_runs=5,
+        completed_runs=5,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 5},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 100}},
+    )
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 8),
+        total_runs=5,
+        completed_runs=5,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 5},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 200}},
+    )
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 9),
+        total_runs=5,
+        completed_runs=5,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 5},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 300}},
+    )
+    # Nao elegivel (n<10) deve ser ignorado.
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=5,
+        completed_runs=5,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 5},
+        latency_by_action={"write_artifact": {"n": 9, "p95_ms": 9999}},
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/daily",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    baseline = item["latency_dynamic_baseline"]["write_artifact"]
+    # median(100,200,300)=200 -> ceil(200*1.10)=220
+    assert baseline["source"] == "dynamic_14d"
+    assert baseline["budget_ms"] == 220
+    assert baseline["samples_used"] == 3
+
+
+@pytest.mark.anyio
 async def test_daily_alerted_true_quando_ha_alerta(client, seed_daily_metric, seed_observation):
     """
     Valida enrichment de alerta no /metrics/daily.
