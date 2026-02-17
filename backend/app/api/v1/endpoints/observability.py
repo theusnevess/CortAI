@@ -103,7 +103,7 @@ async def get_observability_report(
         )
 
         generated_at_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-        api_version = os.getenv("APP_VERSION", "1.8.0")
+        api_version = os.getenv("APP_VERSION", "1.8.2")
         git_tag = os.getenv("GIT_TAG")
         git_commit = os.getenv("GIT_COMMIT")
 
