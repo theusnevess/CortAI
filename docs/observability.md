@@ -145,6 +145,28 @@ Diferenca principal:
 Politica:
 - CES_v2 nao altera CES_v1; apenas expande a leitura em `ces_versions`.
 
+### Baseline dinamico de latencia (read-only)
+
+Objetivo:
+- Expor baseline dinamico por acao como telemetria auxiliar, sem alterar o score default.
+
+Regra canonica:
+- `B_a_dynamic = ceil(median(p95_ms_ultimos_14_dias) * 1.10)`.
+- Considera somente acoes da whitelist CES.
+- Considera somente dias com `total_runs > 0`.
+- Considera somente amostras por acao com `n >= 10`.
+- Exclui `unknown` por design.
+
+Fallback:
+- Sem historico elegivel para a acao, usa budget fixo v1 (`fallback_fixed_v1`).
+
+Exposicao no endpoint:
+- `latency_dynamic_baseline_window_days`
+- `latency_dynamic_baseline` (por acao: `budget_ms`, `source`, `samples_used`)
+
+Invariante:
+- Baseline dinamico e read-only e nao altera `ces`, `ces_version` nem `ces_default_version`.
+
 ### Cognitive Efficiency Score - Run-level
 
 Versao:
