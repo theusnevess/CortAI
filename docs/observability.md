@@ -90,10 +90,11 @@ Emissao de loop finalizado:
 Regra de versionamento:
 - `CES_v1` e congelado e imutavel.
 - `CES_v2` e congelado e imutavel.
+- `CES_v3` e experimental.
 - Novas formulas entram como novas versoes (`CES_v3`, `CES_v4`, ...).
 - `ces_default_version` inicial: `CES_v1`.
 - Campos top-level (`ces`, `ces_version`, `ces_reason`, `ces_components`, `budgets_used`) sempre refletem a versao default.
-- `CES_v2` fica disponivel em `ces_versions`, sem alterar o default.
+- `CES_v2` e `CES_v3` ficam disponiveis apenas em `ces_versions`, sem alterar o default.
 
 Shape canonicamente exposto por item:
 - `ces_default_version`
@@ -102,7 +103,7 @@ Shape canonicamente exposto por item:
 - `ces_reason`
 - `ces_components`
 - `budgets_used`
-- `ces_versions` (`CES_v1`, `CES_v2`)
+- `ces_versions` (`CES_v1`, `CES_v2`, `CES_v3`)
 
 ### CES_v1
 
@@ -144,6 +145,47 @@ Diferenca principal:
 
 Politica:
 - CES_v2 nao altera CES_v1; apenas expande a leitura em `ces_versions`.
+
+### CES_v3 (experimental)
+
+CES_v3 usa os mesmos sinais de entrada do CES_v1/CES_v2 (`status`, `actions`, `latency`, `trunc`) e
+mantem as mesmas restricoes de whitelist/elegibilidade:
+- whitelist de acoes identica ao CES_v1
+- `n >= 10` para acao participar de `S_latency`
+- `unknown` excluido por design
+- `total_runs = 0` => `ces = null` e `ces_reason = "no_runs"`
+
+Diferenca principal:
+- `S_latency` usa budget por acao com fonte `dynamic_baseline_14d`.
+- Regra de budget no v3:
+  - primeiro tenta `latency_dynamic_baseline[action].budget_ms` (source `dynamic_14d`);
+  - sem baseline elegivel, faz fallback para budget fixo v1 (`fixed_v1`).
+
+Politica:
+- CES_v3 e experimental e fica disponivel somente em `ces_versions`.
+- CES_v3 nao altera `ces_default_version` nem os campos top-level.
+
+### Baseline dinamico de latencia (read-only)
+
+Objetivo:
+- Expor baseline dinamico por acao como telemetria auxiliar, sem alterar o score default.
+
+Regra canonica:
+- `B_a_dynamic = ceil(median(p95_ms_ultimos_14_dias) * 1.10)`.
+- Considera somente acoes da whitelist CES.
+- Considera somente dias com `total_runs > 0`.
+- Considera somente amostras por acao com `n >= 10`.
+- Exclui `unknown` por design.
+
+Fallback:
+- Sem historico elegivel para a acao, usa budget fixo v1 (`fallback_fixed_v1`).
+
+Exposicao no endpoint:
+- `latency_dynamic_baseline_window_days`
+- `latency_dynamic_baseline` (por acao: `budget_ms`, `source`, `samples_used`)
+
+Invariante:
+- Baseline dinamico e read-only e nao altera `ces`, `ces_version` nem `ces_default_version`.
 
 ### Cognitive Efficiency Score - Run-level
 
@@ -285,6 +327,46 @@ Query params:
 - `end_date` (YYYY-MM-DD)
 - `limit` (1..500)
 - `offset` (>= 0)
+
+## Metrics SLO
+
+Escopo operacional:
+- Valido para ambiente normal, com banco saudavel.
+- Exclui cenarios de debug pesado e consultas de range grande.
+
+Endpoints cobertos:
+- `GET /api/v1/metrics/runs`
+- `GET /api/v1/metrics/runs/{process_id}`
+- `GET /api/v1/metrics/overview` (telemetria opcional para acompanhamento)
+
+SLO minimo:
+- `/metrics/runs`: `p95 <= 800ms` e `p99 <= 1500ms` (com `limit <= 50`)
+- `/metrics/runs/{process_id}`: `p95 <= 400ms` e `p99 <= 900ms`
+
+Guardrails de entrada:
+- `limit_max = 200` para endpoint run-level paginado.
+- `range_max_days = 31` para endpoint run-level com janela de datas.
+
+### Event Types de SLO
+
+`metrics_endpoint_timing`:
+- Telemetria append-only por request dos endpoints de metricas alvo.
+- Shape minimo em `facts`:
+  - `endpoint`
+  - `method`
+  - `status_code`
+  - `duration_ms`
+  - `query_fingerprint`
+  - `process_id` (quando existir no path)
+  - `metric_date` (YYYY-MM-DD)
+
+`metrics_slo_alert`:
+- Alerta diario de regressao de SLO por endpoint.
+- Condicoes canonicas:
+  - `p95_ms > slo_p95` ou
+  - `p99_ms > slo_p99` ou
+  - `error_rate > 0.01`
+- Dedupe por `(metric_date, endpoint, reason)`.
 
 ## Exemplos
 

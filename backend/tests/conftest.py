@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import create_engine, delete, event
+from sqlalchemy import create_engine, delete, event, inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -15,7 +15,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from app.db.models import CognitiveMetricsDaily, ObservationRecord
+from app.db.models import CognitiveMetricsDaily, MetricsEndpointDaily, ObservationRecord
 from app.db.session import get_db
 from app.main import app
 
@@ -204,11 +204,31 @@ def cleanup_metrics(sync_session_factory):
             )
         )
         session.execute(
+            delete(ObservationRecord).where(
+                ObservationRecord.facts["event_type"].astext == "metrics_endpoint_timing"
+            )
+        )
+        session.execute(
+            delete(ObservationRecord).where(
+                ObservationRecord.facts["event_type"].astext == "metrics_slo_alert"
+            )
+        )
+        session.execute(
             delete(ObservationRecord).where(ObservationRecord.process_id.like("P_METRICS_DAILY_%"))
+        )
+        session.execute(
+            delete(ObservationRecord).where(ObservationRecord.process_id.like("P_METRICS_ENDPOINT_%"))
+        )
+        session.execute(
+            delete(ObservationRecord).where(ObservationRecord.process_id.like("P_METRICS_SLO_%"))
         )
         session.execute(
             delete(ObservationRecord).where(ObservationRecord.process_id.like("P_TEST_GUARDRAIL_%"))
         )
+        if inspect(session.get_bind()).has_table("metrics_endpoint_daily"):
+            session.execute(
+                delete(MetricsEndpointDaily).where(MetricsEndpointDaily.metric_date.in_(target_dates))
+            )
         session.commit()
         yield
     finally:

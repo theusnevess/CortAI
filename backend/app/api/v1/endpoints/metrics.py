@@ -1,8 +1,11 @@
 import math
 import json
 import os
+import uuid
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,6 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import CognitiveMetricsDaily, ObservationRecord, PublishReceipt
 from app.db.session import get_db
+from app.observations import persist_observation
+from app.schemas.observation import Observation
+
+try:
+    import fcntl
+except Exception:
+    fcntl = None
 
 router = APIRouter()
 
@@ -31,6 +41,7 @@ PROHIBITED_FACT_KEYS = {
 CES_DEFAULT_VERSION = "CES_v1"
 CES_V1 = "CES_v1"
 CES_V2 = "CES_v2"
+CES_V3 = "CES_v3"
 CES_RUN_V1 = "CES_run_v1"
 CES_STATUS_WEIGHTS = {"blocked": 1.0, "failed": 0.6, "truncated": 0.3}
 CES_COMPONENT_WEIGHTS = {"status": 0.55, "actions": 0.15, "latency": 0.25, "trunc": 0.05}
@@ -64,7 +75,11 @@ CES_RUN_BUDGETS_MS = {
     "write_artifact": 3000,
     "publish_manifest": 3000,
 }
+CES_DYNAMIC_BASELINE_WINDOW_DAYS = 14
+CES_DYNAMIC_BASELINE_MIN_N = 10
 MANIFEST_OUTPUT_DIR = "agent_output"
+METRICS_RUNS_LIMIT_MAX = 200
+METRICS_RUNS_RANGE_MAX_DAYS = 31
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -202,6 +217,96 @@ def _read_jsonl_rows(path: Path) -> list[dict]:
             if isinstance(obj, dict):
                 rows.append(obj)
     return rows
+
+
+@contextmanager
+def _jsonl_lock(path: Path, exclusive: bool):
+    """
+    Aplica lock em JSONL para escrita/leitura concorrente segura.
+    """
+    lock_dir = path.parent / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{path.name}.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        if fcntl is not None:
+            mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            fcntl.flock(lock_file.fileno(), mode)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _append_minimal_outcome(outcome_id: str, process_id: str) -> None:
+    """
+    Anexa outcome minimo para satisfazer guardrail de Observation.
+    """
+    storage_dir = Path(os.getenv("CORTAI_STORAGE_DIR", "storage"))
+    outcome_path = storage_dir / "outcome_log.jsonl"
+    outcome_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "outcome_id": outcome_id,
+        "timestamp": datetime.utcnow().isoformat(),
+        "process_id": process_id,
+        "source_decision_id": "",
+        "execution_status": "external",
+        "metrics": {"origin": "metrics_api"},
+    }
+    with _jsonl_lock(outcome_path, exclusive=True):
+        with outcome_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+
+
+def _build_runs_query_fingerprint(limit: int, offset: int, start: date, end: date) -> str:
+    """
+    Gera fingerprint curta e deterministica para /metrics/runs.
+    """
+    range_days = (end - start).days + 1
+    return f"limit={limit}&offset={offset}&range={range_days}d"
+
+
+def _emit_metrics_endpoint_timing(
+    *,
+    endpoint: str,
+    method: str,
+    status_code: int,
+    duration_ms: int,
+    query_fingerprint: str,
+    process_id: str | None = None,
+) -> None:
+    """
+    Emite telemetria append-only por request dos endpoints de metricas.
+    """
+    try:
+        event_ts = datetime.utcnow().isoformat()
+        metric_date = event_ts[:10]
+        synthetic_process_id = f"P_METRICS_ENDPOINT_{metric_date}"
+        source_outcome_id = str(uuid.uuid4())
+        _append_minimal_outcome(source_outcome_id, synthetic_process_id)
+        facts: dict[str, Any] = {
+            "event_type": "metrics_endpoint_timing",
+            "endpoint": endpoint,
+            "method": method,
+            "status_code": int(status_code),
+            "duration_ms": int(max(0, duration_ms)),
+            "query_fingerprint": str(query_fingerprint),
+            "metric_date": metric_date,
+            "timestamp": event_ts,
+        }
+        if process_id:
+            facts["process_id"] = process_id
+        observation = Observation(
+            observation_id=str(uuid.uuid4()),
+            timestamp=event_ts,
+            process_id=synthetic_process_id,
+            source_outcome_id=source_outcome_id,
+            facts=facts,
+        )
+        persist_observation(observation)
+    except Exception:
+        # Telemetria nunca deve quebrar o endpoint principal.
+        return
 
 
 def _get_storage_paths() -> tuple[Path, Path]:
@@ -343,7 +448,7 @@ def _build_run_latency_map(run_anchors: dict[str, dict]) -> dict[str, dict]:
     return result
 
 
-def _compute_latency_inputs(item: dict) -> tuple[dict[str, dict], int]:
+def _compute_latency_inputs(item: dict, version: str) -> tuple[dict[str, dict], int]:
     """
     Normaliza entradas de latencia para acoes elegiveis do CES.
     """
@@ -359,8 +464,21 @@ def _compute_latency_inputs(item: dict) -> tuple[dict[str, dict], int]:
         p95_ms = int(payload.get("p95_ms") or 0)
         if n_obs < CES_MIN_OBS_FOR_LATENCY or p95_ms <= 0:
             continue
-        budget_ms = int(math.ceil(p95_ms * 1.10))
-        eligible[action_name] = {"n": n_obs, "p95_ms": p95_ms, "budget_ms": budget_ms}
+        baseline_payload = item.get("latency_dynamic_baseline", {})
+        baseline_action = baseline_payload.get(action_name, {}) if isinstance(baseline_payload, dict) else {}
+        if version == CES_V3:
+            budget_ms = int(baseline_action.get("budget_ms") or CES_RUN_BUDGETS_MS[action_name])
+            budget_source_raw = str(baseline_action.get("source") or "")
+            budget_source = "dynamic_14d" if budget_source_raw == "dynamic_14d" else "fixed_v1"
+        else:
+            budget_ms = int(math.ceil((p95_ms * 1.10) - 1e-9))
+            budget_source = "fixed_ceil_1p10"
+        eligible[action_name] = {
+            "n": n_obs,
+            "p95_ms": p95_ms,
+            "budget_ms": budget_ms,
+            "budget_source": budget_source,
+        }
         total_n += n_obs
     return eligible, total_n
 
@@ -410,7 +528,7 @@ def _compute_ces_version(item: dict, version: str) -> dict:
 
     s_trunc = _clamp(1.0 - r_t)
 
-    eligible, total_n = _compute_latency_inputs(item)
+    eligible, total_n = _compute_latency_inputs(item, version)
 
     if total_n <= 0:
         s_latency = 1.0
@@ -433,6 +551,7 @@ def _compute_ces_version(item: dict, version: str) -> dict:
                 "n": payload["n"],
                 "p95_ms": payload["p95_ms"],
                 "budget_ms": payload["budget_ms"],
+                "source": payload["budget_source"],
                 "weight": round(weight, 6),
             }
         s_latency = _clamp(s_latency)
@@ -465,6 +584,7 @@ def _compute_ces_fields(item: dict) -> dict:
     ces_versions = {
         CES_V1: _compute_ces_version(item, CES_V1),
         CES_V2: _compute_ces_version(item, CES_V2),
+        CES_V3: _compute_ces_version(item, CES_V3),
     }
     default_payload = ces_versions[CES_DEFAULT_VERSION]
     return {
@@ -476,6 +596,68 @@ def _compute_ces_fields(item: dict) -> dict:
         "budgets_used": default_payload["budgets_used"],
         "ces_versions": ces_versions,
     }
+
+
+def _median(values: list[int]) -> float:
+    """
+    Calcula mediana deterministica de inteiros.
+    """
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2 == 1:
+        return float(ordered[mid])
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _build_dynamic_baseline_for_date(
+    metric_date: date,
+    history_rows: list[CognitiveMetricsDaily],
+) -> dict[str, dict]:
+    """
+    Calcula baseline dinamico read-only por acao para a data alvo.
+    """
+    by_action: dict[str, list[int]] = {action: [] for action in CES_LATENCY_ACTION_WHITELIST}
+    for row in history_rows:
+        if row.metric_date >= metric_date:
+            continue
+        if row.metric_date < metric_date - timedelta(days=CES_DYNAMIC_BASELINE_WINDOW_DAYS):
+            continue
+        if int(row.total_runs or 0) <= 0:
+            continue
+        latency_payload = row.latency_by_action or {}
+        if not isinstance(latency_payload, dict):
+            continue
+        for action in CES_LATENCY_ACTION_WHITELIST:
+            action_payload = latency_payload.get(action)
+            if not isinstance(action_payload, dict):
+                continue
+            n_obs = int(action_payload.get("n") or 0)
+            p95_ms = int(action_payload.get("p95_ms") or 0)
+            if n_obs < CES_DYNAMIC_BASELINE_MIN_N or p95_ms <= 0:
+                continue
+            by_action[action].append(p95_ms)
+
+    baseline = {}
+    for action in sorted(CES_LATENCY_ACTION_WHITELIST):
+        samples = by_action.get(action, [])
+        if samples:
+            med = _median(samples)
+            budget_ms = int(math.ceil((med * 1.10) - 1e-9))
+            baseline[action] = {
+                "budget_ms": budget_ms,
+                "source": "dynamic_14d",
+                "samples_used": len(samples),
+            }
+        else:
+            baseline[action] = {
+                "budget_ms": CES_RUN_BUDGETS_MS[action],
+                "source": "fallback_fixed_v1",
+                "samples_used": 0,
+            }
+    return baseline
 
 
 def _compute_ces_window_summary(items: list[dict]) -> dict:
@@ -710,6 +892,13 @@ async def get_daily_metrics(
         .order_by(CognitiveMetricsDaily.metric_date.desc())
     )
     rows = (await db.execute(stmt)).scalars().all()
+    baseline_stmt = (
+        select(CognitiveMetricsDaily)
+        .where(CognitiveMetricsDaily.metric_date >= start - timedelta(days=CES_DYNAMIC_BASELINE_WINDOW_DAYS))
+        .where(CognitiveMetricsDaily.metric_date <= end)
+        .order_by(CognitiveMetricsDaily.metric_date.asc())
+    )
+    baseline_rows = (await db.execute(baseline_stmt)).scalars().all()
 
     alert_stmt = (
         select(
@@ -750,6 +939,11 @@ async def get_daily_metrics(
             "alert_count": alert_count,
             "alert_reasons": alert_info["alert_reasons"] if alert_info else [],
             "alert_observation_id": alert_info["alert_observation_id"] if alert_info else None,
+            "latency_dynamic_baseline_window_days": CES_DYNAMIC_BASELINE_WINDOW_DAYS,
+            "latency_dynamic_baseline": _build_dynamic_baseline_for_date(
+                r.metric_date,
+                baseline_rows,
+            ),
         }
         # Invariantes do contrato de alerta.
         if not item["alerted"]:
@@ -801,6 +995,13 @@ async def get_metrics_overview(
         .order_by(CognitiveMetricsDaily.metric_date.asc())
     )
     rows = (await db.execute(stmt)).scalars().all()
+    baseline_stmt = (
+        select(CognitiveMetricsDaily)
+        .where(CognitiveMetricsDaily.metric_date >= start - timedelta(days=CES_DYNAMIC_BASELINE_WINDOW_DAYS))
+        .where(CognitiveMetricsDaily.metric_date <= end)
+        .order_by(CognitiveMetricsDaily.metric_date.asc())
+    )
+    baseline_rows = (await db.execute(baseline_stmt)).scalars().all()
 
     alert_stmt = (
         select(
@@ -841,6 +1042,11 @@ async def get_metrics_overview(
             "alert_count": alert_count,
             "alert_reasons": alert_info["alert_reasons"] if alert_info else [],
             "alert_observation_id": alert_info["alert_observation_id"] if alert_info else None,
+            "latency_dynamic_baseline_window_days": CES_DYNAMIC_BASELINE_WINDOW_DAYS,
+            "latency_dynamic_baseline": _build_dynamic_baseline_for_date(
+                r.metric_date,
+                baseline_rows,
+            ),
         }
         if not item["alerted"]:
             item["alert_count"] = 0
@@ -875,7 +1081,7 @@ async def get_metrics_overview(
 
     # CES agregado do periodo (media ponderada por total_runs) por versao.
     ces_versions_summary: dict[str, dict] = {}
-    for version in (CES_V1, CES_V2):
+    for version in (CES_V1, CES_V2, CES_V3):
         items_with_runs = [
             item
             for item in items
@@ -1007,103 +1213,143 @@ async def get_alerts(
 async def get_runs(
     start_date: str | None = None,
     end_date: str | None = None,
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(50, ge=1),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Retorna runs por process_id deduplicados pelo ultimo cognitive_loop_finished no range.
     """
-    start = _parse_date(start_date, "start_date")
-    end = _parse_date(end_date, "end_date")
+    started_at = perf_counter()
+    status_code = 500
+    query_fingerprint = f"limit={limit}&offset={offset}&range=unknown"
+    try:
+        start = _parse_date(start_date, "start_date")
+        end = _parse_date(end_date, "end_date")
 
-    if end is None:
-        end = datetime.utcnow().date()
-    if start is None:
-        start = end - timedelta(days=7)
+        if end is None:
+            end = datetime.utcnow().date()
+        if start is None:
+            start = end - timedelta(days=7)
 
-    if start > end:
-        raise HTTPException(status_code=400, detail="start_date must be <= end_date")
+        if start > end:
+            raise HTTPException(status_code=400, detail="start_date must be <= end_date")
 
-    count_stmt = (
-        select(func.count(func.distinct(ObservationRecord.process_id)))
-        .where(ObservationRecord.facts["event_type"].astext == "cognitive_loop_finished")
-        .where(ObservationRecord.timestamp >= datetime.combine(start, datetime.min.time()))
-        .where(ObservationRecord.timestamp < datetime.combine(end + timedelta(days=1), datetime.min.time()))
-    )
-    total = (await db.execute(count_stmt)).scalar() or 0
+        if limit > METRICS_RUNS_LIMIT_MAX:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error_type": "LimitTooHigh",
+                    "limit_requested": limit,
+                    "limit_max": METRICS_RUNS_LIMIT_MAX,
+                },
+            )
 
-    stmt = (
-        select(
-            ObservationRecord.process_id,
-            ObservationRecord.observation_id,
-            ObservationRecord.timestamp,
-            ObservationRecord.facts,
+        range_days = (end - start).days + 1
+        if range_days > METRICS_RUNS_RANGE_MAX_DAYS:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error_type": "RangeTooLarge",
+                    "range_days": range_days,
+                    "range_max": METRICS_RUNS_RANGE_MAX_DAYS,
+                },
+            )
+
+        query_fingerprint = _build_runs_query_fingerprint(limit, offset, start, end)
+
+        count_stmt = (
+            select(func.count(func.distinct(ObservationRecord.process_id)))
+            .where(ObservationRecord.facts["event_type"].astext == "cognitive_loop_finished")
+            .where(ObservationRecord.timestamp >= datetime.combine(start, datetime.min.time()))
+            .where(ObservationRecord.timestamp < datetime.combine(end + timedelta(days=1), datetime.min.time()))
         )
-        .where(ObservationRecord.facts["event_type"].astext == "cognitive_loop_finished")
-        .where(ObservationRecord.timestamp >= datetime.combine(start, datetime.min.time()))
-        .where(ObservationRecord.timestamp < datetime.combine(end + timedelta(days=1), datetime.min.time()))
-        .order_by(desc(ObservationRecord.timestamp))
-    )
-    rows = (await db.execute(stmt)).all()
+        total = (await db.execute(count_stmt)).scalar() or 0
 
-    latest_by_process: dict[str, tuple] = {}
-    for process_id, observation_id, ts, facts in rows:
-        if not process_id or process_id in latest_by_process:
-            continue
-        latest_by_process[process_id] = (observation_id, ts, facts if isinstance(facts, dict) else {})
+        stmt = (
+            select(
+                ObservationRecord.process_id,
+                ObservationRecord.observation_id,
+                ObservationRecord.timestamp,
+                ObservationRecord.facts,
+            )
+            .where(ObservationRecord.facts["event_type"].astext == "cognitive_loop_finished")
+            .where(ObservationRecord.timestamp >= datetime.combine(start, datetime.min.time()))
+            .where(ObservationRecord.timestamp < datetime.combine(end + timedelta(days=1), datetime.min.time()))
+            .order_by(desc(ObservationRecord.timestamp))
+        )
+        rows = (await db.execute(stmt)).all()
 
-    deduped = [
-        {
-            "process_id": pid,
-            "observation_id": payload[0],
-            "timestamp_finished": payload[1].isoformat() if payload[1] else None,
-            "timestamp_finished_dt": payload[1],
-            "facts": payload[2],
-        }
-        for pid, payload in latest_by_process.items()
-    ]
+        latest_by_process: dict[str, tuple] = {}
+        for process_id, observation_id, ts, facts in rows:
+            if not process_id or process_id in latest_by_process:
+                continue
+            latest_by_process[process_id] = (observation_id, ts, facts if isinstance(facts, dict) else {})
 
-    deduped.sort(key=lambda item: item["timestamp_finished"] or "", reverse=True)
-    paged = deduped[offset : offset + limit]
-
-    run_anchors = {}
-    for row in paged:
-        pid = row.get("process_id")
-        ts_finished = row.get("timestamp_finished_dt")
-        if not pid or not isinstance(ts_finished, datetime):
-            continue
-        if ts_finished.tzinfo is None:
-            ts_finished = ts_finished.replace(tzinfo=timezone.utc)
-        run_anchors[pid] = {"timestamp_finished": ts_finished}
-    run_latency_map = _build_run_latency_map(run_anchors)
-
-    items = []
-    for row in paged:
-        ces_payload = _compute_ces_run_fields(row["facts"], run_latency_map.get(row["process_id"]))
-        items.append(
+        deduped = [
             {
-                "process_id": row["process_id"],
-                "timestamp_finished": row["timestamp_finished"],
-                "pipeline_status": ces_payload["pipeline_status"],
-                "ces_run": ces_payload["ces_run"],
-                "ces_run_version": ces_payload["ces_run_version"],
-                "ces_run_reason": ces_payload["ces_run_reason"],
-                "ces_run_components": ces_payload["ces_run_components"],
-                "latency_measured": ces_payload["latency_measured"],
-                "budgets_used": ces_payload["budgets_used"],
-                "latency_pairs_used": ces_payload["latency_pairs_used"],
-                "latency_pairs_ignored": ces_payload["latency_pairs_ignored"],
-                "latency_pairs_inverted": ces_payload["latency_pairs_inverted"],
+                "process_id": pid,
+                "observation_id": payload[0],
+                "timestamp_finished": payload[1].isoformat() if payload[1] else None,
+                "timestamp_finished_dt": payload[1],
+                "facts": payload[2],
             }
-        )
+            for pid, payload in latest_by_process.items()
+        ]
 
-    return {
-        "items": items,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-    }
+        deduped.sort(key=lambda item: item["timestamp_finished"] or "", reverse=True)
+        paged = deduped[offset : offset + limit]
+
+        run_anchors = {}
+        for row in paged:
+            pid = row.get("process_id")
+            ts_finished = row.get("timestamp_finished_dt")
+            if not pid or not isinstance(ts_finished, datetime):
+                continue
+            if ts_finished.tzinfo is None:
+                ts_finished = ts_finished.replace(tzinfo=timezone.utc)
+            run_anchors[pid] = {"timestamp_finished": ts_finished}
+        run_latency_map = _build_run_latency_map(run_anchors)
+
+        items = []
+        for row in paged:
+            ces_payload = _compute_ces_run_fields(row["facts"], run_latency_map.get(row["process_id"]))
+            items.append(
+                {
+                    "process_id": row["process_id"],
+                    "timestamp_finished": row["timestamp_finished"],
+                    "pipeline_status": ces_payload["pipeline_status"],
+                    "ces_run": ces_payload["ces_run"],
+                    "ces_run_version": ces_payload["ces_run_version"],
+                    "ces_run_reason": ces_payload["ces_run_reason"],
+                    "ces_run_components": ces_payload["ces_run_components"],
+                    "latency_measured": ces_payload["latency_measured"],
+                    "budgets_used": ces_payload["budgets_used"],
+                    "latency_pairs_used": ces_payload["latency_pairs_used"],
+                    "latency_pairs_ignored": ces_payload["latency_pairs_ignored"],
+                    "latency_pairs_inverted": ces_payload["latency_pairs_inverted"],
+                }
+            )
+
+        status_code = 200
+        return {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+    except HTTPException as exc:
+        status_code = exc.status_code
+        raise
+    finally:
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        _emit_metrics_endpoint_timing(
+            endpoint="/api/v1/metrics/runs",
+            method="GET",
+            status_code=status_code,
+            duration_ms=duration_ms,
+            query_fingerprint=query_fingerprint,
+        )
 
 
 @router.get("/runs/{process_id}")
@@ -1115,100 +1361,118 @@ async def get_run_debug(
     Retorna visao de debug de um run por process_id.
     Fonte de verdade: ultimo cognitive_loop_finished no Postgres.
     """
-    stmt = (
-        select(
-            ObservationRecord.observation_id,
-            ObservationRecord.timestamp,
-            ObservationRecord.process_id,
-            ObservationRecord.source_outcome_id,
-            ObservationRecord.facts,
+    started_at = perf_counter()
+    status_code = 500
+    query_fingerprint = "process_id=present"
+    try:
+        stmt = (
+            select(
+                ObservationRecord.observation_id,
+                ObservationRecord.timestamp,
+                ObservationRecord.process_id,
+                ObservationRecord.source_outcome_id,
+                ObservationRecord.facts,
+            )
+            .where(ObservationRecord.process_id == process_id)
+            .where(ObservationRecord.facts["event_type"].astext == "cognitive_loop_finished")
+            .order_by(desc(ObservationRecord.timestamp))
+            .limit(1)
         )
-        .where(ObservationRecord.process_id == process_id)
-        .where(ObservationRecord.facts["event_type"].astext == "cognitive_loop_finished")
-        .order_by(desc(ObservationRecord.timestamp))
-        .limit(1)
-    )
-    row = (await db.execute(stmt)).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="run_not_found")
+        row = (await db.execute(stmt)).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="run_not_found")
 
-    observation_id, ts, pid, source_outcome_id, facts = row
-    facts = facts if isinstance(facts, dict) else {}
-    ts_iso = ts.isoformat() if isinstance(ts, datetime) else None
-    run_anchors = {}
-    if isinstance(ts, datetime):
-        ts_anchor = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
-        run_anchors[pid] = {"timestamp_finished": ts_anchor}
-    run_latency = _build_run_latency_map(run_anchors).get(pid, {})
-    ces_payload = _compute_ces_run_fields(facts, run_latency)
+        observation_id, ts, pid, source_outcome_id, facts = row
+        facts = facts if isinstance(facts, dict) else {}
+        ts_iso = ts.isoformat() if isinstance(ts, datetime) else None
+        run_anchors = {}
+        if isinstance(ts, datetime):
+            ts_anchor = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+            run_anchors[pid] = {"timestamp_finished": ts_anchor}
+        run_latency = _build_run_latency_map(run_anchors).get(pid, {})
+        ces_payload = _compute_ces_run_fields(facts, run_latency)
 
-    outcome_row = _find_outcome_for_process(pid, source_outcome_id)
-    outcome_error = outcome_row.get("error") if isinstance(outcome_row, dict) else {}
-    if not isinstance(outcome_error, dict):
-        outcome_error = {}
-    execution_status = None
-    if isinstance(outcome_row, dict):
-        execution_status = outcome_row.get("execution_status")
-    if not execution_status:
-        execution_status = facts.get("execution_status")
+        outcome_row = _find_outcome_for_process(pid, source_outcome_id)
+        outcome_error = outcome_row.get("error") if isinstance(outcome_row, dict) else {}
+        if not isinstance(outcome_error, dict):
+            outcome_error = {}
+        execution_status = None
+        if isinstance(outcome_row, dict):
+            execution_status = outcome_row.get("execution_status")
+        if not execution_status:
+            execution_status = facts.get("execution_status")
 
-    publish_receipt_stmt = (
-        select(PublishReceipt)
-        .where(PublishReceipt.process_id == pid)
-        .order_by(desc(PublishReceipt.created_at))
-        .limit(1)
-    )
-    publish_receipt = (await db.execute(publish_receipt_stmt)).scalars().first()
+        publish_receipt_stmt = (
+            select(PublishReceipt)
+            .where(PublishReceipt.process_id == pid)
+            .order_by(desc(PublishReceipt.created_at))
+            .limit(1)
+        )
+        publish_receipt = (await db.execute(publish_receipt_stmt)).scalars().first()
 
-    manifest_decision_id = None
-    publish_decision_id = None
-    publish_receipt_id = None
-    if publish_receipt:
-        manifest_decision_id = publish_receipt.manifest_decision_id
-        publish_decision_id = publish_receipt.publish_decision_id
-        publish_receipt_id = publish_receipt.publish_decision_id
+        manifest_decision_id = None
+        publish_decision_id = None
+        publish_receipt_id = None
+        if publish_receipt:
+            manifest_decision_id = publish_receipt.manifest_decision_id
+            publish_decision_id = publish_receipt.publish_decision_id
+            publish_receipt_id = publish_receipt.publish_decision_id
 
-    if not manifest_decision_id and isinstance(facts.get("source_decision_id"), str):
-        manifest_decision_id = facts.get("source_decision_id")
+        if not manifest_decision_id and isinstance(facts.get("source_decision_id"), str):
+            manifest_decision_id = facts.get("source_decision_id")
 
-    missing_fields: list[str] = []
-    if not isinstance(source_outcome_id, str) or not source_outcome_id:
-        missing_fields.append("links.source_outcome_id")
-    if execution_status is None:
-        missing_fields.append("run_summary.execution_status")
-    if publish_receipt is None:
-        missing_fields.append("links.publish_decision_id")
-        missing_fields.append("artifact_refs.publish_receipt_id")
+        missing_fields: list[str] = []
+        if not isinstance(source_outcome_id, str) or not source_outcome_id:
+            missing_fields.append("links.source_outcome_id")
+        if execution_status is None:
+            missing_fields.append("run_summary.execution_status")
+        if publish_receipt is None:
+            missing_fields.append("links.publish_decision_id")
+            missing_fields.append("artifact_refs.publish_receipt_id")
 
-    return {
-        "run_summary": {
-            "process_id": pid,
-            "timestamp_finished": ts_iso,
-            "pipeline_status": ces_payload["pipeline_status"],
-            "execution_status": execution_status,
-            "ces_run": ces_payload["ces_run"],
-            "ces_run_version": ces_payload["ces_run_version"],
-            "ces_run_components": ces_payload["ces_run_components"],
-            "latency_measured": ces_payload["latency_measured"],
-            "latency_pairs_used": ces_payload["latency_pairs_used"],
-            "latency_pairs_ignored": ces_payload["latency_pairs_ignored"],
-            "latency_pairs_inverted": ces_payload["latency_pairs_inverted"],
-        },
-        "links": {
-            "observation_id": observation_id,
-            "source_outcome_id": source_outcome_id,
-            "source_decision_id": facts.get("source_decision_id"),
-            "manifest_decision_id": manifest_decision_id,
-            "publish_decision_id": publish_decision_id,
-        },
-        "artifact_refs": {
-            "manifest_path": _manifest_path_from_decision_id(manifest_decision_id),
-            "publish_receipt_id": publish_receipt_id,
-        },
-        "last_error": {
-            "error_type": outcome_error.get("type") if outcome_error else None,
-            "error_message": _sanitize_error_message(outcome_error.get("message")) if outcome_error else None,
-        },
-        "latency_breakdown": ces_payload.get("budgets_used", {}),
-        "missing_fields": sorted(set(missing_fields)),
-    }
+        status_code = 200
+        return {
+            "run_summary": {
+                "process_id": pid,
+                "timestamp_finished": ts_iso,
+                "pipeline_status": ces_payload["pipeline_status"],
+                "execution_status": execution_status,
+                "ces_run": ces_payload["ces_run"],
+                "ces_run_version": ces_payload["ces_run_version"],
+                "ces_run_components": ces_payload["ces_run_components"],
+                "latency_measured": ces_payload["latency_measured"],
+                "latency_pairs_used": ces_payload["latency_pairs_used"],
+                "latency_pairs_ignored": ces_payload["latency_pairs_ignored"],
+                "latency_pairs_inverted": ces_payload["latency_pairs_inverted"],
+            },
+            "links": {
+                "observation_id": observation_id,
+                "source_outcome_id": source_outcome_id,
+                "source_decision_id": facts.get("source_decision_id"),
+                "manifest_decision_id": manifest_decision_id,
+                "publish_decision_id": publish_decision_id,
+            },
+            "artifact_refs": {
+                "manifest_path": _manifest_path_from_decision_id(manifest_decision_id),
+                "publish_receipt_id": publish_receipt_id,
+            },
+            "last_error": {
+                "error_type": outcome_error.get("type") if outcome_error else None,
+                "error_message": _sanitize_error_message(outcome_error.get("message")) if outcome_error else None,
+            },
+            "latency_breakdown": ces_payload.get("budgets_used", {}),
+            "missing_fields": sorted(set(missing_fields)),
+        }
+    except HTTPException as exc:
+        status_code = exc.status_code
+        raise
+    finally:
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        _emit_metrics_endpoint_timing(
+            endpoint="/api/v1/metrics/runs/{process_id}",
+            method="GET",
+            status_code=status_code,
+            duration_ms=duration_ms,
+            query_fingerprint=query_fingerprint,
+            process_id=process_id,
+        )
