@@ -38,11 +38,13 @@ async def test_daily_sem_dados(client, seed_daily_metric):
     assert len(payload["items"]) == 1
     item = payload["items"][0]
     assert item["ces_default_version"] == "CES_v1"
-    assert set(item["ces_versions"].keys()) == {"CES_v1", "CES_v2"}
+    assert set(item["ces_versions"].keys()) == {"CES_v1", "CES_v2", "CES_v3"}
     assert item["ces"] == item["ces_versions"]["CES_v1"]["ces"]
     assert item["ces"] is None
     assert item["ces_versions"]["CES_v2"]["ces"] is None
     assert item["ces_versions"]["CES_v2"]["ces_reason"] == "no_runs"
+    assert item["ces_versions"]["CES_v3"]["ces"] is None
+    assert item["ces_versions"]["CES_v3"]["ces_reason"] == "no_runs"
 
 
 @pytest.mark.anyio
@@ -76,9 +78,10 @@ async def test_daily_um_dia_com_uma_linha(client, seed_daily_metric):
     assert float(item["avg_actions_executed"]) == pytest.approx(0.75)
     assert item["last_action_type_distribution"]["write_artifact"] == 3
     assert item["ces_default_version"] == "CES_v1"
-    assert set(item["ces_versions"].keys()) == {"CES_v1", "CES_v2"}
+    assert set(item["ces_versions"].keys()) == {"CES_v1", "CES_v2", "CES_v3"}
     assert item["ces"] == item["ces_versions"]["CES_v1"]["ces"]
     assert isinstance(item["ces_versions"]["CES_v2"]["ces"], float)
+    assert isinstance(item["ces_versions"]["CES_v3"]["ces"], float)
 
 
 @pytest.mark.anyio
@@ -170,6 +173,115 @@ async def test_daily_dynamic_baseline_dynamic_14d(client, seed_daily_metric):
 
 
 @pytest.mark.anyio
+async def test_daily_ces_v3_usa_budget_dinamico_14d(client, seed_daily_metric):
+    """
+    CES_v3 deve consumir budget dinamico quando houver baseline elegivel.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 7),
+        total_runs=5,
+        completed_runs=5,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 5},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 100}},
+    )
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 8),
+        total_runs=5,
+        completed_runs=5,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 5},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 200}},
+    )
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 9),
+        total_runs=5,
+        completed_runs=5,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 5},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 300}},
+    )
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=5,
+        completed_runs=5,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 5},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 400}},
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/daily",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    ces_v3_budget = item["ces_versions"]["CES_v3"]["budgets_used"]["write_artifact"]
+    ces_v1_budget = item["ces_versions"]["CES_v1"]["budgets_used"]["write_artifact"]
+    assert ces_v3_budget["source"] == "dynamic_14d"
+    assert ces_v3_budget["budget_ms"] == 220
+    assert ces_v1_budget["budget_ms"] == 440
+
+
+@pytest.mark.anyio
+async def test_daily_ces_v3_fallback_para_budget_fixo(client, seed_daily_metric):
+    """
+    Sem historico elegivel, CES_v3 deve usar fallback para budget fixo v1.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=5,
+        completed_runs=5,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 5},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 1000}},
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/daily",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    ces_v3_budget = item["ces_versions"]["CES_v3"]["budgets_used"]["write_artifact"]
+    assert ces_v3_budget["source"] == "fixed_v1"
+    assert ces_v3_budget["budget_ms"] == 3000
+
+
+@pytest.mark.anyio
+async def test_overview_deterministico_mesma_request_mesmo_payload(client, seed_daily_metric):
+    """
+    Mesma request deve retornar payload identico.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=4,
+        completed_runs=3,
+        failed_runs=1,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 4},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 500}},
+    )
+    params = {"start_date": "2026-02-10", "end_date": "2026-02-10"}
+    first = await client.get("/api/v1/metrics/overview", params=params)
+    second = await client.get("/api/v1/metrics/overview", params=params)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json()
+
+
+@pytest.mark.anyio
 async def test_daily_alerted_true_quando_ha_alerta(client, seed_daily_metric, seed_observation):
     """
     Valida enrichment de alerta no /metrics/daily.
@@ -252,9 +364,9 @@ async def test_overview_soma_bate(client, seed_daily_metric):
     assert summary["blocked_runs"] == sum(item["blocked_runs"] for item in items)
     assert summary["alert_days"] == sum(1 for item in items if item["alerted"])
     assert summary["ces_default_version"] == "CES_v1"
-    assert set(summary["ces_versions"].keys()) == {"CES_v1", "CES_v2"}
+    assert set(summary["ces_versions"].keys()) == {"CES_v1", "CES_v2", "CES_v3"}
     assert summary["ces"] == summary["ces_versions"]["CES_v1"]["ces"]
-    assert all(set(item["ces_versions"].keys()) == {"CES_v1", "CES_v2"} for item in items)
+    assert all(set(item["ces_versions"].keys()) == {"CES_v1", "CES_v2", "CES_v3"} for item in items)
 
 
 @pytest.mark.anyio
