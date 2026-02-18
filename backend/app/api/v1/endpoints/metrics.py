@@ -9,7 +9,7 @@ from time import perf_counter
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import CognitiveMetricsDaily, ObservationRecord, PublishReceipt
@@ -965,6 +965,7 @@ async def get_metrics_overview(
     days: int = 7,
     start_date: str | None = None,
     end_date: str | None = None,
+    include_reasons: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -976,7 +977,10 @@ async def get_metrics_overview(
     """
     started_at = perf_counter()
     status_code = 500
-    query_fingerprint = f"days={days}&start_date={start_date or ''}&end_date={end_date or ''}"
+    query_fingerprint = (
+        f"days={days}&start_date={start_date or ''}&end_date={end_date or ''}"
+        f"&include_reasons={str(include_reasons).lower()}"
+    )
     try:
         if days < 1 or days > 365:
             raise HTTPException(status_code=400, detail="days must be between 1 and 365")
@@ -1007,18 +1011,48 @@ async def get_metrics_overview(
         )
         baseline_rows = (await db.execute(baseline_stmt)).scalars().all()
 
-        alert_stmt = (
-            select(
-                ObservationRecord.observation_id,
-                ObservationRecord.timestamp,
-                ObservationRecord.facts,
+        # DB-first: no modo default, overview usa agregacao leve por dia sem carregar facts completos.
+        alerts_by_date: dict[str, dict] = {}
+        if include_reasons:
+            alert_stmt = (
+                select(
+                    ObservationRecord.observation_id,
+                    ObservationRecord.timestamp,
+                    ObservationRecord.facts,
+                )
+                .where(ObservationRecord.facts["event_type"].astext == "cognitive_metrics_alert")
+                .where(ObservationRecord.facts["metric_date"].astext >= start.isoformat())
+                .where(ObservationRecord.facts["metric_date"].astext <= end.isoformat())
             )
-            .where(ObservationRecord.facts["event_type"].astext == "cognitive_metrics_alert")
-            .where(ObservationRecord.facts["metric_date"].astext >= start.isoformat())
-            .where(ObservationRecord.facts["metric_date"].astext <= end.isoformat())
-        )
-        alert_rows = (await db.execute(alert_stmt)).all()
-        alerts_by_date = _build_alerts_by_date(alert_rows)
+            alert_rows = (await db.execute(alert_stmt)).all()
+            alerts_by_date = _build_alerts_by_date(alert_rows)
+        else:
+            alert_count_rows = (
+                await db.execute(
+                    text(
+                        """
+                        SELECT
+                          facts->>'metric_date' AS metric_date,
+                          COUNT(*)::int AS alert_count
+                        FROM observations
+                        WHERE facts->>'event_type' = 'cognitive_metrics_alert'
+                          AND facts->>'metric_date' >= :start_date
+                          AND facts->>'metric_date' <= :end_date
+                        GROUP BY 1
+                        """
+                    ),
+                    {
+                        "start_date": start.isoformat(),
+                        "end_date": end.isoformat(),
+                    },
+                )
+            ).mappings().all()
+            for row in alert_count_rows:
+                alerts_by_date[str(row["metric_date"])] = {
+                    "alert_count": int(row["alert_count"] or 0),
+                    "alert_reasons": [],
+                    "alert_observation_id": None,
+                }
 
         items = []
         for r in rows:
@@ -1056,7 +1090,7 @@ async def get_metrics_overview(
                 item["alert_count"] = 0
                 item["alert_reasons"] = []
                 item["alert_observation_id"] = None
-            elif item["alert_observation_id"] is None:
+            elif include_reasons and item["alert_observation_id"] is None:
                 item["alerted"] = False
                 item["alert_count"] = 0
                 item["alert_reasons"] = []
