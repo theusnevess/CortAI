@@ -370,6 +370,78 @@ async def test_overview_soma_bate(client, seed_daily_metric):
 
 
 @pytest.mark.anyio
+async def test_overview_alert_reasons_default_vazio(client, seed_daily_metric, seed_observation):
+    """
+    include_reasons default false deve preservar alert_count/alerted com alert_reasons vazio.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=4,
+        completed_runs=3,
+        failed_runs=1,
+        blocked_runs=0,
+        avg_actions_executed=0.8,
+        last_action_type_distribution={"write_artifact": 4},
+    )
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 12, 0, 0),
+        process_id="P_METRICS_OVERVIEW_ALERT_DEFAULT",
+        source_outcome_id="outcome-overview-alert-default",
+        facts={
+            "event_type": "cognitive_metrics_alert",
+            "metric_date": "2026-02-10",
+            "reasons": ["p95_slo_breach"],
+        },
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["alerted"] is True
+    assert item["alert_count"] == 1
+    assert item["alert_reasons"] == []
+
+
+@pytest.mark.anyio
+async def test_overview_include_reasons_true_retorna_reasons(client, seed_daily_metric, seed_observation):
+    """
+    include_reasons=true deve retornar reasons deduplicadas/ordenadas no overview.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=4,
+        completed_runs=3,
+        failed_runs=1,
+        blocked_runs=0,
+        avg_actions_executed=0.8,
+        last_action_type_distribution={"write_artifact": 4},
+    )
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 12, 0, 0),
+        process_id="P_METRICS_OVERVIEW_ALERT_REASONS",
+        source_outcome_id="outcome-overview-alert-reasons",
+        facts={
+            "event_type": "cognitive_metrics_alert",
+            "metric_date": "2026-02-10",
+            "reasons": ["p99_slo_breach", "p95_slo_breach", "p95_slo_breach"],
+        },
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10", "include_reasons": "true"},
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["alerted"] is True
+    assert item["alert_count"] == 1
+    assert item["alert_reasons"] == ["p95_slo_breach", "p99_slo_breach"]
+
+
+@pytest.mark.anyio
 async def test_overview_ces_bad_days_in_window(client, seed_daily_metric, monkeypatch):
     """
     Valida contador de dias ruins de CES com janela/threshold do alerta.
