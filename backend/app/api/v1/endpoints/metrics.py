@@ -2,7 +2,7 @@ import math
 import json
 import os
 import uuid
-from copy import deepcopy
+import hashlib
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -10,7 +10,7 @@ from threading import Lock
 from time import perf_counter
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -84,7 +84,7 @@ METRICS_RUNS_LIMIT_MAX = 200
 METRICS_RUNS_RANGE_MAX_DAYS = 31
 METRICS_OVERVIEW_CACHE_TTL_SECONDS = 10
 METRICS_OVERVIEW_CACHE_MAX_ENTRIES = 128
-_metrics_overview_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_metrics_overview_cache: dict[str, tuple[float, str]] = {}
 _metrics_overview_cache_lock = Lock()
 
 
@@ -144,19 +144,22 @@ def _overview_cache_enabled() -> bool:
 
 def _build_overview_cache_key(
     *,
-    days: int,
     start: date,
     end: date,
     include_reasons: bool,
     include_baseline: bool,
 ) -> str:
     return (
-        f"days={days}|start={start.isoformat()}|end={end.isoformat()}"
+        f"start={start.isoformat()}|end={end.isoformat()}"
         f"|reasons={int(include_reasons)}|baseline={int(include_baseline)}"
     )
 
 
-def _get_overview_cache(key: str) -> dict[str, Any] | None:
+def _overview_cache_key_hash(key: str) -> str:
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
+
+
+def _get_overview_cache(key: str) -> str | None:
     if not _overview_cache_enabled():
         return None
     now = perf_counter()
@@ -168,10 +171,10 @@ def _get_overview_cache(key: str) -> dict[str, Any] | None:
         if expires_at <= now:
             _metrics_overview_cache.pop(key, None)
             return None
-        return deepcopy(data)
+        return data
 
 
-def _set_overview_cache(key: str, payload: dict[str, Any]) -> None:
+def _set_overview_cache(key: str, payload_json: str) -> None:
     if not _overview_cache_enabled():
         return
     expires_at = perf_counter() + METRICS_OVERVIEW_CACHE_TTL_SECONDS
@@ -181,7 +184,7 @@ def _set_overview_cache(key: str, payload: dict[str, Any]) -> None:
             oldest_key = next(iter(_metrics_overview_cache), None)
             if oldest_key is not None:
                 _metrics_overview_cache.pop(oldest_key, None)
-        _metrics_overview_cache[key] = (expires_at, deepcopy(payload))
+        _metrics_overview_cache[key] = (expires_at, payload_json)
 
 
 def _filter_facts(facts: dict) -> dict:
@@ -331,6 +334,8 @@ def _emit_metrics_endpoint_timing(
     duration_ms: int,
     query_fingerprint: str,
     process_id: str | None = None,
+    cache_hit: bool | None = None,
+    cache_key_hash: str | None = None,
 ) -> None:
     """
     Emite telemetria append-only por request dos endpoints de metricas.
@@ -353,6 +358,10 @@ def _emit_metrics_endpoint_timing(
         }
         if process_id:
             facts["process_id"] = process_id
+        if cache_hit is not None:
+            facts["cache_hit"] = bool(cache_hit)
+        if cache_key_hash:
+            facts["cache_key_hash"] = str(cache_key_hash)
         observation = Observation(
             observation_id=str(uuid.uuid4()),
             timestamp=event_ts,
@@ -1035,6 +1044,8 @@ async def get_metrics_overview(
     """
     started_at = perf_counter()
     status_code = 500
+    cache_hit_flag: bool | None = None
+    cache_key_hash: str | None = None
     query_fingerprint = (
         f"days={days}&start_date={start_date or ''}&end_date={end_date or ''}"
         f"&include_reasons={str(include_reasons).lower()}"
@@ -1056,16 +1067,18 @@ async def get_metrics_overview(
             raise HTTPException(status_code=400, detail="start_date must be <= end_date")
 
         cache_key = _build_overview_cache_key(
-            days=days,
             start=start,
             end=end,
             include_reasons=include_reasons,
             include_baseline=include_baseline,
         )
-        cached_payload = _get_overview_cache(cache_key)
-        if cached_payload is not None:
+        cache_key_hash = _overview_cache_key_hash(cache_key)
+        cached_payload_json = _get_overview_cache(cache_key)
+        if cached_payload_json is not None:
+            cache_hit_flag = True
             status_code = 200
-            return cached_payload
+            return Response(content=cached_payload_json, media_type="application/json", status_code=200)
+        cache_hit_flag = False
 
         stmt = (
             select(CognitiveMetricsDaily)
@@ -1203,7 +1216,10 @@ async def get_metrics_overview(
 
         status_code = 200
         response_payload = {"items": items, "summary": summary}
-        _set_overview_cache(cache_key, response_payload)
+        _set_overview_cache(
+            cache_key,
+            json.dumps(response_payload, separators=(",", ":"), ensure_ascii=False),
+        )
         return response_payload
     except HTTPException as exc:
         status_code = exc.status_code
@@ -1216,6 +1232,8 @@ async def get_metrics_overview(
             status_code=status_code,
             duration_ms=duration_ms,
             query_fingerprint=query_fingerprint,
+            cache_hit=cache_hit_flag,
+            cache_key_hash=cache_key_hash,
         )
 
 
