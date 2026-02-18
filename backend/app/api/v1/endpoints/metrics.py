@@ -7,10 +7,10 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
-from time import perf_counter
+from time import perf_counter, perf_counter_ns
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -333,6 +333,9 @@ def _emit_metrics_endpoint_timing(
     status_code: int,
     duration_ms: int,
     duration_us: int | None = None,
+    queue_us: int | None = None,
+    server_total_ms: int | None = None,
+    server_total_us: int | None = None,
     query_fingerprint: str,
     process_id: str | None = None,
     cache_hit: bool | None = None,
@@ -355,8 +358,28 @@ def _emit_metrics_endpoint_timing(
             "duration_ms": int(max(0, duration_ms)),
             # Alta resolucao para diferenciar handler sub-ms de fila/infra.
             "duration_us": int(max(0, duration_us if duration_us is not None else duration_ms * 1000)),
+            "queue_us": int(max(0, queue_us if queue_us is not None else 0)),
+            "server_total_us": int(
+                max(
+                    0,
+                    server_total_us
+                    if server_total_us is not None
+                    else (duration_us if duration_us is not None else duration_ms * 1000),
+                )
+            ),
             "handler_ms": int(max(0, duration_ms)),
-            "server_total_ms": int(max(0, duration_ms)),
+            "server_total_ms": int(
+                max(
+                    0,
+                    server_total_ms
+                    if server_total_ms is not None
+                    else (
+                        (server_total_us // 1000)
+                        if server_total_us is not None
+                        else (duration_us // 1000 if duration_us is not None else duration_ms)
+                    ),
+                )
+            ),
             "query_fingerprint": str(query_fingerprint),
             "metric_date": metric_date,
             "timestamp": event_ts,
@@ -1033,6 +1056,7 @@ async def get_daily_metrics(
 
 @router.get("/overview")
 async def get_metrics_overview(
+    request: Request,
     days: int = 7,
     start_date: str | None = None,
     end_date: str | None = None,
@@ -1047,6 +1071,7 @@ async def get_metrics_overview(
         start_date: filtra metricas a partir dessa data (YYYY-MM-DD)
         end_date: filtra metricas ate essa data (YYYY-MM-DD)
     """
+    handler_start_ns = perf_counter_ns()
     started_at = perf_counter()
     status_code = 500
     cache_hit_flag: bool | None = None
@@ -1230,15 +1255,25 @@ async def get_metrics_overview(
         status_code = exc.status_code
         raise
     finally:
+        handler_end_ns = perf_counter_ns()
         elapsed_s = perf_counter() - started_at
         duration_ms = int(elapsed_s * 1000)
         duration_us = int(elapsed_s * 1_000_000)
+        asgi_entry_ns = getattr(getattr(request, "state", None), "asgi_entry_ns", None)
+        queue_us = 0
+        server_total_us = duration_us
+        if isinstance(asgi_entry_ns, int):
+            queue_us = max(0, (handler_start_ns - asgi_entry_ns) // 1000)
+            server_total_us = max(0, (handler_end_ns - asgi_entry_ns) // 1000)
         _emit_metrics_endpoint_timing(
             endpoint="/api/v1/metrics/overview",
             method="GET",
             status_code=status_code,
             duration_ms=duration_ms,
             duration_us=duration_us,
+            queue_us=queue_us,
+            server_total_ms=server_total_us // 1000,
+            server_total_us=server_total_us,
             query_fingerprint=query_fingerprint,
             cache_hit=cache_hit_flag,
             cache_key_hash=cache_key_hash,
@@ -1320,6 +1355,7 @@ async def get_alerts(
 
 @router.get("/runs")
 async def get_runs(
+    request: Request,
     start_date: str | None = None,
     end_date: str | None = None,
     limit: int = Query(50, ge=1),
@@ -1329,6 +1365,7 @@ async def get_runs(
     """
     Retorna runs por process_id deduplicados pelo ultimo cognitive_loop_finished no range.
     """
+    handler_start_ns = perf_counter_ns()
     started_at = perf_counter()
     status_code = 500
     query_fingerprint = f"limit={limit}&offset={offset}&range=unknown"
@@ -1438,15 +1475,25 @@ async def get_runs(
         status_code = exc.status_code
         raise
     finally:
+        handler_end_ns = perf_counter_ns()
         elapsed_s = perf_counter() - started_at
         duration_ms = int(elapsed_s * 1000)
         duration_us = int(elapsed_s * 1_000_000)
+        asgi_entry_ns = getattr(getattr(request, "state", None), "asgi_entry_ns", None)
+        queue_us = 0
+        server_total_us = duration_us
+        if isinstance(asgi_entry_ns, int):
+            queue_us = max(0, (handler_start_ns - asgi_entry_ns) // 1000)
+            server_total_us = max(0, (handler_end_ns - asgi_entry_ns) // 1000)
         _emit_metrics_endpoint_timing(
             endpoint="/api/v1/metrics/runs",
             method="GET",
             status_code=status_code,
             duration_ms=duration_ms,
             duration_us=duration_us,
+            queue_us=queue_us,
+            server_total_ms=server_total_us // 1000,
+            server_total_us=server_total_us,
             query_fingerprint=query_fingerprint,
         )
 
@@ -1454,12 +1501,14 @@ async def get_runs(
 @router.get("/runs/{process_id}")
 async def get_run_debug(
     process_id: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """
     Retorna visao de debug de um run por process_id.
     Fonte de verdade: ultimo cognitive_loop_finished no Postgres.
     """
+    handler_start_ns = perf_counter_ns()
     started_at = perf_counter()
     status_code = 500
     query_fingerprint = "process_id=present"
@@ -1566,15 +1615,25 @@ async def get_run_debug(
         status_code = exc.status_code
         raise
     finally:
+        handler_end_ns = perf_counter_ns()
         elapsed_s = perf_counter() - started_at
         duration_ms = int(elapsed_s * 1000)
         duration_us = int(elapsed_s * 1_000_000)
+        asgi_entry_ns = getattr(getattr(request, "state", None), "asgi_entry_ns", None)
+        queue_us = 0
+        server_total_us = duration_us
+        if isinstance(asgi_entry_ns, int):
+            queue_us = max(0, (handler_start_ns - asgi_entry_ns) // 1000)
+            server_total_us = max(0, (handler_end_ns - asgi_entry_ns) // 1000)
         _emit_metrics_endpoint_timing(
             endpoint="/api/v1/metrics/runs/{process_id}",
             method="GET",
             status_code=status_code,
             duration_ms=duration_ms,
             duration_us=duration_us,
+            queue_us=queue_us,
+            server_total_ms=server_total_us // 1000,
+            server_total_us=server_total_us,
             query_fingerprint=query_fingerprint,
             process_id=process_id,
         )
