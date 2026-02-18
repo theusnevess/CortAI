@@ -239,6 +239,17 @@ Componentes do `CES_run_v1`:
   - `latency_pairs_*` nao alteram o score; sao apenas telemetria de auditoria.
   - Invariante esperado: `latency_pairs_inverted = 0`; se maior que zero, tratar como investigacao de clock drift/ordem de eventos.
 
+Contrato operacional v1.2 (lean list / heavy debug):
+- `GET /api/v1/metrics/runs` e endpoint de lista lean:
+  - retorna apenas `process_id`, `timestamp_finished`, `pipeline_status`, `ces_run`,
+    `ces_run_version`, `ces_run_reason`, `ces_run_components`, `latency_measured`,
+    `latency_pairs_inverted`.
+  - nao retorna campos pesados (`budgets_used`, `latency_pairs_used`, `latency_pairs_ignored`).
+  - nao executa calculo de latencia real por acao (run-level pesado).
+- `GET /api/v1/metrics/runs/{process_id}` permanece endpoint de debug heavy:
+  - inclui `latency_breakdown` (budgets por acao), `latency_pairs_used/ignored/inverted`,
+    `links`, `artifact_refs`, `last_error` sanitizado.
+
 ### Run debug view
 
 Endpoint read-only:
