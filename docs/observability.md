@@ -413,17 +413,19 @@ Guardrails de entrada:
   - `status_code`
   - `duration_ms`
   - `duration_us` (alta resolucao para diagnostico sub-ms)
+  - `queue_us` (tempo entre entrada ASGI e inicio do handler)
   - `handler_ms`
   - `server_total_ms`
+  - `server_total_us`
   - `query_fingerprint`
   - `cache_hit` (quando aplicavel, ex.: `/metrics/overview`)
   - `cache_key_hash` (hash curto da chave canonica, quando aplicavel)
   - `process_id` (quando existir no path)
   - `metric_date` (YYYY-MM-DD)
 
-Diagnostico de fila (v1.2.4):
+Diagnostico de fila (v1.2.6):
 - Para `/api/v1/metrics/overview`, comparar p95 client-side vs p95 server-side (`duration_ms`) com `cache_hit=true`.
-- Se `duration_ms` permanecer baixo e a latencia do cliente alta, o gargalo e concorrencia/throughput (fila), nao o handler.
+- Priorizar `queue_us`/`server_total_us` para separar fila de execucao interna do handler.
 
 `metrics_slo_alert`:
 - Alerta diario de regressao de SLO por endpoint.
