@@ -974,166 +974,183 @@ async def get_metrics_overview(
         start_date: filtra metricas a partir dessa data (YYYY-MM-DD)
         end_date: filtra metricas ate essa data (YYYY-MM-DD)
     """
-    if days < 1 or days > 365:
-        raise HTTPException(status_code=400, detail="days must be between 1 and 365")
+    started_at = perf_counter()
+    status_code = 500
+    query_fingerprint = f"days={days}&start_date={start_date or ''}&end_date={end_date or ''}"
+    try:
+        if days < 1 or days > 365:
+            raise HTTPException(status_code=400, detail="days must be between 1 and 365")
 
-    start = _parse_date(start_date, "start_date")
-    end = _parse_date(end_date, "end_date")
+        start = _parse_date(start_date, "start_date")
+        end = _parse_date(end_date, "end_date")
 
-    if end is None:
-        end = datetime.utcnow().date()
-    if start is None:
-        start = end - timedelta(days=days - 1)
+        if end is None:
+            end = datetime.utcnow().date()
+        if start is None:
+            start = end - timedelta(days=days - 1)
 
-    if start > end:
-        raise HTTPException(status_code=400, detail="start_date must be <= end_date")
+        if start > end:
+            raise HTTPException(status_code=400, detail="start_date must be <= end_date")
 
-    stmt = (
-        select(CognitiveMetricsDaily)
-        .where(CognitiveMetricsDaily.metric_date >= start)
-        .where(CognitiveMetricsDaily.metric_date <= end)
-        .order_by(CognitiveMetricsDaily.metric_date.asc())
-    )
-    rows = (await db.execute(stmt)).scalars().all()
-    baseline_stmt = (
-        select(CognitiveMetricsDaily)
-        .where(CognitiveMetricsDaily.metric_date >= start - timedelta(days=CES_DYNAMIC_BASELINE_WINDOW_DAYS))
-        .where(CognitiveMetricsDaily.metric_date <= end)
-        .order_by(CognitiveMetricsDaily.metric_date.asc())
-    )
-    baseline_rows = (await db.execute(baseline_stmt)).scalars().all()
-
-    alert_stmt = (
-        select(
-            ObservationRecord.observation_id,
-            ObservationRecord.timestamp,
-            ObservationRecord.facts,
+        stmt = (
+            select(CognitiveMetricsDaily)
+            .where(CognitiveMetricsDaily.metric_date >= start)
+            .where(CognitiveMetricsDaily.metric_date <= end)
+            .order_by(CognitiveMetricsDaily.metric_date.asc())
         )
-        .where(ObservationRecord.facts["event_type"].astext == "cognitive_metrics_alert")
-        .where(ObservationRecord.facts["metric_date"].astext >= start.isoformat())
-        .where(ObservationRecord.facts["metric_date"].astext <= end.isoformat())
-    )
-    alert_rows = (await db.execute(alert_stmt)).all()
-    alerts_by_date = _build_alerts_by_date(alert_rows)
+        rows = (await db.execute(stmt)).scalars().all()
+        baseline_stmt = (
+            select(CognitiveMetricsDaily)
+            .where(CognitiveMetricsDaily.metric_date >= start - timedelta(days=CES_DYNAMIC_BASELINE_WINDOW_DAYS))
+            .where(CognitiveMetricsDaily.metric_date <= end)
+            .order_by(CognitiveMetricsDaily.metric_date.asc())
+        )
+        baseline_rows = (await db.execute(baseline_stmt)).scalars().all()
 
-    items = []
-    for r in rows:
-        metric_key = r.metric_date.isoformat()
-        alert_info = alerts_by_date.get(metric_key, None)
-        alert_count = alert_info["alert_count"] if alert_info else 0
-        alerted = alert_count > 0
-        item = {
-            "metric_date": r.metric_date.isoformat(),
-            "total_runs": r.total_runs,
-            "completed_runs": r.completed_runs,
-            "failed_runs": r.failed_runs,
-            "blocked_runs": r.blocked_runs,
-            "truncated_runs": getattr(r, "truncated_runs", 0),
-            "truncated_ratio": float(r.truncated_ratio)
-            if getattr(r, "truncated_ratio", None) is not None
-            else None,
-            "avg_actions_executed": float(r.avg_actions_executed)
-            if r.avg_actions_executed is not None
-            else None,
-            "last_action_type_distribution": r.last_action_type_distribution,
-            "latency_by_action": getattr(r, "latency_by_action", {}) or {},
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-            "alerted": alerted,
-            "alert_count": alert_count,
-            "alert_reasons": alert_info["alert_reasons"] if alert_info else [],
-            "alert_observation_id": alert_info["alert_observation_id"] if alert_info else None,
-            "latency_dynamic_baseline_window_days": CES_DYNAMIC_BASELINE_WINDOW_DAYS,
-            "latency_dynamic_baseline": _build_dynamic_baseline_for_date(
-                r.metric_date,
-                baseline_rows,
-            ),
-        }
-        if not item["alerted"]:
-            item["alert_count"] = 0
-            item["alert_reasons"] = []
-            item["alert_observation_id"] = None
-        elif item["alert_observation_id"] is None:
-            item["alerted"] = False
-            item["alert_count"] = 0
-            item["alert_reasons"] = []
-        item.update(_compute_ces_fields(item))
-        items.append(item)
+        alert_stmt = (
+            select(
+                ObservationRecord.observation_id,
+                ObservationRecord.timestamp,
+                ObservationRecord.facts,
+            )
+            .where(ObservationRecord.facts["event_type"].astext == "cognitive_metrics_alert")
+            .where(ObservationRecord.facts["metric_date"].astext >= start.isoformat())
+            .where(ObservationRecord.facts["metric_date"].astext <= end.isoformat())
+        )
+        alert_rows = (await db.execute(alert_stmt)).all()
+        alerts_by_date = _build_alerts_by_date(alert_rows)
 
-    # Resumo agregado do periodo.
-    summary = {
-        "total_runs": sum(item["total_runs"] for item in items),
-        "completed_runs": sum(item["completed_runs"] for item in items),
-        "failed_runs": sum(item["failed_runs"] for item in items),
-        "blocked_runs": sum(item["blocked_runs"] for item in items),
-        "truncated_runs": sum(item["truncated_runs"] for item in items),
-        "alert_days": sum(1 for item in items if item["alerted"]),
-    }
-
-    total_runs = summary["total_runs"]
-    if total_runs > 0:
-        summary["failed_ratio"] = round(summary["failed_runs"] / total_runs, 4)
-        summary["blocked_ratio"] = round(summary["blocked_runs"] / total_runs, 4)
-        summary["truncated_ratio"] = round(summary["truncated_runs"] / total_runs, 4)
-    else:
-        summary["failed_ratio"] = 0.0
-        summary["blocked_ratio"] = 0.0
-        summary["truncated_ratio"] = 0.0
-
-    # CES agregado do periodo (media ponderada por total_runs) por versao.
-    ces_versions_summary: dict[str, dict] = {}
-    for version in (CES_V1, CES_V2, CES_V3):
-        items_with_runs = [
-            item
-            for item in items
-            if item.get("total_runs", 0) > 0
-            and isinstance(item.get("ces_versions", {}).get(version), dict)
-            and item["ces_versions"][version].get("ces") is not None
-        ]
-        weighted_runs = sum(item["total_runs"] for item in items_with_runs)
-        if weighted_runs > 0:
-            ces_versions_summary[version] = {
-                "ces": round(
-                    sum(float(item["ces_versions"][version]["ces"]) * item["total_runs"] for item in items_with_runs)
-                    / weighted_runs,
-                    2,
+        items = []
+        for r in rows:
+            metric_key = r.metric_date.isoformat()
+            alert_info = alerts_by_date.get(metric_key, None)
+            alert_count = alert_info["alert_count"] if alert_info else 0
+            alerted = alert_count > 0
+            item = {
+                "metric_date": r.metric_date.isoformat(),
+                "total_runs": r.total_runs,
+                "completed_runs": r.completed_runs,
+                "failed_runs": r.failed_runs,
+                "blocked_runs": r.blocked_runs,
+                "truncated_runs": getattr(r, "truncated_runs", 0),
+                "truncated_ratio": float(r.truncated_ratio)
+                if getattr(r, "truncated_ratio", None) is not None
+                else None,
+                "avg_actions_executed": float(r.avg_actions_executed)
+                if r.avg_actions_executed is not None
+                else None,
+                "last_action_type_distribution": r.last_action_type_distribution,
+                "latency_by_action": getattr(r, "latency_by_action", {}) or {},
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "alerted": alerted,
+                "alert_count": alert_count,
+                "alert_reasons": alert_info["alert_reasons"] if alert_info else [],
+                "alert_observation_id": alert_info["alert_observation_id"] if alert_info else None,
+                "latency_dynamic_baseline_window_days": CES_DYNAMIC_BASELINE_WINDOW_DAYS,
+                "latency_dynamic_baseline": _build_dynamic_baseline_for_date(
+                    r.metric_date,
+                    baseline_rows,
                 ),
-                "ces_reason": None,
-                "ces_components": {
-                    key: round(
-                        sum(
-                            float(item["ces_versions"][version]["ces_components"][key]) * item["total_runs"]
-                            for item in items_with_runs
-                        )
-                        / weighted_runs,
-                        4,
-                    )
-                    for key in ("status", "actions", "latency", "trunc")
-                },
-                "budgets_used": {},
             }
+            if not item["alerted"]:
+                item["alert_count"] = 0
+                item["alert_reasons"] = []
+                item["alert_observation_id"] = None
+            elif item["alert_observation_id"] is None:
+                item["alerted"] = False
+                item["alert_count"] = 0
+                item["alert_reasons"] = []
+            item.update(_compute_ces_fields(item))
+            items.append(item)
+
+        # Resumo agregado do periodo.
+        summary = {
+            "total_runs": sum(item["total_runs"] for item in items),
+            "completed_runs": sum(item["completed_runs"] for item in items),
+            "failed_runs": sum(item["failed_runs"] for item in items),
+            "blocked_runs": sum(item["blocked_runs"] for item in items),
+            "truncated_runs": sum(item["truncated_runs"] for item in items),
+            "alert_days": sum(1 for item in items if item["alerted"]),
+        }
+
+        total_runs = summary["total_runs"]
+        if total_runs > 0:
+            summary["failed_ratio"] = round(summary["failed_runs"] / total_runs, 4)
+            summary["blocked_ratio"] = round(summary["blocked_runs"] / total_runs, 4)
+            summary["truncated_ratio"] = round(summary["truncated_runs"] / total_runs, 4)
         else:
-            ces_versions_summary[version] = {
-                "ces": None,
-                "ces_reason": "no_runs",
-                "ces_components": {
-                    "status": None,
-                    "actions": None,
-                    "latency": None,
-                    "trunc": None,
-                },
-                "budgets_used": {},
-            }
+            summary["failed_ratio"] = 0.0
+            summary["blocked_ratio"] = 0.0
+            summary["truncated_ratio"] = 0.0
 
-    default_summary = ces_versions_summary[CES_DEFAULT_VERSION]
-    summary["ces_default_version"] = CES_DEFAULT_VERSION
-    summary["ces"] = default_summary["ces"]
-    summary["ces_reason"] = default_summary["ces_reason"]
-    summary["ces_version"] = CES_DEFAULT_VERSION
-    summary["ces_components"] = default_summary["ces_components"]
-    summary["ces_versions"] = ces_versions_summary
-    summary.update(_compute_ces_window_summary(items))
+        # CES agregado do periodo (media ponderada por total_runs) por versao.
+        ces_versions_summary: dict[str, dict] = {}
+        for version in (CES_V1, CES_V2, CES_V3):
+            items_with_runs = [
+                item
+                for item in items
+                if item.get("total_runs", 0) > 0
+                and isinstance(item.get("ces_versions", {}).get(version), dict)
+                and item["ces_versions"][version].get("ces") is not None
+            ]
+            weighted_runs = sum(item["total_runs"] for item in items_with_runs)
+            if weighted_runs > 0:
+                ces_versions_summary[version] = {
+                    "ces": round(
+                        sum(float(item["ces_versions"][version]["ces"]) * item["total_runs"] for item in items_with_runs)
+                        / weighted_runs,
+                        2,
+                    ),
+                    "ces_reason": None,
+                    "ces_components": {
+                        key: round(
+                            sum(
+                                float(item["ces_versions"][version]["ces_components"][key]) * item["total_runs"]
+                                for item in items_with_runs
+                            )
+                            / weighted_runs,
+                            4,
+                        )
+                        for key in ("status", "actions", "latency", "trunc")
+                    },
+                    "budgets_used": {},
+                }
+            else:
+                ces_versions_summary[version] = {
+                    "ces": None,
+                    "ces_reason": "no_runs",
+                    "ces_components": {
+                        "status": None,
+                        "actions": None,
+                        "latency": None,
+                        "trunc": None,
+                    },
+                    "budgets_used": {},
+                }
 
-    return {"items": items, "summary": summary}
+        default_summary = ces_versions_summary[CES_DEFAULT_VERSION]
+        summary["ces_default_version"] = CES_DEFAULT_VERSION
+        summary["ces"] = default_summary["ces"]
+        summary["ces_reason"] = default_summary["ces_reason"]
+        summary["ces_version"] = CES_DEFAULT_VERSION
+        summary["ces_components"] = default_summary["ces_components"]
+        summary["ces_versions"] = ces_versions_summary
+        summary.update(_compute_ces_window_summary(items))
+
+        status_code = 200
+        return {"items": items, "summary": summary}
+    except HTTPException as exc:
+        status_code = exc.status_code
+        raise
+    finally:
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        _emit_metrics_endpoint_timing(
+            endpoint="/api/v1/metrics/overview",
+            method="GET",
+            status_code=status_code,
+            duration_ms=duration_ms,
+            query_fingerprint=query_fingerprint,
+        )
 
 
 @router.get("/alerts")
