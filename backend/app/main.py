@@ -18,7 +18,7 @@ app = FastAPI(
     redoc_url="/redoc" # URL da documentação alternativa (ReDoc)
 )
 
-APP_VERSION = os.getenv("APP_VERSION", "1.8.2")
+APP_VERSION = os.getenv("APP_VERSION", "1.9.0")
 GIT_TAG = os.getenv("GIT_TAG")
 GIT_COMMIT = os.getenv("GIT_COMMIT")
 
