@@ -6,10 +6,16 @@ on:
     paths:
       - "docs/pr_checklist_observability.md"
       - "backend/app/api/v1/endpoints/metrics.py"
+      - "backend/app/api/v1/endpoints/observability.py"
+      - "backend/app/api/v1/endpoints/status.py"
+      - "backend/app/slo_contract.py"
       - "backend/app/cognitive_metrics.py"
       - "backend/app/db/models.py"
       - "backend/alembic/**"
       - "backend/tests/test_metrics_api.py"
+      - "backend/tests/test_observability_report_api.py"
+      - "backend/tests/test_status_api.py"
+      - "backend/tests/perf_gate_metrics_runs.py"
       - "backend/tests/conftest.py"
       - ".github/workflows/ci.yml"
   push:
@@ -17,10 +23,16 @@ on:
     paths:
       - "docs/pr_checklist_observability.md"
       - "backend/app/api/v1/endpoints/metrics.py"
+      - "backend/app/api/v1/endpoints/observability.py"
+      - "backend/app/api/v1/endpoints/status.py"
+      - "backend/app/slo_contract.py"
       - "backend/app/cognitive_metrics.py"
       - "backend/app/db/models.py"
       - "backend/alembic/**"
       - "backend/tests/test_metrics_api.py"
+      - "backend/tests/test_observability_report_api.py"
+      - "backend/tests/test_status_api.py"
+      - "backend/tests/perf_gate_metrics_runs.py"
       - "backend/tests/conftest.py"
       - ".github/workflows/ci.yml"
 
@@ -75,7 +87,11 @@ jobs:
       
       - name: Run pytest
         run: |
-          docker compose run --rm api sh -lc "python -m pip install -q pytest && python -m pytest -q tests/test_metrics_api.py"
+          docker compose run --rm api sh -lc "python -m pip install -q pytest && python -m pytest -q tests/test_metrics_api.py tests/test_observability_report_api.py tests/test_status_api.py"
+
+      - name: Performance gate - metrics runs p95
+        run: |
+          docker compose run --rm api sh -lc "python tests/perf_gate_metrics_runs.py"
 
       - name: Smoke aggregation on empty day
         run: |

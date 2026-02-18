@@ -2,7 +2,7 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1.endpoints import videos, metrics, observability
+from app.api.v1.endpoints import videos, metrics, observability, status
 from app.cognitive_core import run_cognitive_cycle
 from app.worker import execute_action
 
@@ -18,7 +18,7 @@ app = FastAPI(
     redoc_url="/redoc" # URL da documentação alternativa (ReDoc)
 )
 
-APP_VERSION = os.getenv("APP_VERSION", "1.8.2")
+APP_VERSION = os.getenv("APP_VERSION", "1.9.0")
 GIT_TAG = os.getenv("GIT_TAG")
 GIT_COMMIT = os.getenv("GIT_COMMIT")
 
@@ -38,6 +38,7 @@ app.add_middleware(
 app.include_router(videos.router, prefix="/api/v1/videos", tags=["videos"])
 app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])
 app.include_router(observability.router, prefix="/api/v1/observability", tags=["observability"])
+app.include_router(status.router, prefix="/api/v1", tags=["status"])
 
 # --- Rotas (Endpoints) ---
 

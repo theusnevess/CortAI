@@ -358,11 +358,20 @@ Escopo operacional:
 Endpoints cobertos:
 - `GET /api/v1/metrics/runs`
 - `GET /api/v1/metrics/runs/{process_id}`
-- `GET /api/v1/metrics/overview` (telemetria opcional para acompanhamento)
+- `GET /api/v1/metrics/overview`
+- `GET /api/v1/observability/report`
 
-SLO minimo:
-- `/metrics/runs`: `p95 <= 800ms` e `p99 <= 1500ms` (com `limit <= 50`)
-- `/metrics/runs/{process_id}`: `p95 <= 400ms` e `p99 <= 900ms`
+SLO real (contrato):
+- `/metrics/runs`: `p95 <= 150ms`, `p99 <= 300ms`, `error_rate <= 1%`
+- `/metrics/runs/{process_id}`: `p95 <= 200ms`, `p99 <= 400ms`, `error_rate <= 1%`
+- `/metrics/overview`: `p95 <= 120ms`, `p99 <= 250ms`, `error_rate <= 1%`
+- `/observability/report`: `p95 <= 300ms`, `p99 <= 600ms`, `error_rate <= 1%`
+
+Error budget diario:
+- `error_budget = 1%` por endpoint/dia.
+- `allowed_errors = count_requests * 0.01`.
+- `estimated_errors = count_requests * error_rate`.
+- `remaining_errors = allowed_errors - estimated_errors`.
 
 Guardrails de entrada:
 - `limit_max = 200` para endpoint run-level paginado.
@@ -388,6 +397,27 @@ Guardrails de entrada:
   - `p99_ms > slo_p99` ou
   - `error_rate > 0.01`
 - Dedupe por `(metric_date, endpoint, reason)`.
+
+### GET /api/v1/status
+
+Query params:
+- `window_days` (default 7, max 30)
+
+Contrato minimo:
+- endpoint read-only para status executivo de SLO.
+- retorna `overall_status` (`PASS|WARN|FAIL`), `slo_status`, `error_budget_remaining`, `ces_trend_status`.
+- `FAIL` quando algum endpoint com dados viola SLO.
+- `WARN` quando faltam dados para endpoint coberto no periodo.
+
+Guardrail:
+- `window_days > 30` => `400` (`error_type=RangeTooLarge`, `window_days_requested`, `window_days_max`)
+
+### CI performance gate (minimo)
+
+Pipeline CI deve validar regressao basica de performance para `/api/v1/metrics/runs`:
+- 5 warmups + 50 chamadas medidas
+- gate minimo: `p95 <= 300ms`
+- gate minimo: `error_rate <= 1%`
 
 ## Exemplos
 
@@ -430,3 +460,48 @@ Data UTC: `2026-02-17`
 
 - PR `feat/observability-report`: `https://github.com/theusnevess/CortAI/pull/new/feat/observability-report`
 - Runbook operacional v1.8.2: `https://github.com/theusnevess/CortAI/blob/v1.8.2/docs/runbook_operacional_v1.8.2.md`
+
+## Load Envelope v1.1 (baseline oficial)
+
+Data UTC: `2026-02-18`
+
+Perfil de carga:
+- mix fixo: `/api/v1/metrics/runs` (60%), `/api/v1/observability/report` (25%), `/api/v1/metrics/overview` (15%)
+- duracao por degrau: `60s`
+- parametros fixos:
+  - `/api/v1/metrics/runs?start_date=2026-02-11&end_date=2026-02-18&limit=200&offset=0`
+  - `/api/v1/metrics/overview?days=7`
+  - `/api/v1/observability/report?window_days=7&timing_minutes=15`
+
+Snapshot de thresholds SLO usados no teste:
+- `/api/v1/metrics/runs`: `p95 <= 150ms`, `p99 <= 300ms`, `error_rate <= 1%`
+- `/api/v1/metrics/runs/{process_id}`: `p95 <= 200ms`, `p99 <= 400ms`, `error_rate <= 1%`
+- `/api/v1/metrics/overview`: `p95 <= 120ms`, `p99 <= 250ms`, `error_rate <= 1%`
+- `/api/v1/observability/report`: `p95 <= 300ms`, `p99 <= 600ms`, `error_rate <= 1%`
+
+Resultado resumido:
+- baseline p95:
+  - runs `254.98ms`
+  - report `113.67ms`
+  - overview `91.16ms`
+  - error_rate `0`
+- degrau `C=1` p95:
+  - runs `264.15ms` (`p99=306.06ms`)
+  - report `121.5ms`
+  - overview `102.37ms`
+  - error_rate `0`
+- degrau `C=5` p95:
+  - runs `1053.9ms`
+  - report `693.07ms`
+  - overview `502.63ms`
+  - error_rate `0`
+
+Evidencia de observabilidade:
+- `metrics_endpoint_daily` inclui os 3 endpoints do mix com `count_requests > 0`
+- `metrics_slo_alert` emitido para `runs`, `report` e `overview`
+- `timing.bad_duration = 0`
+
+Conclusao operacional:
+- safe envelope: `C=1`
+- first violation: `C=5`
+- violacao por latencia (SLO), nao por disponibilidade (sem 5xx)

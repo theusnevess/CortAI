@@ -15,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db.models import CognitiveMetricsDaily, MetricsEndpointDaily, ObservationRecord
 from app.observations import persist_observation
 from app.schemas.observation import Observation
+from app.slo_contract import SLO_ENDPOINT_THRESHOLDS
 from app.state_from_observation import persist_state_from_observation
 
 DATABASE_URL = os.getenv(
@@ -33,8 +34,8 @@ CES_V1_REASON = "ces_regression:CES_v1"
 METRICS_ENDPOINT_TIMING_EVENT = "metrics_endpoint_timing"
 METRICS_SLO_ALERT_EVENT = "metrics_slo_alert"
 METRICS_SLO_THRESHOLDS = {
-    "/api/v1/metrics/runs": {"p95_ms": 800, "p99_ms": 1500},
-    "/api/v1/metrics/runs/{process_id}": {"p95_ms": 400, "p99_ms": 900},
+    endpoint: {"p95_ms": int(v["p95_ms"]), "p99_ms": int(v["p99_ms"])}
+    for endpoint, v in SLO_ENDPOINT_THRESHOLDS.items()
 }
 CES_LATENCY_ACTION_WHITELIST = {
     "collect_video",

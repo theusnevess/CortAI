@@ -561,6 +561,33 @@ async def test_runs_emite_metrics_endpoint_timing(client, seed_observation, db_s
 
 
 @pytest.mark.anyio
+async def test_overview_emite_metrics_endpoint_timing_tres_chamadas(client, db_session):
+    """
+    /metrics/overview deve emitir 1 timing event por request.
+    """
+    stmt = (
+        select(ObservationRecord)
+        .where(ObservationRecord.facts["event_type"].astext == "metrics_endpoint_timing")
+        .where(ObservationRecord.facts["endpoint"].astext == "/api/v1/metrics/overview")
+    )
+    before = len((await db_session.execute(stmt)).scalars().all())
+
+    for _ in range(3):
+        response = await client.get("/api/v1/metrics/overview", params={"days": 7})
+        assert response.status_code == 200
+
+    after_rows = (await db_session.execute(stmt)).scalars().all()
+    assert len(after_rows) - before == 3
+    for row in after_rows[-3:]:
+        facts = row.facts
+        assert facts["status_code"] == 200
+        assert facts["method"] == "GET"
+        assert isinstance(facts["duration_ms"], int)
+        assert facts["duration_ms"] >= 0
+        assert "timestamp" in facts
+
+
+@pytest.mark.anyio
 async def test_runs_um_completed(client, seed_observation):
     """
     Valida CES_run_v1 para run completed.
@@ -1153,6 +1180,62 @@ def test_metrics_slo_aggregate_daily_cria_linha_por_endpoint(sync_session_factor
     finally:
         session.execute(
             delete(ObservationRecord).where(ObservationRecord.process_id.like("P_TIMING_AGG_%"))
+        )
+        session.execute(delete(MetricsEndpointDaily).where(MetricsEndpointDaily.metric_date == target_date))
+        session.commit()
+        session.close()
+
+
+def test_metrics_slo_aggregate_daily_inclui_overview(sync_session_factory):
+    """
+    Agregacao diaria deve incluir /metrics/overview quando houver timing event.
+    """
+    target_date = date(2026, 5, 3)
+    endpoint = "/api/v1/metrics/overview"
+    session = sync_session_factory()
+    try:
+        MetricsEndpointDaily.__table__.create(bind=session.get_bind(), checkfirst=True)
+        session.execute(
+            delete(ObservationRecord).where(
+                ObservationRecord.facts["event_type"].astext == "metrics_endpoint_timing"
+            )
+        )
+        session.execute(delete(MetricsEndpointDaily).where(MetricsEndpointDaily.metric_date == target_date))
+        session.commit()
+
+        for i in range(3):
+            session.add(
+                ObservationRecord(
+                    observation_id=str(uuid.uuid4()),
+                    timestamp=datetime(2026, 5, 3, 10, 0, i),
+                    process_id=f"P_TIMING_OVERVIEW_{i}",
+                    source_outcome_id=str(uuid.uuid4()),
+                    facts={
+                        "event_type": "metrics_endpoint_timing",
+                        "endpoint": endpoint,
+                        "method": "GET",
+                        "status_code": 200,
+                        "duration_ms": 20 + i,
+                        "query_fingerprint": "days=7",
+                        "metric_date": target_date.isoformat(),
+                    },
+                )
+            )
+        session.commit()
+
+        aggregate_daily_metrics_for_date(target_date)
+
+        row = (
+            session.query(MetricsEndpointDaily)
+            .filter(MetricsEndpointDaily.metric_date == target_date)
+            .filter(MetricsEndpointDaily.endpoint == endpoint)
+            .one_or_none()
+        )
+        assert row is not None
+        assert row.count_requests == 3
+    finally:
+        session.execute(
+            delete(ObservationRecord).where(ObservationRecord.process_id.like("P_TIMING_OVERVIEW_%"))
         )
         session.execute(delete(MetricsEndpointDaily).where(MetricsEndpointDaily.metric_date == target_date))
         session.commit()
