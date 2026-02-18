@@ -2,9 +2,11 @@ import math
 import json
 import os
 import uuid
+from copy import deepcopy
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from threading import Lock
 from time import perf_counter
 from typing import Any
 
@@ -80,6 +82,10 @@ CES_DYNAMIC_BASELINE_MIN_N = 10
 MANIFEST_OUTPUT_DIR = "agent_output"
 METRICS_RUNS_LIMIT_MAX = 200
 METRICS_RUNS_RANGE_MAX_DAYS = 31
+METRICS_OVERVIEW_CACHE_TTL_SECONDS = 10
+METRICS_OVERVIEW_CACHE_MAX_ENTRIES = 128
+_metrics_overview_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_metrics_overview_cache_lock = Lock()
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -125,6 +131,57 @@ def _parse_date(value: str | None, label: str) -> date | None:
         return datetime.strptime(value, "%Y-%m-%d").date()
     except Exception:
         raise HTTPException(status_code=400, detail=f"{label} must be YYYY-MM-DD")
+
+
+def _overview_cache_enabled() -> bool:
+    """
+    Habilita cache curto somente fora de pytest.
+    """
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    return METRICS_OVERVIEW_CACHE_TTL_SECONDS > 0
+
+
+def _build_overview_cache_key(
+    *,
+    days: int,
+    start: date,
+    end: date,
+    include_reasons: bool,
+    include_baseline: bool,
+) -> str:
+    return (
+        f"days={days}|start={start.isoformat()}|end={end.isoformat()}"
+        f"|reasons={int(include_reasons)}|baseline={int(include_baseline)}"
+    )
+
+
+def _get_overview_cache(key: str) -> dict[str, Any] | None:
+    if not _overview_cache_enabled():
+        return None
+    now = perf_counter()
+    with _metrics_overview_cache_lock:
+        payload = _metrics_overview_cache.get(key)
+        if payload is None:
+            return None
+        expires_at, data = payload
+        if expires_at <= now:
+            _metrics_overview_cache.pop(key, None)
+            return None
+        return deepcopy(data)
+
+
+def _set_overview_cache(key: str, payload: dict[str, Any]) -> None:
+    if not _overview_cache_enabled():
+        return
+    expires_at = perf_counter() + METRICS_OVERVIEW_CACHE_TTL_SECONDS
+    with _metrics_overview_cache_lock:
+        if len(_metrics_overview_cache) >= METRICS_OVERVIEW_CACHE_MAX_ENTRIES:
+            # Remove entrada mais antiga para manter custo previsivel.
+            oldest_key = next(iter(_metrics_overview_cache), None)
+            if oldest_key is not None:
+                _metrics_overview_cache.pop(oldest_key, None)
+        _metrics_overview_cache[key] = (expires_at, deepcopy(payload))
 
 
 def _filter_facts(facts: dict) -> dict:
@@ -966,6 +1023,7 @@ async def get_metrics_overview(
     start_date: str | None = None,
     end_date: str | None = None,
     include_reasons: bool = Query(False),
+    include_baseline: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -980,6 +1038,7 @@ async def get_metrics_overview(
     query_fingerprint = (
         f"days={days}&start_date={start_date or ''}&end_date={end_date or ''}"
         f"&include_reasons={str(include_reasons).lower()}"
+        f"&include_baseline={str(include_baseline).lower()}"
     )
     try:
         if days < 1 or days > 365:
@@ -996,6 +1055,18 @@ async def get_metrics_overview(
         if start > end:
             raise HTTPException(status_code=400, detail="start_date must be <= end_date")
 
+        cache_key = _build_overview_cache_key(
+            days=days,
+            start=start,
+            end=end,
+            include_reasons=include_reasons,
+            include_baseline=include_baseline,
+        )
+        cached_payload = _get_overview_cache(cache_key)
+        if cached_payload is not None:
+            status_code = 200
+            return cached_payload
+
         stmt = (
             select(CognitiveMetricsDaily)
             .where(CognitiveMetricsDaily.metric_date >= start)
@@ -1010,6 +1081,7 @@ async def get_metrics_overview(
             .order_by(CognitiveMetricsDaily.metric_date.asc())
         )
         baseline_rows = (await db.execute(baseline_stmt)).scalars().all()
+        baseline_cache_by_date: dict[date, dict[str, dict]] = {}
 
         # Overview é read-only DB-first: usa alertas já materializados no agregado diário.
         items = []
@@ -1018,8 +1090,13 @@ async def get_metrics_overview(
             alerted = alert_count > 0
             raw_reasons = getattr(r, "alert_reasons", []) or []
             reasons = _dedup_and_sort_reasons(raw_reasons) if include_reasons else []
+            metric_date = r.metric_date
+            baseline_for_day = baseline_cache_by_date.get(metric_date)
+            if baseline_for_day is None:
+                baseline_for_day = _build_dynamic_baseline_for_date(metric_date, baseline_rows)
+                baseline_cache_by_date[metric_date] = baseline_for_day
             item = {
-                "metric_date": r.metric_date.isoformat(),
+                "metric_date": metric_date.isoformat(),
                 "total_runs": r.total_runs,
                 "completed_runs": r.completed_runs,
                 "failed_runs": r.failed_runs,
@@ -1039,16 +1116,15 @@ async def get_metrics_overview(
                 "alert_reasons": reasons,
                 "alert_observation_id": None,
                 "latency_dynamic_baseline_window_days": CES_DYNAMIC_BASELINE_WINDOW_DAYS,
-                "latency_dynamic_baseline": _build_dynamic_baseline_for_date(
-                    r.metric_date,
-                    baseline_rows,
-                ),
+                "latency_dynamic_baseline": baseline_for_day,
             }
             if not item["alerted"]:
                 item["alert_count"] = 0
                 item["alert_reasons"] = []
                 item["alert_observation_id"] = None
             item.update(_compute_ces_fields(item))
+            if not include_baseline:
+                item["latency_dynamic_baseline"] = {}
             items.append(item)
 
         # Resumo agregado do periodo.
@@ -1126,7 +1202,9 @@ async def get_metrics_overview(
         summary.update(_compute_ces_window_summary(items))
 
         status_code = 200
-        return {"items": items, "summary": summary}
+        response_payload = {"items": items, "summary": summary}
+        _set_overview_cache(cache_key, response_payload)
+        return response_payload
     except HTTPException as exc:
         status_code = exc.status_code
         raise
