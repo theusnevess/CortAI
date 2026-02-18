@@ -332,6 +332,7 @@ def _emit_metrics_endpoint_timing(
     method: str,
     status_code: int,
     duration_ms: int,
+    duration_us: int | None = None,
     query_fingerprint: str,
     process_id: str | None = None,
     cache_hit: bool | None = None,
@@ -352,6 +353,10 @@ def _emit_metrics_endpoint_timing(
             "method": method,
             "status_code": int(status_code),
             "duration_ms": int(max(0, duration_ms)),
+            # Alta resolucao para diferenciar handler sub-ms de fila/infra.
+            "duration_us": int(max(0, duration_us if duration_us is not None else duration_ms * 1000)),
+            "handler_ms": int(max(0, duration_ms)),
+            "server_total_ms": int(max(0, duration_ms)),
             "query_fingerprint": str(query_fingerprint),
             "metric_date": metric_date,
             "timestamp": event_ts,
@@ -1225,12 +1230,15 @@ async def get_metrics_overview(
         status_code = exc.status_code
         raise
     finally:
-        duration_ms = int((perf_counter() - started_at) * 1000)
+        elapsed_s = perf_counter() - started_at
+        duration_ms = int(elapsed_s * 1000)
+        duration_us = int(elapsed_s * 1_000_000)
         _emit_metrics_endpoint_timing(
             endpoint="/api/v1/metrics/overview",
             method="GET",
             status_code=status_code,
             duration_ms=duration_ms,
+            duration_us=duration_us,
             query_fingerprint=query_fingerprint,
             cache_hit=cache_hit_flag,
             cache_key_hash=cache_key_hash,
@@ -1430,12 +1438,15 @@ async def get_runs(
         status_code = exc.status_code
         raise
     finally:
-        duration_ms = int((perf_counter() - started_at) * 1000)
+        elapsed_s = perf_counter() - started_at
+        duration_ms = int(elapsed_s * 1000)
+        duration_us = int(elapsed_s * 1_000_000)
         _emit_metrics_endpoint_timing(
             endpoint="/api/v1/metrics/runs",
             method="GET",
             status_code=status_code,
             duration_ms=duration_ms,
+            duration_us=duration_us,
             query_fingerprint=query_fingerprint,
         )
 
@@ -1555,12 +1566,15 @@ async def get_run_debug(
         status_code = exc.status_code
         raise
     finally:
-        duration_ms = int((perf_counter() - started_at) * 1000)
+        elapsed_s = perf_counter() - started_at
+        duration_ms = int(elapsed_s * 1000)
+        duration_us = int(elapsed_s * 1_000_000)
         _emit_metrics_endpoint_timing(
             endpoint="/api/v1/metrics/runs/{process_id}",
             method="GET",
             status_code=status_code,
             duration_ms=duration_ms,
+            duration_us=duration_us,
             query_fingerprint=query_fingerprint,
             process_id=process_id,
         )
