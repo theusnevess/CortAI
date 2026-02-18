@@ -331,6 +331,13 @@ Query params:
 - `start_date` (YYYY-MM-DD)
 - `end_date` (YYYY-MM-DD)
 - `days` (1..365)
+- `include_reasons` (bool, default `false`)
+
+Contrato de alertas no overview:
+- `alerted` e `alert_count` sempre presentes.
+- `alert_reasons` sempre presente no shape:
+  - default (`include_reasons=false`): `[]`
+  - `include_reasons=true`: reasons deduplicadas/ordenadas.
 
 ### GET /api/v1/metrics/alerts
 Query params:
