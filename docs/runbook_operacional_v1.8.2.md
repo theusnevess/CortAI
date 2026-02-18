@@ -37,6 +37,15 @@ Leitura rapida:
 - `checks[]` contem os mesmos criterios hard do runbook SQL
 - `runs.worst` vazio gera `WARN` (nao `FAIL`) quando nao houver projecao de `ces_run`
 
+### Importante: ambiente de benchmark (SLO/envelope)
+
+Se estiver rodando em Docker Desktop + WSL2, nao use o caminho edge (Nginx) para calibrar SLO/envelope.
+Esse ambiente pode distorcer TTFB/queue no proxy.
+
+- Fonte de verdade local: direct (`cortai_worker -> cortai_api:8000`)
+- Fonte de verdade final: Linux nativo (VM/VPS/host) com comparacao direct vs edge
+- Evitar: definir envelope/SLO "real" com edge no Docker Desktop
+
 ## 1) Smoke HTTP (Contratos Publicos)
 
 ### 1.1 Health

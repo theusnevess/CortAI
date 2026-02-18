@@ -502,6 +502,20 @@ Data UTC: `2026-02-17`
 
 Data UTC: `2026-02-18`
 
+### Nota de ambiente: Docker Desktop + WSL2 (edge nao e fonte de verdade)
+
+Quando o stack roda em Docker Desktop + WSL2 (`docker-desktop`), o proxy edge (Nginx) pode introduzir
+latencia artificial de TTFB/queue que nao reflete o handler da API.
+
+Regra canonica (importante):
+- NAO calibrar SLO/envelope usando o caminho edge nesse ambiente.
+- Para validacao local, use direct (`cortai_worker -> http://cortai_api:8000`) como referencia.
+- Para envelope final e SLO "real", rode o benchmark em Linux nativo (VM/VPS/host), comparando direct vs edge.
+
+Evidencia tipica do vies (sintoma):
+- `upstream_connect_time ~ 0` e `upstream_header_time ~= request_time` altos no edge,
+  enquanto `server_total_us` da API permanece baixo (cache-hit), indicando contensao/bridge fora do handler.
+
 Perfil de carga:
 - mix fixo: `/api/v1/metrics/runs` (60%), `/api/v1/observability/report` (25%), `/api/v1/metrics/overview` (15%)
 - duracao por degrau: `60s`
