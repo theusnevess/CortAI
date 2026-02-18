@@ -1317,20 +1317,10 @@ async def get_runs(
         deduped.sort(key=lambda item: item["timestamp_finished"] or "", reverse=True)
         paged = deduped[offset : offset + limit]
 
-        run_anchors = {}
-        for row in paged:
-            pid = row.get("process_id")
-            ts_finished = row.get("timestamp_finished_dt")
-            if not pid or not isinstance(ts_finished, datetime):
-                continue
-            if ts_finished.tzinfo is None:
-                ts_finished = ts_finished.replace(tzinfo=timezone.utc)
-            run_anchors[pid] = {"timestamp_finished": ts_finished}
-        run_latency_map = _build_run_latency_map(run_anchors)
-
         items = []
         for row in paged:
-            ces_payload = _compute_ces_run_fields(row["facts"], run_latency_map.get(row["process_id"]))
+            # List endpoint permanece lean: sem calculo de latencia run-level pesada.
+            ces_payload = _compute_ces_run_fields(row["facts"], None)
             items.append(
                 {
                     "process_id": row["process_id"],
@@ -1341,9 +1331,6 @@ async def get_runs(
                     "ces_run_reason": ces_payload["ces_run_reason"],
                     "ces_run_components": ces_payload["ces_run_components"],
                     "latency_measured": ces_payload["latency_measured"],
-                    "budgets_used": ces_payload["budgets_used"],
-                    "latency_pairs_used": ces_payload["latency_pairs_used"],
-                    "latency_pairs_ignored": ces_payload["latency_pairs_ignored"],
                     "latency_pairs_inverted": ces_payload["latency_pairs_inverted"],
                 }
             )
