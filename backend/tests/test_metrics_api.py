@@ -426,6 +426,82 @@ async def test_overview_include_reasons_true_retorna_reasons(client, seed_daily_
 
 
 @pytest.mark.anyio
+async def test_overview_include_baseline_default_vazio(client, seed_daily_metric):
+    """
+    include_baseline default false deve retornar baseline vazio no overview.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 9),
+        total_runs=4,
+        completed_runs=4,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 4},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 200}},
+    )
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=4,
+        completed_runs=4,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 4},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 220}},
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["latency_dynamic_baseline_window_days"] == 14
+    assert item["latency_dynamic_baseline"] == {}
+
+
+@pytest.mark.anyio
+async def test_overview_include_baseline_true_retorna_baseline(client, seed_daily_metric):
+    """
+    include_baseline=true deve retornar baseline dinamico no overview.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 9),
+        total_runs=4,
+        completed_runs=4,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 4},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 200}},
+    )
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=4,
+        completed_runs=4,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 4},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 220}},
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={
+            "start_date": "2026-02-10",
+            "end_date": "2026-02-10",
+            "include_baseline": "true",
+        },
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["latency_dynamic_baseline_window_days"] == 14
+    assert item["latency_dynamic_baseline"]["write_artifact"]["source"] == "dynamic_14d"
+
+
+@pytest.mark.anyio
 async def test_overview_ces_bad_days_in_window(client, seed_daily_metric, monkeypatch):
     """
     Valida contador de dias ruins de CES com janela/threshold do alerta.
