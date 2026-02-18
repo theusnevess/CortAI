@@ -338,6 +338,9 @@ Contrato de alertas no overview:
 - `alert_reasons` sempre presente no shape:
   - default (`include_reasons=false`): `[]`
   - `include_reasons=true`: reasons deduplicadas/ordenadas.
+- Fonte DB-first:
+  - overview le `cognitive_metrics_daily` (incluindo `alert_count`/`alert_reasons` materializados no agregado diario)
+  - nao executa lookup de alertas em `observations` durante a request
 
 ### GET /api/v1/metrics/alerts
 Query params:
