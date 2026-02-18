@@ -717,6 +717,11 @@ async def test_overview_emite_metrics_endpoint_timing_tres_chamadas(client, db_s
         assert isinstance(facts["duration_ms"], int)
         assert facts["duration_ms"] >= 0
         assert "timestamp" in facts
+        assert "cache_hit" in facts
+        assert isinstance(facts["cache_hit"], bool)
+        assert "cache_key_hash" in facts
+        assert isinstance(facts["cache_key_hash"], str)
+        assert len(facts["cache_key_hash"]) == 8
 
 
 @pytest.mark.anyio
