@@ -412,6 +412,9 @@ Guardrails de entrada:
   - `method`
   - `status_code`
   - `duration_ms`
+  - `duration_us` (alta resolucao para diagnostico sub-ms)
+  - `handler_ms`
+  - `server_total_ms`
   - `query_fingerprint`
   - `cache_hit` (quando aplicavel, ex.: `/metrics/overview`)
   - `cache_key_hash` (hash curto da chave canonica, quando aplicavel)
