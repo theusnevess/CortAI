@@ -150,6 +150,8 @@ class CognitiveMetricsDaily(Base):
     avg_actions_executed = Column(Numeric(5, 2), nullable=True)
     last_action_type_distribution = Column(JSONB, nullable=False)
     latency_by_action = Column(JSONB, nullable=False, default=dict)  # p95/avg por acao.
+    alert_count = Column(Integer, nullable=False, default=0)
+    alert_reasons = Column(JSONB, nullable=False, default=list)
 
     created_at = Column(DateTime, default=datetime.utcnow)
 

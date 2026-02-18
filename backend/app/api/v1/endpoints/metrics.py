@@ -9,7 +9,7 @@ from time import perf_counter
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import desc, func, select, text
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import CognitiveMetricsDaily, ObservationRecord, PublishReceipt
@@ -1011,55 +1011,13 @@ async def get_metrics_overview(
         )
         baseline_rows = (await db.execute(baseline_stmt)).scalars().all()
 
-        # DB-first: no modo default, overview usa agregacao leve por dia sem carregar facts completos.
-        alerts_by_date: dict[str, dict] = {}
-        if include_reasons:
-            alert_stmt = (
-                select(
-                    ObservationRecord.observation_id,
-                    ObservationRecord.timestamp,
-                    ObservationRecord.facts,
-                )
-                .where(ObservationRecord.facts["event_type"].astext == "cognitive_metrics_alert")
-                .where(ObservationRecord.facts["metric_date"].astext >= start.isoformat())
-                .where(ObservationRecord.facts["metric_date"].astext <= end.isoformat())
-            )
-            alert_rows = (await db.execute(alert_stmt)).all()
-            alerts_by_date = _build_alerts_by_date(alert_rows)
-        else:
-            alert_count_rows = (
-                await db.execute(
-                    text(
-                        """
-                        SELECT
-                          facts->>'metric_date' AS metric_date,
-                          COUNT(*)::int AS alert_count
-                        FROM observations
-                        WHERE facts->>'event_type' = 'cognitive_metrics_alert'
-                          AND facts->>'metric_date' >= :start_date
-                          AND facts->>'metric_date' <= :end_date
-                        GROUP BY 1
-                        """
-                    ),
-                    {
-                        "start_date": start.isoformat(),
-                        "end_date": end.isoformat(),
-                    },
-                )
-            ).mappings().all()
-            for row in alert_count_rows:
-                alerts_by_date[str(row["metric_date"])] = {
-                    "alert_count": int(row["alert_count"] or 0),
-                    "alert_reasons": [],
-                    "alert_observation_id": None,
-                }
-
+        # Overview é read-only DB-first: usa alertas já materializados no agregado diário.
         items = []
         for r in rows:
-            metric_key = r.metric_date.isoformat()
-            alert_info = alerts_by_date.get(metric_key, None)
-            alert_count = alert_info["alert_count"] if alert_info else 0
+            alert_count = int(getattr(r, "alert_count", 0) or 0)
             alerted = alert_count > 0
+            raw_reasons = getattr(r, "alert_reasons", []) or []
+            reasons = _dedup_and_sort_reasons(raw_reasons) if include_reasons else []
             item = {
                 "metric_date": r.metric_date.isoformat(),
                 "total_runs": r.total_runs,
@@ -1078,8 +1036,8 @@ async def get_metrics_overview(
                 "created_at": r.created_at.isoformat() if r.created_at else None,
                 "alerted": alerted,
                 "alert_count": alert_count,
-                "alert_reasons": alert_info["alert_reasons"] if alert_info else [],
-                "alert_observation_id": alert_info["alert_observation_id"] if alert_info else None,
+                "alert_reasons": reasons,
+                "alert_observation_id": None,
                 "latency_dynamic_baseline_window_days": CES_DYNAMIC_BASELINE_WINDOW_DAYS,
                 "latency_dynamic_baseline": _build_dynamic_baseline_for_date(
                     r.metric_date,
@@ -1090,10 +1048,6 @@ async def get_metrics_overview(
                 item["alert_count"] = 0
                 item["alert_reasons"] = []
                 item["alert_observation_id"] = None
-            elif include_reasons and item["alert_observation_id"] is None:
-                item["alerted"] = False
-                item["alert_count"] = 0
-                item["alert_reasons"] = []
             item.update(_compute_ces_fields(item))
             items.append(item)
 
