@@ -413,6 +413,8 @@ Guardrails de entrada:
   - `status_code`
   - `duration_ms`
   - `query_fingerprint`
+  - `cache_hit` (quando aplicavel, ex.: `/metrics/overview`)
+  - `cache_key_hash` (hash curto da chave canonica, quando aplicavel)
   - `process_id` (quando existir no path)
   - `metric_date` (YYYY-MM-DD)
 
