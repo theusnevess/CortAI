@@ -370,7 +370,7 @@ async def test_overview_soma_bate(client, seed_daily_metric):
 
 
 @pytest.mark.anyio
-async def test_overview_alert_reasons_default_vazio(client, seed_daily_metric, seed_observation):
+async def test_overview_alert_reasons_default_vazio(client, seed_daily_metric):
     """
     include_reasons default false deve preservar alert_count/alerted com alert_reasons vazio.
     """
@@ -382,16 +382,8 @@ async def test_overview_alert_reasons_default_vazio(client, seed_daily_metric, s
         blocked_runs=0,
         avg_actions_executed=0.8,
         last_action_type_distribution={"write_artifact": 4},
-    )
-    await seed_observation(
-        timestamp=datetime(2026, 2, 10, 12, 0, 0),
-        process_id="P_METRICS_OVERVIEW_ALERT_DEFAULT",
-        source_outcome_id="outcome-overview-alert-default",
-        facts={
-            "event_type": "cognitive_metrics_alert",
-            "metric_date": "2026-02-10",
-            "reasons": ["p95_slo_breach"],
-        },
+        alert_count=1,
+        alert_reasons=["p95_slo_breach"],
     )
 
     response = await client.get(
@@ -406,7 +398,7 @@ async def test_overview_alert_reasons_default_vazio(client, seed_daily_metric, s
 
 
 @pytest.mark.anyio
-async def test_overview_include_reasons_true_retorna_reasons(client, seed_daily_metric, seed_observation):
+async def test_overview_include_reasons_true_retorna_reasons(client, seed_daily_metric):
     """
     include_reasons=true deve retornar reasons deduplicadas/ordenadas no overview.
     """
@@ -418,16 +410,8 @@ async def test_overview_include_reasons_true_retorna_reasons(client, seed_daily_
         blocked_runs=0,
         avg_actions_executed=0.8,
         last_action_type_distribution={"write_artifact": 4},
-    )
-    await seed_observation(
-        timestamp=datetime(2026, 2, 10, 12, 0, 0),
-        process_id="P_METRICS_OVERVIEW_ALERT_REASONS",
-        source_outcome_id="outcome-overview-alert-reasons",
-        facts={
-            "event_type": "cognitive_metrics_alert",
-            "metric_date": "2026-02-10",
-            "reasons": ["p99_slo_breach", "p95_slo_breach", "p95_slo_breach"],
-        },
+        alert_count=1,
+        alert_reasons=["p99_slo_breach", "p95_slo_breach", "p95_slo_breach"],
     )
 
     response = await client.get(
