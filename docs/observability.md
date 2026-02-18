@@ -418,6 +418,10 @@ Guardrails de entrada:
   - `process_id` (quando existir no path)
   - `metric_date` (YYYY-MM-DD)
 
+Diagnostico de fila (v1.2.4):
+- Para `/api/v1/metrics/overview`, comparar p95 client-side vs p95 server-side (`duration_ms`) com `cache_hit=true`.
+- Se `duration_ms` permanecer baixo e a latencia do cliente alta, o gargalo e concorrencia/throughput (fila), nao o handler.
+
 `metrics_slo_alert`:
 - Alerta diario de regressao de SLO por endpoint.
 - Condicoes canonicas:
