@@ -614,11 +614,11 @@ async def test_runs_um_completed(client, seed_observation):
     assert item["ces_run_version"] == "CES_run_v1"
     assert item["ces_run_reason"] is None
     assert item["latency_measured"] is False
-    assert item["budgets_used"] == {}
     assert item["ces_run_components"]["latency"] == 1.0
-    assert item["latency_pairs_used"] == 0
-    assert item["latency_pairs_ignored"] == 0
     assert item["latency_pairs_inverted"] == 0
+    assert "budgets_used" not in item
+    assert "latency_pairs_used" not in item
+    assert "latency_pairs_ignored" not in item
     assert isinstance(item["ces_run"], float)
 
 
@@ -705,7 +705,7 @@ def _write_jsonl(path, rows):
 
 
 @pytest.mark.anyio
-async def test_runs_latency_measured_true_com_n_elegivel(client, seed_observation, monkeypatch, tmp_path):
+async def test_run_debug_latency_measured_true_com_n_elegivel(client, seed_observation, monkeypatch, tmp_path):
     """
     Mede latencia real quando existe acao elegivel com n >= 3 no run.
     """
@@ -769,21 +769,20 @@ async def test_runs_latency_measured_true_com_n_elegivel(client, seed_observatio
         ],
     )
 
-    response = await client.get(
-        "/api/v1/metrics/runs",
-        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
-    )
+    response = await client.get(f"/api/v1/metrics/runs/{process_id}")
     assert response.status_code == 200
-    item = next(i for i in response.json()["items"] if i["process_id"] == process_id)
-    assert item["latency_measured"] is True
-    assert item["budgets_used"]["transcribe_segments"]["n"] == 3
-    assert item["ces_run_components"]["latency"] < 1.0
-    assert item["latency_pairs_used"] >= 3
-    assert item["latency_pairs_inverted"] == 0
+    payload = response.json()
+    run_summary = payload["run_summary"]
+    breakdown = payload["latency_breakdown"]
+    assert run_summary["latency_measured"] is True
+    assert breakdown["transcribe_segments"]["n"] == 3
+    assert run_summary["ces_run_components"]["latency"] < 1.0
+    assert run_summary["latency_pairs_used"] >= 3
+    assert run_summary["latency_pairs_inverted"] == 0
 
 
 @pytest.mark.anyio
-async def test_runs_latency_fallback_quando_n_menor_que_3(client, seed_observation, monkeypatch, tmp_path):
+async def test_run_debug_latency_fallback_quando_n_menor_que_3(client, seed_observation, monkeypatch, tmp_path):
     """
     Mantem fallback de latencia quando n elegivel e insuficiente.
     """
@@ -835,21 +834,19 @@ async def test_runs_latency_fallback_quando_n_menor_que_3(client, seed_observati
         ],
     )
 
-    response = await client.get(
-        "/api/v1/metrics/runs",
-        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
-    )
+    response = await client.get(f"/api/v1/metrics/runs/{process_id}")
     assert response.status_code == 200
-    item = next(i for i in response.json()["items"] if i["process_id"] == process_id)
-    assert item["latency_measured"] is False
-    assert item["ces_run_components"]["latency"] == 1.0
-    assert item["budgets_used"] == {}
-    assert item["latency_pairs_used"] == 2
-    assert item["latency_pairs_inverted"] == 0
+    payload = response.json()
+    run_summary = payload["run_summary"]
+    assert run_summary["latency_measured"] is False
+    assert run_summary["ces_run_components"]["latency"] == 1.0
+    assert payload["latency_breakdown"] == {}
+    assert run_summary["latency_pairs_used"] == 2
+    assert run_summary["latency_pairs_inverted"] == 0
 
 
 @pytest.mark.anyio
-async def test_runs_latency_exclui_unknown(client, seed_observation, monkeypatch, tmp_path):
+async def test_run_debug_latency_exclui_unknown(client, seed_observation, monkeypatch, tmp_path):
     """
     Garante que unknown nao participa do score de latencia do run.
     """
@@ -949,16 +946,14 @@ async def test_runs_latency_exclui_unknown(client, seed_observation, monkeypatch
         ],
     )
 
-    response = await client.get(
-        "/api/v1/metrics/runs",
-        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
-    )
+    response = await client.get(f"/api/v1/metrics/runs/{process_id}")
     assert response.status_code == 200
-    item = next(i for i in response.json()["items"] if i["process_id"] == process_id)
-    assert item["latency_measured"] is True
-    assert "transcribe_segments" in item["budgets_used"]
-    assert "unknown" not in item["budgets_used"]
-    assert item["latency_pairs_used"] == 3
+    payload = response.json()
+    run_summary = payload["run_summary"]
+    assert run_summary["latency_measured"] is True
+    assert "transcribe_segments" in payload["latency_breakdown"]
+    assert "unknown" not in payload["latency_breakdown"]
+    assert run_summary["latency_pairs_used"] == 3
 
 
 @pytest.mark.anyio
