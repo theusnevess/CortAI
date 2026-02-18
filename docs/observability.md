@@ -332,15 +332,20 @@ Query params:
 - `end_date` (YYYY-MM-DD)
 - `days` (1..365)
 - `include_reasons` (bool, default `false`)
+- `include_baseline` (bool, default `false`)
 
 Contrato de alertas no overview:
 - `alerted` e `alert_count` sempre presentes.
 - `alert_reasons` sempre presente no shape:
   - default (`include_reasons=false`): `[]`
   - `include_reasons=true`: reasons deduplicadas/ordenadas.
+- `latency_dynamic_baseline` sempre presente no shape:
+  - default (`include_baseline=false`): `{}`
+  - `include_baseline=true`: baseline por acao (`budget_ms`, `source`, `samples_used`).
 - Fonte DB-first:
   - overview le `cognitive_metrics_daily` (incluindo `alert_count`/`alert_reasons` materializados no agregado diario)
   - nao executa lookup de alertas em `observations` durante a request
+  - resposta usa cache read-only curto (TTL 10s) por query para reduzir p95 sob concorrencia
 
 ### GET /api/v1/metrics/alerts
 Query params:
