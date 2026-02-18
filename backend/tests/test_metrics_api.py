@@ -687,6 +687,9 @@ async def test_runs_emite_metrics_endpoint_timing(client, seed_observation, db_s
     assert facts["method"] == "GET"
     assert facts["status_code"] == 200
     assert isinstance(facts["duration_ms"], int)
+    assert isinstance(facts["duration_us"], int)
+    assert isinstance(facts["handler_ms"], int)
+    assert isinstance(facts["server_total_ms"], int)
     assert "timestamp" in facts
     assert "query_fingerprint" in facts
     assert "metric_date" in facts
@@ -715,6 +718,9 @@ async def test_overview_emite_metrics_endpoint_timing_tres_chamadas(client, db_s
         assert facts["status_code"] == 200
         assert facts["method"] == "GET"
         assert isinstance(facts["duration_ms"], int)
+        assert isinstance(facts["duration_us"], int)
+        assert isinstance(facts["handler_ms"], int)
+        assert isinstance(facts["server_total_ms"], int)
         assert facts["duration_ms"] >= 0
         assert "timestamp" in facts
         assert "cache_hit" in facts
