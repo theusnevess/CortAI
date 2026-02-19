@@ -340,6 +340,9 @@ def _emit_metrics_endpoint_timing(
     process_id: str | None = None,
     cache_hit: bool | None = None,
     cache_key_hash: str | None = None,
+    db_us: int = 0,
+    db_queries: int = 0,
+    db_pool_wait_us: int = 0,
 ) -> None:
     """
     Emite telemetria append-only por request dos endpoints de metricas.
@@ -381,6 +384,10 @@ def _emit_metrics_endpoint_timing(
                 )
             ),
             "query_fingerprint": str(query_fingerprint),
+            # Campos de capacidade ficam zerados por default e sao opcionais para callers.
+            "db_us": int(max(0, db_us)),
+            "db_queries": int(max(0, db_queries)),
+            "db_pool_wait_us": int(max(0, db_pool_wait_us)),
             "metric_date": metric_date,
             "timestamp": event_ts,
         }
