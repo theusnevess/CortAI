@@ -391,6 +391,12 @@ Guardrails do endpoint:
 - `limit_worst_runs > 200` => `400` (`error_type=LimitTooHigh`, `limit_worst_runs_requested`, `limit_worst_runs_max`)
 - `include_worst_runs=true` com `window_days > 7` => `400` (`error_type=RangeTooLarge`, `window_days_max_for_worst_runs`)
 
+Otimizacoes v1.3.2 (sem mudanca de contrato):
+- `version.alembic_head` usa cache in-memory curto (TTL 60s) para remover query fixa do request path.
+- `publish_receipts.path_leaks_30d` usa cache in-memory curto (TTL 30s) para reduzir custo recorrente.
+- `slo_daily.summary` passa a ser derivado de `slo_daily.items` em memoria (sem query adicional).
+- Em ambiente de testes (`pytest`), caches locais sao desativados para manter casos deterministas.
+
 ## Metrics SLO
 
 Escopo operacional:
