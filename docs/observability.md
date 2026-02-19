@@ -334,20 +334,36 @@ Query params:
 - `timing_minutes` (default 15, max 60)
 - `limit_alerts` (default 200, max 500)
 - `limit_receipts` (default 50, max 200)
+- `include_worst_runs` (default `false`)
+- `include_receipts` (default `false`)
+- `include_alert_items` (default `false`)
+- `limit_worst_runs` (default 20, max 200; usado quando `include_worst_runs=true`)
 
 Contrato minimo:
 - endpoint read-only que consolida o runbook operacional em JSON deterministico
 - inclui blocos de versao, timing, slo_daily, slo_alerts, runs, publish_receipts, checks e status
+- modo default e lean (blocos pesados ficam opt-in por query params `include_*`)
 - `status`:
   - `FAIL` se check hard falhar (`timing_events_15m`, `daily_has_requests_7d`, `receipts_path_leaks_30d`)
-  - `WARN` quando apenas `runs.worst` estiver vazio
+  - `WARN` quando `include_worst_runs=true` e `runs.worst` estiver vazio
   - `PASS` caso contrario
+
+Comparativo de modo de resposta:
+
+| Bloco | Default (lean) | Heavy (opt-in) |
+|---|---|---|
+| `version`, `timing`, `slo_daily`, `checks`, `status` | sempre presente | sempre presente |
+| `runs.worst` | `[]` (desativado por default) | preenchido com `include_worst_runs=true` |
+| `slo_alerts.items` | `[]` (somente `count`) | preenchido com `include_alert_items=true` |
+| `publish_receipts.errors_7d` e `publish_receipts.latest_7d` | `[]` | preenchidos com `include_receipts=true` |
 
 Guardrails do endpoint:
 - `window_days > 30` => `400` (`error_type=RangeTooLarge`, `window_days_requested`, `window_days_max`)
 - `timing_minutes > 60` => `400` (`error_type=RangeTooLarge`, `timing_minutes_requested`, `timing_minutes_max`)
 - `limit_alerts > 500` => `400` (`error_type=LimitTooHigh`, `limit_alerts_requested`, `limit_alerts_max`)
 - `limit_receipts > 200` => `400` (`error_type=LimitTooHigh`, `limit_receipts_requested`, `limit_receipts_max`)
+- `limit_worst_runs > 200` => `400` (`error_type=LimitTooHigh`, `limit_worst_runs_requested`, `limit_worst_runs_max`)
+- `include_worst_runs=true` com `window_days > 7` => `400` (`error_type=RangeTooLarge`, `window_days_max_for_worst_runs`)
 
 ## Metrics SLO
 
