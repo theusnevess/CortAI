@@ -69,3 +69,6 @@ backend/celerybeat-schedule.db
 backend/celerybeat-schedule.dat
 backend/celerybeat-schedule.dir
 backend/celerybeat-schedule.bak
+
+# P2 benchmark artifacts
+.tmp_p2/
