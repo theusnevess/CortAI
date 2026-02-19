@@ -613,3 +613,19 @@ Justificativa:
 
 Endpoint limitante:
 - `/api/v1/metrics/overview`
+
+## Stable Baseline Declaration - v1.9.x
+
+A linha `v1.9.x` e considerada baseline estavel, auditavel e governada, com:
+- Governanca de versao consistente (`/health` refletindo a versao operacional da release).
+- Observabilidade completa em runtime (`timing`, `queue_us`, `db_us`, `server_total_us`).
+- Endpoint `/api/v1/observability/report` em modo lean por default.
+- Envelope oficial documentado e validado em Linux nativo.
+- Sanitizacao validada (`path_leaks_30d = 0`).
+- Sanidade de timing validada (`bad_duration = 0`).
+- Telemetria append-only preservada.
+
+A partir desta baseline:
+- Mudancas estruturais devem abrir linha evolutiva explicita (ex.: v2.0).
+- Ajustes de SLO/envelope devem ser deliberados, medidos e documentados.
+- Evolucoes de performance devem manter rastreabilidade por evidencias runtime + pivot DB.
