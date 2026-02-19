@@ -63,3 +63,26 @@ Antes de iniciar implementacoes v2.0:
 - Evitar mudancas simultaneas de contrato + arquitetura no mesmo PR.
 - Priorizar sequencia: medir -> alterar -> validar -> documentar.
 - Cada trilha deve gerar evidencia objetiva de PASS/FAIL.
+
+## P2 - Definition of Done (Performance Track)
+
+Objetivo de P2:
+- Identificar onde a latencia nasce no caminho de throughput/infra sem mexer em logica de endpoint.
+
+Escopo canonicamente aceito:
+- Process model (`workers`, `backlog`, limites de concorrencia do servidor HTTP).
+- I/O model (`keep-alive`, configuracao de conexoes do gerador de carga, path HTTP).
+- Infra path (separacao runner x system under test, rede e roteamento do ambiente de benchmark).
+
+Checklist de encerramento P2:
+- Load generator executado fora do mesmo host/container do sistema alvo.
+- Minimo de 3 rodadas por cenario com desvio registrado.
+- Tabela consolidada: `endpoint x C(1/2/5) x p90/p99 x req/s x timeouts x config`.
+- Evidencia de que `db_pool_wait_us` permanece controlado (ou justificativa quando subir).
+- Identificacao objetiva do knob dominante (workers, keep-alive, backlog, client pool, infra path).
+- Decisao formal: `C2 possivel com SLO atual? (sim/nao)` com justificativa.
+
+Entrega obrigatoria:
+- CSV consolidado do ciclo P2.
+- Bloco de decisao adicionado em `docs/observability.md`.
+- Atualizacao do runbook com criterio de repetibilidade do benchmark.
