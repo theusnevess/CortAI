@@ -671,3 +671,33 @@ Decisao P1:
 Proximo passo canonico (P2):
 - Seguir para P2 (throughput/process model/infra path) sem mexer em logica de endpoint.
 - Alternativamente, revisao deliberada dos SLOs alvo para `C=2` (decisao de produto/operacao).
+
+## P2-A (Throughput) - Resultado e Decisao (runner co-localizado)
+
+Escopo:
+- Script: `scripts/run_p2_matrix.sh`
+- Artefatos:
+  - `.tmp_p2/p2_a_summary_direct.csv`
+  - `.tmp_p2/p2_a_summary_edge.csv`
+  - `.tmp_p2/edge_logs_15m_tail400.txt`
+- Repeticoes: 3 por ponto
+- Concurrency: C=1, C=2, C=5
+- Resultado operacional: `timeouts=0` em todos os cenarios
+
+Resumo (mediana das 3 repeticoes):
+
+| path | C | overview p90/p99 | runs p90/p99 | report p90/p99 |
+|---|---:|---:|---:|---:|
+| direct (:8000) | 1 | 282.42 / 293.53 | 289.21 / 303.67 | 285.61 / 306.15 |
+| direct (:8000) | 2 | 546.08 / 553.77 | 539.10 / 557.52 | 543.08 / 560.12 |
+| direct (:8000) | 5 | 652.69 / 905.04 | 663.37 / 705.18 | 666.16 / 693.52 |
+| edge (:8001) | 1 | 304.71 / 317.05 | 305.50 / 324.74 | 304.16 / 317.78 |
+| edge (:8001) | 2 | 574.65 / 603.12 | 571.74 / 590.59 | 570.94 / 586.73 |
+| edge (:8001) | 5 | 1242.16 / 1532.17 | 1224.90 / 1820.21 | 1265.01 / 1863.12 |
+
+Decisao P2-A:
+- `safe_envelope_v2.0 = C1`
+- `C2` nao atende SLO atual (latencia muito acima dos limites, mesmo sem timeouts).
+- Endpoint limitante principal: `/api/v1/metrics/overview`.
+- Co-limitante: `/api/v1/metrics/runs`.
+- Observacao: execucao co-localizada (runner e SUT no mesmo host); decisao definitiva de infra path requer runner separado (P2-B1).
