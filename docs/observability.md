@@ -671,3 +671,33 @@ Decisao P1:
 Proximo passo canonico (P2):
 - Seguir para P2 (throughput/process model/infra path) sem mexer em logica de endpoint.
 - Alternativamente, revisao deliberada dos SLOs alvo para `C=2` (decisao de produto/operacao).
+
+## P2-B1 sintetico (Windows/Docker Desktop)
+
+Escopo:
+- Validar pipeline de observabilidade (timing -> agregacao -> alerta -> report/status).
+- Gerar artefatos equivalentes ao P2-B1 sem depender de runner externo.
+
+Limite metodologico (obrigatorio):
+- Este metodo **nao e validacao estrutural de infra path**.
+- Este metodo **valida pipeline de observabilidade + SLO/alerts + envelope logico**.
+- Decisao estrutural de capacidade (`safe_envelope_v2.0` definitivo) continua dependente de runner externo.
+
+Comando de execucao:
+
+```bash
+python scripts/run_p2b1_synthetic.py --metric-date 2026-02-09 --base-url http://localhost:8000 --timing-minutes 60
+```
+
+Artefatos gerados em `.tmp_p2/`:
+- `p2_a_summary_direct.csv`
+- `p2_a_summary_edge.csv`
+- `report_after_synth.json`
+- `status_after_synth.json`
+
+Checks esperados do script:
+- `report.timing.events > 0`
+- `report.slo_daily.has_requests == true`
+- `report.slo_alerts.count > 0` quando ha breach
+- `bad_duration == 0`
+- `path_leaks_30d == 0`
