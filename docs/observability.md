@@ -556,3 +556,36 @@ Conclusao operacional:
 - safe envelope: `C=1`
 - first violation: `C=5`
 - violacao por latencia (SLO), nao por disponibilidade (sem 5xx)
+
+## Envelope oficial v1.3 (Linux nativo)
+
+Ambiente:
+- Runner Linux nativo (fora Docker Desktop / WSL2)
+- `wrk -t2 -c{1,2,5} -d60s --timeout 10s`
+- Mix executado por endpoint isolado
+
+Matriz consolidada:
+
+| endpoint | C | p90 | p99 | req/s | timeouts |
+|---|---:|---:|---:|---:|---:|
+| overview | 1 | 218ms | 244ms | 4.73 | 0 |
+| overview | 2 | 411ms | 451ms | 4.99 | 0 |
+| overview | 5 | 823ms | 1.24s | 4.94 | 0 |
+| runs | 1 | 231ms | 260ms | 4.49 | 0 |
+| runs | 2 | 425ms | 451ms | 4.81 | 0 |
+| runs | 5 | 1.26s | 1.68s | 4.79 | 0 |
+| report | 1 | 241ms | 273ms | 4.26 | 0 |
+| report | 2 | 433ms | 460ms | 4.69 | 0 |
+| report | 5 | 866ms | 885ms | 4.73 | 0 |
+
+Decisao:
+- `safe_envelope_v1.3 = C1`
+
+Justificativa:
+- p90/p99 de `/metrics/overview` excede SLO ja em C1.
+- Nenhum timeout ocorreu.
+- Gargalo nao e handler (server-side sub-ms confirmado anteriormente).
+- Limitacao atual e throughput do ambiente sob concorrencia >1.
+
+Endpoint limitante:
+- `/api/v1/metrics/overview`

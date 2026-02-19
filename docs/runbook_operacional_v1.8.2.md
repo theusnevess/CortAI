@@ -304,3 +304,22 @@ Data UTC: `2026-02-17`
 - Sanitizacao: `path_leaks_30d=0`
 - Status: `WARN` (valido por contrato)
 - Self-observing confirmado: `events_before=34` -> `events_after=38` apos 3 chamadas
+
+## Envelope v1.3 (Linux nativo)
+
+Criterio:
+- `0` timeouts
+- p99 dentro do SLO definido por endpoint
+
+Resultado:
+- `C1`: estavel (sem timeouts)
+- `C2`: degradacao significativa de latencia
+- `C5`: latencia >800ms para overview e >1s para runs
+
+Decisao operacional:
+- safe concurrency = `1`
+- escala horizontal recomendada antes de permitir `C>=2`
+- proxima meta tecnica: reduzir p90 de `/metrics/overview` para `<=120ms`
+
+Observacao:
+- Docker Desktop + WSL2 nao foi usado como fonte de verdade para esta decisao.
