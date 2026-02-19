@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from time import perf_counter_ns
+from time import monotonic, perf_counter_ns
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
@@ -24,6 +24,12 @@ REPORT_ALERTS_WINDOW_DAYS = 14
 REPORT_WORST_RUNS_LIMIT = 20
 REPORT_WORST_RUNS_LIMIT_MAX = 200
 REPORT_WORST_RUNS_WINDOW_DAYS_MAX = 7
+REPORT_ALEMBIC_CACHE_TTL_SECONDS = 60
+REPORT_PATH_LEAKS_CACHE_TTL_SECONDS = 30
+
+
+_alembic_head_cache: dict[str, object] = {"value": None, "expires_at": 0.0}
+_path_leaks_cache: dict[str, object] = {"value": 0, "expires_at": 0.0}
 
 
 def _new_db_stats() -> dict[str, int]:
@@ -31,6 +37,26 @@ def _new_db_stats() -> dict[str, int]:
     Inicializa acumuladores de custo de banco por request.
     """
     return {"db_us": 0, "db_queries": 0, "db_pool_wait_us": 0}
+
+
+def _is_cache_valid(cache: dict[str, object]) -> bool:
+    """
+    Retorna True quando o cache local ainda esta dentro do TTL configurado.
+    """
+    # Em pytest o cache e desligado para evitar acoplamento entre casos.
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    return monotonic() < float(cache.get("expires_at", 0.0))
+
+
+def _set_cache(cache: dict[str, object], value: object, ttl_seconds: int) -> None:
+    """
+    Atualiza valor + expiracao em cache in-memory para reduzir queries repetidas.
+    """
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return
+    cache["value"] = value
+    cache["expires_at"] = monotonic() + float(ttl_seconds)
 
 
 async def _execute_with_db_stats(
@@ -52,6 +78,95 @@ async def _execute_with_db_stats(
     db_stats["db_us"] = int(db_stats.get("db_us", 0)) + int(elapsed_us)
     db_stats["db_queries"] = int(db_stats.get("db_queries", 0)) + 1
     return result
+
+
+async def _get_alembic_head_cached(db: AsyncSession, db_stats: dict[str, int]) -> str | None:
+    """
+    Busca alembic head com cache curto para remover query fixa do request path.
+    """
+    if _is_cache_valid(_alembic_head_cache):
+        return _alembic_head_cache.get("value")  # type: ignore[return-value]
+    alembic_head: str | None = None
+    try:
+        alembic_row = (
+            await _execute_with_db_stats(
+                db,
+                text("SELECT version_num FROM alembic_version LIMIT 1"),
+                db_stats,
+            )
+        ).first()
+        if alembic_row:
+            alembic_head = str(alembic_row[0])
+    except Exception:
+        alembic_head = None
+    _set_cache(_alembic_head_cache, alembic_head, REPORT_ALEMBIC_CACHE_TTL_SECONDS)
+    return alembic_head
+
+
+async def _get_path_leaks_30d_cached(db: AsyncSession, db_stats: dict[str, int]) -> int:
+    """
+    Retorna leak-check 30d com cache curto para reduzir custo recorrente do report.
+    """
+    if _is_cache_valid(_path_leaks_cache):
+        return int(_path_leaks_cache.get("value", 0))
+    leaks = (
+        await _execute_with_db_stats(
+            db,
+            text(
+                """
+                SELECT
+                  COUNT(*)::int AS leaks
+                FROM publish_receipts
+                WHERE created_at >= NOW() - INTERVAL '30 days'
+                  AND (
+                    error_message ILIKE '%/tmp%' OR
+                    error_message ILIKE '%storage/%' OR
+                    error_message ILIKE '%videos-raw%' OR
+                    error_message ILIKE '%.mp4%' OR
+                    error_message ILIKE '%.wav%' OR
+                    error_message ILIKE '%.json%' OR
+                    error_message ILIKE '%agent_output%'
+                  )
+                """
+            ),
+            db_stats,
+        )
+    ).scalar() or 0
+    leak_count = int(leaks)
+    _set_cache(_path_leaks_cache, leak_count, REPORT_PATH_LEAKS_CACHE_TTL_SECONDS)
+    return leak_count
+
+
+def _build_slo_daily_summary(items: list[dict]) -> list[dict]:
+    """
+    Deriva summary por endpoint a partir de items para evitar query extra no report.
+    """
+    grouped: dict[str, dict[str, float]] = {}
+    for item in items:
+        endpoint = str(item["endpoint"])
+        agg = grouped.setdefault(
+            endpoint,
+            {"total_requests": 0.0, "sum_p95": 0.0, "sum_p99": 0.0, "sum_error_rate": 0.0, "count": 0.0},
+        )
+        agg["total_requests"] += float(item["count_requests"])
+        agg["sum_p95"] += float(item["p95_ms"])
+        agg["sum_p99"] += float(item["p99_ms"])
+        agg["sum_error_rate"] += float(item["error_rate"])
+        agg["count"] += 1.0
+    summary = []
+    for endpoint, agg in grouped.items():
+        count = max(1.0, agg["count"])
+        summary.append(
+            {
+                "endpoint": endpoint,
+                "total_requests": int(agg["total_requests"]),
+                "avg_p95_ms": round(agg["sum_p95"] / count, 4),
+                "avg_p99_ms": round(agg["sum_p99"] / count, 4),
+                "avg_error_rate": round(agg["sum_error_rate"] / count, 6),
+            }
+        )
+    summary.sort(key=lambda row: row["total_requests"], reverse=True)
+    return summary
 
 
 def _validate_report_params(
@@ -170,19 +285,7 @@ async def get_observability_report(
         git_tag = os.getenv("GIT_TAG")
         git_commit = os.getenv("GIT_COMMIT")
 
-        alembic_head = None
-        try:
-            alembic_row = (
-                await _execute_with_db_stats(
-                    db,
-                    text("SELECT version_num FROM alembic_version LIMIT 1"),
-                    db_stats,
-                )
-            ).first()
-            if alembic_row:
-                alembic_head = str(alembic_row[0])
-        except Exception:
-            alembic_head = None
+        alembic_head = await _get_alembic_head_cached(db, db_stats)
 
         timing_row = (
             await _execute_with_db_stats(
@@ -246,37 +349,8 @@ async def get_observability_report(
             for r in slo_daily_items
         ]
 
-        slo_daily_summary = (
-            await _execute_with_db_stats(
-                db,
-                text(
-                    """
-                    SELECT
-                      endpoint,
-                      SUM(count_requests)::int AS total_requests,
-                      AVG(p95_ms)::float AS avg_p95_ms,
-                      AVG(p99_ms)::float AS avg_p99_ms,
-                      AVG(error_rate)::float AS avg_error_rate
-                    FROM metrics_endpoint_daily
-                    WHERE metric_date >= (CURRENT_DATE - make_interval(days => :window_days))::date
-                    GROUP BY endpoint
-                    ORDER BY total_requests DESC
-                    """
-                ),
-                db_stats,
-                {"window_days": window_days},
-            )
-        ).mappings().all()
-        slo_daily_summary_json = [
-            {
-                "endpoint": str(r["endpoint"]),
-                "total_requests": int(r["total_requests"]),
-                "avg_p95_ms": round(float(r["avg_p95_ms"] or 0), 4),
-                "avg_p99_ms": round(float(r["avg_p99_ms"] or 0), 4),
-                "avg_error_rate": round(float(r["avg_error_rate"] or 0), 6),
-            }
-            for r in slo_daily_summary
-        ]
+        # Summary derivado em memoria para manter o report em 1 query para slo_daily.
+        slo_daily_summary_json = _build_slo_daily_summary(slo_daily_items_json)
 
         # Default lean: sempre calcula count de alertas; lista detalhada e opt-in.
         alerts_count_row = (
@@ -458,29 +532,7 @@ async def get_observability_report(
                 for r in receipts_latest_rows
             ]
 
-        path_leaks_30d = (
-            await _execute_with_db_stats(
-                db,
-                text(
-                    """
-                    SELECT
-                      COUNT(*)::int AS leaks
-                    FROM publish_receipts
-                    WHERE created_at >= NOW() - INTERVAL '30 days'
-                      AND (
-                        error_message ILIKE '%/tmp%' OR
-                        error_message ILIKE '%storage/%' OR
-                        error_message ILIKE '%videos-raw%' OR
-                        error_message ILIKE '%.mp4%' OR
-                        error_message ILIKE '%.wav%' OR
-                        error_message ILIKE '%.json%' OR
-                        error_message ILIKE '%agent_output%'
-                      )
-                    """
-                ),
-                db_stats,
-            )
-        ).scalar() or 0
+        path_leaks_30d = await _get_path_leaks_30d_cached(db, db_stats)
 
         timing_events = int(timing_row["events"] or 0)
         timing_min_ts = timing_row["min_ts"].isoformat() if timing_row["min_ts"] else None
