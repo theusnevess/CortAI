@@ -370,6 +370,138 @@ async def test_overview_soma_bate(client, seed_daily_metric):
 
 
 @pytest.mark.anyio
+async def test_overview_alert_reasons_default_vazio(client, seed_daily_metric):
+    """
+    include_reasons default false deve preservar alert_count/alerted com alert_reasons vazio.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=4,
+        completed_runs=3,
+        failed_runs=1,
+        blocked_runs=0,
+        avg_actions_executed=0.8,
+        last_action_type_distribution={"write_artifact": 4},
+        alert_count=1,
+        alert_reasons=["p95_slo_breach"],
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["alerted"] is True
+    assert item["alert_count"] == 1
+    assert item["alert_reasons"] == []
+
+
+@pytest.mark.anyio
+async def test_overview_include_reasons_true_retorna_reasons(client, seed_daily_metric):
+    """
+    include_reasons=true deve retornar reasons deduplicadas/ordenadas no overview.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=4,
+        completed_runs=3,
+        failed_runs=1,
+        blocked_runs=0,
+        avg_actions_executed=0.8,
+        last_action_type_distribution={"write_artifact": 4},
+        alert_count=1,
+        alert_reasons=["p99_slo_breach", "p95_slo_breach", "p95_slo_breach"],
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10", "include_reasons": "true"},
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["alerted"] is True
+    assert item["alert_count"] == 1
+    assert item["alert_reasons"] == ["p95_slo_breach", "p99_slo_breach"]
+
+
+@pytest.mark.anyio
+async def test_overview_include_baseline_default_vazio(client, seed_daily_metric):
+    """
+    include_baseline default false deve retornar baseline vazio no overview.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 9),
+        total_runs=4,
+        completed_runs=4,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 4},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 200}},
+    )
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=4,
+        completed_runs=4,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 4},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 220}},
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["latency_dynamic_baseline_window_days"] == 14
+    assert item["latency_dynamic_baseline"] == {}
+
+
+@pytest.mark.anyio
+async def test_overview_include_baseline_true_retorna_baseline(client, seed_daily_metric):
+    """
+    include_baseline=true deve retornar baseline dinamico no overview.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 9),
+        total_runs=4,
+        completed_runs=4,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 4},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 200}},
+    )
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=4,
+        completed_runs=4,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 4},
+        latency_by_action={"write_artifact": {"n": 10, "p95_ms": 220}},
+    )
+
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={
+            "start_date": "2026-02-10",
+            "end_date": "2026-02-10",
+            "include_baseline": "true",
+        },
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["latency_dynamic_baseline_window_days"] == 14
+    assert item["latency_dynamic_baseline"]["write_artifact"]["source"] == "dynamic_14d"
+
+
+@pytest.mark.anyio
 async def test_overview_ces_bad_days_in_window(client, seed_daily_metric, monkeypatch):
     """
     Valida contador de dias ruins de CES com janela/threshold do alerta.
@@ -555,6 +687,11 @@ async def test_runs_emite_metrics_endpoint_timing(client, seed_observation, db_s
     assert facts["method"] == "GET"
     assert facts["status_code"] == 200
     assert isinstance(facts["duration_ms"], int)
+    assert isinstance(facts["duration_us"], int)
+    assert isinstance(facts["queue_us"], int)
+    assert isinstance(facts["handler_ms"], int)
+    assert isinstance(facts["server_total_ms"], int)
+    assert isinstance(facts["server_total_us"], int)
     assert "timestamp" in facts
     assert "query_fingerprint" in facts
     assert "metric_date" in facts
@@ -583,8 +720,18 @@ async def test_overview_emite_metrics_endpoint_timing_tres_chamadas(client, db_s
         assert facts["status_code"] == 200
         assert facts["method"] == "GET"
         assert isinstance(facts["duration_ms"], int)
+        assert isinstance(facts["duration_us"], int)
+        assert isinstance(facts["queue_us"], int)
+        assert isinstance(facts["handler_ms"], int)
+        assert isinstance(facts["server_total_ms"], int)
+        assert isinstance(facts["server_total_us"], int)
         assert facts["duration_ms"] >= 0
         assert "timestamp" in facts
+        assert "cache_hit" in facts
+        assert isinstance(facts["cache_hit"], bool)
+        assert "cache_key_hash" in facts
+        assert isinstance(facts["cache_key_hash"], str)
+        assert len(facts["cache_key_hash"]) == 8
 
 
 @pytest.mark.anyio
@@ -614,11 +761,11 @@ async def test_runs_um_completed(client, seed_observation):
     assert item["ces_run_version"] == "CES_run_v1"
     assert item["ces_run_reason"] is None
     assert item["latency_measured"] is False
-    assert item["budgets_used"] == {}
     assert item["ces_run_components"]["latency"] == 1.0
-    assert item["latency_pairs_used"] == 0
-    assert item["latency_pairs_ignored"] == 0
     assert item["latency_pairs_inverted"] == 0
+    assert "budgets_used" not in item
+    assert "latency_pairs_used" not in item
+    assert "latency_pairs_ignored" not in item
     assert isinstance(item["ces_run"], float)
 
 
@@ -705,7 +852,7 @@ def _write_jsonl(path, rows):
 
 
 @pytest.mark.anyio
-async def test_runs_latency_measured_true_com_n_elegivel(client, seed_observation, monkeypatch, tmp_path):
+async def test_run_debug_latency_measured_true_com_n_elegivel(client, seed_observation, monkeypatch, tmp_path):
     """
     Mede latencia real quando existe acao elegivel com n >= 3 no run.
     """
@@ -769,21 +916,20 @@ async def test_runs_latency_measured_true_com_n_elegivel(client, seed_observatio
         ],
     )
 
-    response = await client.get(
-        "/api/v1/metrics/runs",
-        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
-    )
+    response = await client.get(f"/api/v1/metrics/runs/{process_id}")
     assert response.status_code == 200
-    item = next(i for i in response.json()["items"] if i["process_id"] == process_id)
-    assert item["latency_measured"] is True
-    assert item["budgets_used"]["transcribe_segments"]["n"] == 3
-    assert item["ces_run_components"]["latency"] < 1.0
-    assert item["latency_pairs_used"] >= 3
-    assert item["latency_pairs_inverted"] == 0
+    payload = response.json()
+    run_summary = payload["run_summary"]
+    breakdown = payload["latency_breakdown"]
+    assert run_summary["latency_measured"] is True
+    assert breakdown["transcribe_segments"]["n"] == 3
+    assert run_summary["ces_run_components"]["latency"] < 1.0
+    assert run_summary["latency_pairs_used"] >= 3
+    assert run_summary["latency_pairs_inverted"] == 0
 
 
 @pytest.mark.anyio
-async def test_runs_latency_fallback_quando_n_menor_que_3(client, seed_observation, monkeypatch, tmp_path):
+async def test_run_debug_latency_fallback_quando_n_menor_que_3(client, seed_observation, monkeypatch, tmp_path):
     """
     Mantem fallback de latencia quando n elegivel e insuficiente.
     """
@@ -835,21 +981,19 @@ async def test_runs_latency_fallback_quando_n_menor_que_3(client, seed_observati
         ],
     )
 
-    response = await client.get(
-        "/api/v1/metrics/runs",
-        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
-    )
+    response = await client.get(f"/api/v1/metrics/runs/{process_id}")
     assert response.status_code == 200
-    item = next(i for i in response.json()["items"] if i["process_id"] == process_id)
-    assert item["latency_measured"] is False
-    assert item["ces_run_components"]["latency"] == 1.0
-    assert item["budgets_used"] == {}
-    assert item["latency_pairs_used"] == 2
-    assert item["latency_pairs_inverted"] == 0
+    payload = response.json()
+    run_summary = payload["run_summary"]
+    assert run_summary["latency_measured"] is False
+    assert run_summary["ces_run_components"]["latency"] == 1.0
+    assert payload["latency_breakdown"] == {}
+    assert run_summary["latency_pairs_used"] == 2
+    assert run_summary["latency_pairs_inverted"] == 0
 
 
 @pytest.mark.anyio
-async def test_runs_latency_exclui_unknown(client, seed_observation, monkeypatch, tmp_path):
+async def test_run_debug_latency_exclui_unknown(client, seed_observation, monkeypatch, tmp_path):
     """
     Garante que unknown nao participa do score de latencia do run.
     """
@@ -949,16 +1093,14 @@ async def test_runs_latency_exclui_unknown(client, seed_observation, monkeypatch
         ],
     )
 
-    response = await client.get(
-        "/api/v1/metrics/runs",
-        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
-    )
+    response = await client.get(f"/api/v1/metrics/runs/{process_id}")
     assert response.status_code == 200
-    item = next(i for i in response.json()["items"] if i["process_id"] == process_id)
-    assert item["latency_measured"] is True
-    assert "transcribe_segments" in item["budgets_used"]
-    assert "unknown" not in item["budgets_used"]
-    assert item["latency_pairs_used"] == 3
+    payload = response.json()
+    run_summary = payload["run_summary"]
+    assert run_summary["latency_measured"] is True
+    assert "transcribe_segments" in payload["latency_breakdown"]
+    assert "unknown" not in payload["latency_breakdown"]
+    assert run_summary["latency_pairs_used"] == 3
 
 
 @pytest.mark.anyio

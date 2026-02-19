@@ -1,6 +1,7 @@
 import os
+from time import perf_counter_ns
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.endpoints import videos, metrics, observability, status
 from app.cognitive_core import run_cognitive_cycle
@@ -34,6 +35,16 @@ app.add_middleware(
     allow_methods=["*"],        
     allow_headers=["*"],        
 )
+
+
+@app.middleware("http")
+async def capture_asgi_entry_time(request: Request, call_next):
+    """
+    Captura timestamp de entrada ASGI para medir fila antes do handler.
+    """
+    request.state.asgi_entry_ns = perf_counter_ns()
+    response = await call_next(request)
+    return response
 
 app.include_router(videos.router, prefix="/api/v1/videos", tags=["videos"])
 app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])

@@ -2,13 +2,15 @@ import math
 import json
 import os
 import uuid
+import hashlib
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from time import perf_counter
+from threading import Lock
+from time import perf_counter, perf_counter_ns
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -80,6 +82,10 @@ CES_DYNAMIC_BASELINE_MIN_N = 10
 MANIFEST_OUTPUT_DIR = "agent_output"
 METRICS_RUNS_LIMIT_MAX = 200
 METRICS_RUNS_RANGE_MAX_DAYS = 31
+METRICS_OVERVIEW_CACHE_TTL_SECONDS = 10
+METRICS_OVERVIEW_CACHE_MAX_ENTRIES = 128
+_metrics_overview_cache: dict[str, tuple[float, str]] = {}
+_metrics_overview_cache_lock = Lock()
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -125,6 +131,60 @@ def _parse_date(value: str | None, label: str) -> date | None:
         return datetime.strptime(value, "%Y-%m-%d").date()
     except Exception:
         raise HTTPException(status_code=400, detail=f"{label} must be YYYY-MM-DD")
+
+
+def _overview_cache_enabled() -> bool:
+    """
+    Habilita cache curto somente fora de pytest.
+    """
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    return METRICS_OVERVIEW_CACHE_TTL_SECONDS > 0
+
+
+def _build_overview_cache_key(
+    *,
+    start: date,
+    end: date,
+    include_reasons: bool,
+    include_baseline: bool,
+) -> str:
+    return (
+        f"start={start.isoformat()}|end={end.isoformat()}"
+        f"|reasons={int(include_reasons)}|baseline={int(include_baseline)}"
+    )
+
+
+def _overview_cache_key_hash(key: str) -> str:
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
+
+
+def _get_overview_cache(key: str) -> str | None:
+    if not _overview_cache_enabled():
+        return None
+    now = perf_counter()
+    with _metrics_overview_cache_lock:
+        payload = _metrics_overview_cache.get(key)
+        if payload is None:
+            return None
+        expires_at, data = payload
+        if expires_at <= now:
+            _metrics_overview_cache.pop(key, None)
+            return None
+        return data
+
+
+def _set_overview_cache(key: str, payload_json: str) -> None:
+    if not _overview_cache_enabled():
+        return
+    expires_at = perf_counter() + METRICS_OVERVIEW_CACHE_TTL_SECONDS
+    with _metrics_overview_cache_lock:
+        if len(_metrics_overview_cache) >= METRICS_OVERVIEW_CACHE_MAX_ENTRIES:
+            # Remove entrada mais antiga para manter custo previsivel.
+            oldest_key = next(iter(_metrics_overview_cache), None)
+            if oldest_key is not None:
+                _metrics_overview_cache.pop(oldest_key, None)
+        _metrics_overview_cache[key] = (expires_at, payload_json)
 
 
 def _filter_facts(facts: dict) -> dict:
@@ -272,8 +332,14 @@ def _emit_metrics_endpoint_timing(
     method: str,
     status_code: int,
     duration_ms: int,
+    duration_us: int | None = None,
+    queue_us: int | None = None,
+    server_total_ms: int | None = None,
+    server_total_us: int | None = None,
     query_fingerprint: str,
     process_id: str | None = None,
+    cache_hit: bool | None = None,
+    cache_key_hash: str | None = None,
 ) -> None:
     """
     Emite telemetria append-only por request dos endpoints de metricas.
@@ -290,12 +356,40 @@ def _emit_metrics_endpoint_timing(
             "method": method,
             "status_code": int(status_code),
             "duration_ms": int(max(0, duration_ms)),
+            # Alta resolucao para diferenciar handler sub-ms de fila/infra.
+            "duration_us": int(max(0, duration_us if duration_us is not None else duration_ms * 1000)),
+            "queue_us": int(max(0, queue_us if queue_us is not None else 0)),
+            "server_total_us": int(
+                max(
+                    0,
+                    server_total_us
+                    if server_total_us is not None
+                    else (duration_us if duration_us is not None else duration_ms * 1000),
+                )
+            ),
+            "handler_ms": int(max(0, duration_ms)),
+            "server_total_ms": int(
+                max(
+                    0,
+                    server_total_ms
+                    if server_total_ms is not None
+                    else (
+                        (server_total_us // 1000)
+                        if server_total_us is not None
+                        else (duration_us // 1000 if duration_us is not None else duration_ms)
+                    ),
+                )
+            ),
             "query_fingerprint": str(query_fingerprint),
             "metric_date": metric_date,
             "timestamp": event_ts,
         }
         if process_id:
             facts["process_id"] = process_id
+        if cache_hit is not None:
+            facts["cache_hit"] = bool(cache_hit)
+        if cache_key_hash:
+            facts["cache_key_hash"] = str(cache_key_hash)
         observation = Observation(
             observation_id=str(uuid.uuid4()),
             timestamp=event_ts,
@@ -962,9 +1056,12 @@ async def get_daily_metrics(
 
 @router.get("/overview")
 async def get_metrics_overview(
+    request: Request,
     days: int = 7,
     start_date: str | None = None,
     end_date: str | None = None,
+    include_reasons: bool = Query(False),
+    include_baseline: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -974,9 +1071,16 @@ async def get_metrics_overview(
         start_date: filtra metricas a partir dessa data (YYYY-MM-DD)
         end_date: filtra metricas ate essa data (YYYY-MM-DD)
     """
+    handler_start_ns = perf_counter_ns()
     started_at = perf_counter()
     status_code = 500
-    query_fingerprint = f"days={days}&start_date={start_date or ''}&end_date={end_date or ''}"
+    cache_hit_flag: bool | None = None
+    cache_key_hash: str | None = None
+    query_fingerprint = (
+        f"days={days}&start_date={start_date or ''}&end_date={end_date or ''}"
+        f"&include_reasons={str(include_reasons).lower()}"
+        f"&include_baseline={str(include_baseline).lower()}"
+    )
     try:
         if days < 1 or days > 365:
             raise HTTPException(status_code=400, detail="days must be between 1 and 365")
@@ -992,6 +1096,20 @@ async def get_metrics_overview(
         if start > end:
             raise HTTPException(status_code=400, detail="start_date must be <= end_date")
 
+        cache_key = _build_overview_cache_key(
+            start=start,
+            end=end,
+            include_reasons=include_reasons,
+            include_baseline=include_baseline,
+        )
+        cache_key_hash = _overview_cache_key_hash(cache_key)
+        cached_payload_json = _get_overview_cache(cache_key)
+        if cached_payload_json is not None:
+            cache_hit_flag = True
+            status_code = 200
+            return Response(content=cached_payload_json, media_type="application/json", status_code=200)
+        cache_hit_flag = False
+
         stmt = (
             select(CognitiveMetricsDaily)
             .where(CognitiveMetricsDaily.metric_date >= start)
@@ -1006,28 +1124,22 @@ async def get_metrics_overview(
             .order_by(CognitiveMetricsDaily.metric_date.asc())
         )
         baseline_rows = (await db.execute(baseline_stmt)).scalars().all()
+        baseline_cache_by_date: dict[date, dict[str, dict]] = {}
 
-        alert_stmt = (
-            select(
-                ObservationRecord.observation_id,
-                ObservationRecord.timestamp,
-                ObservationRecord.facts,
-            )
-            .where(ObservationRecord.facts["event_type"].astext == "cognitive_metrics_alert")
-            .where(ObservationRecord.facts["metric_date"].astext >= start.isoformat())
-            .where(ObservationRecord.facts["metric_date"].astext <= end.isoformat())
-        )
-        alert_rows = (await db.execute(alert_stmt)).all()
-        alerts_by_date = _build_alerts_by_date(alert_rows)
-
+        # Overview é read-only DB-first: usa alertas já materializados no agregado diário.
         items = []
         for r in rows:
-            metric_key = r.metric_date.isoformat()
-            alert_info = alerts_by_date.get(metric_key, None)
-            alert_count = alert_info["alert_count"] if alert_info else 0
+            alert_count = int(getattr(r, "alert_count", 0) or 0)
             alerted = alert_count > 0
+            raw_reasons = getattr(r, "alert_reasons", []) or []
+            reasons = _dedup_and_sort_reasons(raw_reasons) if include_reasons else []
+            metric_date = r.metric_date
+            baseline_for_day = baseline_cache_by_date.get(metric_date)
+            if baseline_for_day is None:
+                baseline_for_day = _build_dynamic_baseline_for_date(metric_date, baseline_rows)
+                baseline_cache_by_date[metric_date] = baseline_for_day
             item = {
-                "metric_date": r.metric_date.isoformat(),
+                "metric_date": metric_date.isoformat(),
                 "total_runs": r.total_runs,
                 "completed_runs": r.completed_runs,
                 "failed_runs": r.failed_runs,
@@ -1044,23 +1156,18 @@ async def get_metrics_overview(
                 "created_at": r.created_at.isoformat() if r.created_at else None,
                 "alerted": alerted,
                 "alert_count": alert_count,
-                "alert_reasons": alert_info["alert_reasons"] if alert_info else [],
-                "alert_observation_id": alert_info["alert_observation_id"] if alert_info else None,
+                "alert_reasons": reasons,
+                "alert_observation_id": None,
                 "latency_dynamic_baseline_window_days": CES_DYNAMIC_BASELINE_WINDOW_DAYS,
-                "latency_dynamic_baseline": _build_dynamic_baseline_for_date(
-                    r.metric_date,
-                    baseline_rows,
-                ),
+                "latency_dynamic_baseline": baseline_for_day,
             }
             if not item["alerted"]:
                 item["alert_count"] = 0
                 item["alert_reasons"] = []
                 item["alert_observation_id"] = None
-            elif item["alert_observation_id"] is None:
-                item["alerted"] = False
-                item["alert_count"] = 0
-                item["alert_reasons"] = []
             item.update(_compute_ces_fields(item))
+            if not include_baseline:
+                item["latency_dynamic_baseline"] = {}
             items.append(item)
 
         # Resumo agregado do periodo.
@@ -1138,18 +1245,38 @@ async def get_metrics_overview(
         summary.update(_compute_ces_window_summary(items))
 
         status_code = 200
-        return {"items": items, "summary": summary}
+        response_payload = {"items": items, "summary": summary}
+        _set_overview_cache(
+            cache_key,
+            json.dumps(response_payload, separators=(",", ":"), ensure_ascii=False),
+        )
+        return response_payload
     except HTTPException as exc:
         status_code = exc.status_code
         raise
     finally:
-        duration_ms = int((perf_counter() - started_at) * 1000)
+        handler_end_ns = perf_counter_ns()
+        elapsed_s = perf_counter() - started_at
+        duration_ms = int(elapsed_s * 1000)
+        duration_us = int(elapsed_s * 1_000_000)
+        asgi_entry_ns = getattr(getattr(request, "state", None), "asgi_entry_ns", None)
+        queue_us = 0
+        server_total_us = duration_us
+        if isinstance(asgi_entry_ns, int):
+            queue_us = max(0, (handler_start_ns - asgi_entry_ns) // 1000)
+            server_total_us = max(0, (handler_end_ns - asgi_entry_ns) // 1000)
         _emit_metrics_endpoint_timing(
             endpoint="/api/v1/metrics/overview",
             method="GET",
             status_code=status_code,
             duration_ms=duration_ms,
+            duration_us=duration_us,
+            queue_us=queue_us,
+            server_total_ms=server_total_us // 1000,
+            server_total_us=server_total_us,
             query_fingerprint=query_fingerprint,
+            cache_hit=cache_hit_flag,
+            cache_key_hash=cache_key_hash,
         )
 
 
@@ -1228,6 +1355,7 @@ async def get_alerts(
 
 @router.get("/runs")
 async def get_runs(
+    request: Request,
     start_date: str | None = None,
     end_date: str | None = None,
     limit: int = Query(50, ge=1),
@@ -1237,6 +1365,7 @@ async def get_runs(
     """
     Retorna runs por process_id deduplicados pelo ultimo cognitive_loop_finished no range.
     """
+    handler_start_ns = perf_counter_ns()
     started_at = perf_counter()
     status_code = 500
     query_fingerprint = f"limit={limit}&offset={offset}&range=unknown"
@@ -1317,20 +1446,10 @@ async def get_runs(
         deduped.sort(key=lambda item: item["timestamp_finished"] or "", reverse=True)
         paged = deduped[offset : offset + limit]
 
-        run_anchors = {}
-        for row in paged:
-            pid = row.get("process_id")
-            ts_finished = row.get("timestamp_finished_dt")
-            if not pid or not isinstance(ts_finished, datetime):
-                continue
-            if ts_finished.tzinfo is None:
-                ts_finished = ts_finished.replace(tzinfo=timezone.utc)
-            run_anchors[pid] = {"timestamp_finished": ts_finished}
-        run_latency_map = _build_run_latency_map(run_anchors)
-
         items = []
         for row in paged:
-            ces_payload = _compute_ces_run_fields(row["facts"], run_latency_map.get(row["process_id"]))
+            # List endpoint permanece lean: sem calculo de latencia run-level pesada.
+            ces_payload = _compute_ces_run_fields(row["facts"], None)
             items.append(
                 {
                     "process_id": row["process_id"],
@@ -1341,9 +1460,6 @@ async def get_runs(
                     "ces_run_reason": ces_payload["ces_run_reason"],
                     "ces_run_components": ces_payload["ces_run_components"],
                     "latency_measured": ces_payload["latency_measured"],
-                    "budgets_used": ces_payload["budgets_used"],
-                    "latency_pairs_used": ces_payload["latency_pairs_used"],
-                    "latency_pairs_ignored": ces_payload["latency_pairs_ignored"],
                     "latency_pairs_inverted": ces_payload["latency_pairs_inverted"],
                 }
             )
@@ -1359,12 +1475,25 @@ async def get_runs(
         status_code = exc.status_code
         raise
     finally:
-        duration_ms = int((perf_counter() - started_at) * 1000)
+        handler_end_ns = perf_counter_ns()
+        elapsed_s = perf_counter() - started_at
+        duration_ms = int(elapsed_s * 1000)
+        duration_us = int(elapsed_s * 1_000_000)
+        asgi_entry_ns = getattr(getattr(request, "state", None), "asgi_entry_ns", None)
+        queue_us = 0
+        server_total_us = duration_us
+        if isinstance(asgi_entry_ns, int):
+            queue_us = max(0, (handler_start_ns - asgi_entry_ns) // 1000)
+            server_total_us = max(0, (handler_end_ns - asgi_entry_ns) // 1000)
         _emit_metrics_endpoint_timing(
             endpoint="/api/v1/metrics/runs",
             method="GET",
             status_code=status_code,
             duration_ms=duration_ms,
+            duration_us=duration_us,
+            queue_us=queue_us,
+            server_total_ms=server_total_us // 1000,
+            server_total_us=server_total_us,
             query_fingerprint=query_fingerprint,
         )
 
@@ -1372,12 +1501,14 @@ async def get_runs(
 @router.get("/runs/{process_id}")
 async def get_run_debug(
     process_id: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """
     Retorna visao de debug de um run por process_id.
     Fonte de verdade: ultimo cognitive_loop_finished no Postgres.
     """
+    handler_start_ns = perf_counter_ns()
     started_at = perf_counter()
     status_code = 500
     query_fingerprint = "process_id=present"
@@ -1484,12 +1615,25 @@ async def get_run_debug(
         status_code = exc.status_code
         raise
     finally:
-        duration_ms = int((perf_counter() - started_at) * 1000)
+        handler_end_ns = perf_counter_ns()
+        elapsed_s = perf_counter() - started_at
+        duration_ms = int(elapsed_s * 1000)
+        duration_us = int(elapsed_s * 1_000_000)
+        asgi_entry_ns = getattr(getattr(request, "state", None), "asgi_entry_ns", None)
+        queue_us = 0
+        server_total_us = duration_us
+        if isinstance(asgi_entry_ns, int):
+            queue_us = max(0, (handler_start_ns - asgi_entry_ns) // 1000)
+            server_total_us = max(0, (handler_end_ns - asgi_entry_ns) // 1000)
         _emit_metrics_endpoint_timing(
             endpoint="/api/v1/metrics/runs/{process_id}",
             method="GET",
             status_code=status_code,
             duration_ms=duration_ms,
+            duration_us=duration_us,
+            queue_us=queue_us,
+            server_total_ms=server_total_us // 1000,
+            server_total_us=server_total_us,
             query_fingerprint=query_fingerprint,
             process_id=process_id,
         )

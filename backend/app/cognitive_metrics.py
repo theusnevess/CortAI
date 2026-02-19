@@ -608,7 +608,21 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
             "avg_actions_executed": avg_actions,
             "last_action_type_distribution": dict(action_counter),
             "latency_by_action": latency_by_action,
+            "alert_count": 0,
+            "alert_reasons": [],
         }
+
+        # Materializa alertas diarios para leitura DB-first no overview.
+        alert_reasons_materialized: set[str] = set()
+        for row in rows:
+            facts = row.facts if isinstance(row.facts, dict) else {}
+            if facts.get("event_type") != "cognitive_metrics_alert":
+                continue
+            if str(facts.get("metric_date") or "") != metric_date.isoformat():
+                continue
+            alert_reasons_materialized.update(
+                str(reason) for reason in (facts.get("reasons") or []) if str(reason)
+            )
 
         existing = (
             session.query(CognitiveMetricsDaily)
@@ -625,6 +639,8 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
             existing.avg_actions_executed = payload["avg_actions_executed"]
             existing.last_action_type_distribution = payload["last_action_type_distribution"]
             existing.latency_by_action = payload["latency_by_action"]
+            existing.alert_count = payload["alert_count"]
+            existing.alert_reasons = payload["alert_reasons"]
         else:
             session.add(
                 CognitiveMetricsDaily(
@@ -639,6 +655,8 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
                     avg_actions_executed=payload["avg_actions_executed"],
                     last_action_type_distribution=payload["last_action_type_distribution"],
                     latency_by_action=payload["latency_by_action"],
+                    alert_count=payload["alert_count"],
+                    alert_reasons=payload["alert_reasons"],
                 )
             )
         session.commit()
@@ -689,6 +707,7 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
                     },
                 )
                 persist_observation(observation)
+                alert_reasons_materialized.add(reason)
                 try:
                     persist_state_from_observation(observation)
                 except Exception as e:
@@ -777,6 +796,7 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
                         },
                     )
                     persist_observation(observation)
+                    alert_reasons_materialized.add(CES_V1_REASON)
                     try:
                         persist_state_from_observation(observation)
                     except Exception as e:
@@ -792,6 +812,20 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
                         bad_days_in_window,
                         ces_window_days,
                     )
+
+        # Persiste o snapshot final de alertas do dia para evitar query em observations no overview.
+        payload["alert_reasons"] = sorted(alert_reasons_materialized)
+        payload["alert_count"] = len(payload["alert_reasons"])
+
+        existing = (
+            session.query(CognitiveMetricsDaily)
+            .filter(CognitiveMetricsDaily.metric_date == metric_date)
+            .one_or_none()
+        )
+        if existing:
+            existing.alert_count = payload["alert_count"]
+            existing.alert_reasons = payload["alert_reasons"]
+        session.commit()
         endpoint_daily_rows = _aggregate_metrics_endpoint_daily_and_alerts(session, metric_date, rows)
         payload["metrics_endpoint_daily"] = endpoint_daily_rows
         return payload

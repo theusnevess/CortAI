@@ -239,6 +239,17 @@ Componentes do `CES_run_v1`:
   - `latency_pairs_*` nao alteram o score; sao apenas telemetria de auditoria.
   - Invariante esperado: `latency_pairs_inverted = 0`; se maior que zero, tratar como investigacao de clock drift/ordem de eventos.
 
+Contrato operacional v1.2 (lean list / heavy debug):
+- `GET /api/v1/metrics/runs` e endpoint de lista lean:
+  - retorna apenas `process_id`, `timestamp_finished`, `pipeline_status`, `ces_run`,
+    `ces_run_version`, `ces_run_reason`, `ces_run_components`, `latency_measured`,
+    `latency_pairs_inverted`.
+  - nao retorna campos pesados (`budgets_used`, `latency_pairs_used`, `latency_pairs_ignored`).
+  - nao executa calculo de latencia real por acao (run-level pesado).
+- `GET /api/v1/metrics/runs/{process_id}` permanece endpoint de debug heavy:
+  - inclui `latency_breakdown` (budgets por acao), `latency_pairs_used/ignored/inverted`,
+    `links`, `artifact_refs`, `last_error` sanitizado.
+
 ### Run debug view
 
 Endpoint read-only:
@@ -320,6 +331,21 @@ Query params:
 - `start_date` (YYYY-MM-DD)
 - `end_date` (YYYY-MM-DD)
 - `days` (1..365)
+- `include_reasons` (bool, default `false`)
+- `include_baseline` (bool, default `false`)
+
+Contrato de alertas no overview:
+- `alerted` e `alert_count` sempre presentes.
+- `alert_reasons` sempre presente no shape:
+  - default (`include_reasons=false`): `[]`
+  - `include_reasons=true`: reasons deduplicadas/ordenadas.
+- `latency_dynamic_baseline` sempre presente no shape:
+  - default (`include_baseline=false`): `{}`
+  - `include_baseline=true`: baseline por acao (`budget_ms`, `source`, `samples_used`).
+- Fonte DB-first:
+  - overview le `cognitive_metrics_daily` (incluindo `alert_count`/`alert_reasons` materializados no agregado diario)
+  - nao executa lookup de alertas em `observations` durante a request
+  - resposta usa cache read-only curto (TTL 10s) por query para reduzir p95 sob concorrencia
 
 ### GET /api/v1/metrics/alerts
 Query params:
@@ -334,20 +360,44 @@ Query params:
 - `timing_minutes` (default 15, max 60)
 - `limit_alerts` (default 200, max 500)
 - `limit_receipts` (default 50, max 200)
+- `include_worst_runs` (default `false`)
+- `include_receipts` (default `false`)
+- `include_alert_items` (default `false`)
+- `limit_worst_runs` (default 20, max 200; usado quando `include_worst_runs=true`)
 
 Contrato minimo:
 - endpoint read-only que consolida o runbook operacional em JSON deterministico
 - inclui blocos de versao, timing, slo_daily, slo_alerts, runs, publish_receipts, checks e status
+- modo default e lean (blocos pesados ficam opt-in por query params `include_*`)
 - `status`:
   - `FAIL` se check hard falhar (`timing_events_15m`, `daily_has_requests_7d`, `receipts_path_leaks_30d`)
-  - `WARN` quando apenas `runs.worst` estiver vazio
+  - `WARN` quando `include_worst_runs=true` e `runs.worst` estiver vazio
   - `PASS` caso contrario
+
+Comparativo de modo de resposta:
+
+| Bloco | Default (lean) | Heavy (opt-in) |
+|---|---|---|
+| `version`, `timing`, `slo_daily`, `checks`, `status` | sempre presente | sempre presente |
+| `runs.worst` | `[]` (desativado por default) | preenchido com `include_worst_runs=true` |
+| `slo_alerts.items` | `[]` (somente `count`) | preenchido com `include_alert_items=true` |
+| `publish_receipts.errors_7d` e `publish_receipts.latest_7d` | `[]` | preenchidos com `include_receipts=true` |
 
 Guardrails do endpoint:
 - `window_days > 30` => `400` (`error_type=RangeTooLarge`, `window_days_requested`, `window_days_max`)
 - `timing_minutes > 60` => `400` (`error_type=RangeTooLarge`, `timing_minutes_requested`, `timing_minutes_max`)
 - `limit_alerts > 500` => `400` (`error_type=LimitTooHigh`, `limit_alerts_requested`, `limit_alerts_max`)
 - `limit_receipts > 200` => `400` (`error_type=LimitTooHigh`, `limit_receipts_requested`, `limit_receipts_max`)
+- `limit_worst_runs > 200` => `400` (`error_type=LimitTooHigh`, `limit_worst_runs_requested`, `limit_worst_runs_max`)
+- `include_worst_runs=true` com `window_days > 7` => `400` (`error_type=RangeTooLarge`, `window_days_max_for_worst_runs`)
+
+Otimizacoes v1.3.2 (sem mudanca de contrato):
+- `version.alembic_head` usa cache in-memory curto (TTL 60s) para remover query fixa do request path.
+- `publish_receipts.path_leaks_30d` usa cache in-memory curto (TTL 30s) para reduzir custo recorrente.
+- `slo_daily.summary` passa a ser derivado de `slo_daily.items` em memoria (sem query adicional).
+- Em ambiente de testes (`pytest`), caches locais sao desativados para manter casos deterministas.
+- Meta medida em regime (cache aquecido): `p95_db_queries ~= 2` e `p95_db_us ~= 3-4ms` no caminho default lean.
+- Comportamento de cold-start (apos restart): o `p95_db_us` pode subir temporariamente para a faixa de `~20-25ms`.
 
 ## Metrics SLO
 
@@ -386,9 +436,20 @@ Guardrails de entrada:
   - `method`
   - `status_code`
   - `duration_ms`
+  - `duration_us` (alta resolucao para diagnostico sub-ms)
+  - `queue_us` (tempo entre entrada ASGI e inicio do handler)
+  - `handler_ms`
+  - `server_total_ms`
+  - `server_total_us`
   - `query_fingerprint`
+  - `cache_hit` (quando aplicavel, ex.: `/metrics/overview`)
+  - `cache_key_hash` (hash curto da chave canonica, quando aplicavel)
   - `process_id` (quando existir no path)
   - `metric_date` (YYYY-MM-DD)
+
+Diagnostico de fila (v1.2.6):
+- Para `/api/v1/metrics/overview`, comparar p95 client-side vs p95 server-side (`duration_ms`) com `cache_hit=true`.
+- Priorizar `queue_us`/`server_total_us` para separar fila de execucao interna do handler.
 
 `metrics_slo_alert`:
 - Alerta diario de regressao de SLO por endpoint.
@@ -465,6 +526,20 @@ Data UTC: `2026-02-17`
 
 Data UTC: `2026-02-18`
 
+### Nota de ambiente: Docker Desktop + WSL2 (edge nao e fonte de verdade)
+
+Quando o stack roda em Docker Desktop + WSL2 (`docker-desktop`), o proxy edge (Nginx) pode introduzir
+latencia artificial de TTFB/queue que nao reflete o handler da API.
+
+Regra canonica (importante):
+- NAO calibrar SLO/envelope usando o caminho edge nesse ambiente.
+- Para validacao local, use direct (`cortai_worker -> http://cortai_api:8000`) como referencia.
+- Para envelope final e SLO "real", rode o benchmark em Linux nativo (VM/VPS/host), comparando direct vs edge.
+
+Evidencia tipica do vies (sintoma):
+- `upstream_connect_time ~ 0` e `upstream_header_time ~= request_time` altos no edge,
+  enquanto `server_total_us` da API permanece baixo (cache-hit), indicando contensao/bridge fora do handler.
+
 Perfil de carga:
 - mix fixo: `/api/v1/metrics/runs` (60%), `/api/v1/observability/report` (25%), `/api/v1/metrics/overview` (15%)
 - duracao por degrau: `60s`
@@ -505,3 +580,36 @@ Conclusao operacional:
 - safe envelope: `C=1`
 - first violation: `C=5`
 - violacao por latencia (SLO), nao por disponibilidade (sem 5xx)
+
+## Envelope oficial v1.3 (Linux nativo)
+
+Ambiente:
+- Runner Linux nativo (fora Docker Desktop / WSL2)
+- `wrk -t2 -c{1,2,5} -d60s --timeout 10s`
+- Mix executado por endpoint isolado
+
+Matriz consolidada:
+
+| endpoint | C | p90 | p99 | req/s | timeouts |
+|---|---:|---:|---:|---:|---:|
+| overview | 1 | 218ms | 244ms | 4.73 | 0 |
+| overview | 2 | 411ms | 451ms | 4.99 | 0 |
+| overview | 5 | 823ms | 1.24s | 4.94 | 0 |
+| runs | 1 | 231ms | 260ms | 4.49 | 0 |
+| runs | 2 | 425ms | 451ms | 4.81 | 0 |
+| runs | 5 | 1.26s | 1.68s | 4.79 | 0 |
+| report | 1 | 241ms | 273ms | 4.26 | 0 |
+| report | 2 | 433ms | 460ms | 4.69 | 0 |
+| report | 5 | 866ms | 885ms | 4.73 | 0 |
+
+Decisao:
+- `safe_envelope_v1.3 = C1`
+
+Justificativa:
+- p90/p99 de `/metrics/overview` excede SLO ja em C1.
+- Nenhum timeout ocorreu.
+- Gargalo nao e handler (server-side sub-ms confirmado anteriormente).
+- Limitacao atual e throughput do ambiente sob concorrencia >1.
+
+Endpoint limitante:
+- `/api/v1/metrics/overview`

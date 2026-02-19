@@ -146,6 +146,8 @@ async def seed_daily_metric(db_session: AsyncSession):
         truncated_runs: int = 0,
         truncated_ratio: float | str | Decimal | None = Decimal("0.00"),
         latency_by_action: dict | None = None,
+        alert_count: int = 0,
+        alert_reasons: list | None = None,
     ) -> CognitiveMetricsDaily:
         await db_session.execute(
             delete(CognitiveMetricsDaily).where(CognitiveMetricsDaily.metric_date == metric_date)
@@ -166,6 +168,8 @@ async def seed_daily_metric(db_session: AsyncSession):
             ),
             last_action_type_distribution=last_action_type_distribution,
             latency_by_action=latency_by_action or {},
+            alert_count=int(alert_count or 0),
+            alert_reasons=alert_reasons or [],
         )
         db_session.add(metric)
         await db_session.flush()

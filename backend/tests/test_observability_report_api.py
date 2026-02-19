@@ -106,6 +106,15 @@ async def test_report_happy_path_shape(client, db_session, seed_observation):
         assert key in payload
     assert payload["version"]["ces_default_version"] == "CES_v1"
     assert payload["status"] == "PASS"
+    assert payload["runs"]["worst"] == []
+    assert payload["slo_alerts"]["items"] == []
+    assert payload["publish_receipts"]["errors_7d"] == []
+    assert payload["publish_receipts"]["latest_7d"] == []
+    assert payload["slo_daily"]["summary"]
+    summary_row = next(
+        item for item in payload["slo_daily"]["summary"] if item["endpoint"] == "/api/v1/metrics/runs"
+    )
+    assert summary_row["total_requests"] == 10
 
 
 @pytest.mark.anyio
@@ -121,11 +130,95 @@ async def test_report_guardrail_window_days(client):
 @pytest.mark.anyio
 async def test_report_worst_runs_empty_is_warn(client, db_session, seed_observation):
     await _seed_minimum_pass_data(db_session, seed_observation)
-    response = await client.get("/api/v1/observability/report")
+    response = await client.get(
+        "/api/v1/observability/report",
+        params={"include_worst_runs": True},
+    )
     assert response.status_code == 200
     payload = response.json()
     assert payload["runs"]["worst"] == []
     assert payload["status"] == "WARN"
+
+
+@pytest.mark.anyio
+async def test_report_guardrail_worst_runs_requires_small_window(client):
+    response = await client.get(
+        "/api/v1/observability/report",
+        params={"include_worst_runs": True, "window_days": 8},
+    )
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["error_type"] == "RangeTooLarge"
+    assert detail["window_days_requested"] == 8
+    assert detail["window_days_max_for_worst_runs"] == 7
+
+
+@pytest.mark.anyio
+async def test_report_opt_in_blocks_return_data(client, db_session, seed_observation):
+    await _seed_minimum_pass_data(db_session, seed_observation)
+    now = datetime.utcnow()
+    await seed_observation(
+        timestamp=now,
+        process_id="P_OBS_REPORT_ALERT",
+        source_outcome_id=str(uuid.uuid4()),
+        facts={
+            "event_type": "metrics_slo_alert",
+            "metric_date": date.today().isoformat(),
+            "endpoint": "/api/v1/metrics/runs",
+            "reasons": ["p95_slo_breach"],
+        },
+    )
+    await seed_observation(
+        timestamp=now,
+        process_id="P_OBS_REPORT_FINISHED",
+        source_outcome_id=str(uuid.uuid4()),
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "completed",
+            "execution_status": "success",
+            "ces_run_version": "CES_run_v1",
+            "ces_run": "80.0",
+            "ces_run_components": {
+                "status": "1.0",
+                "actions": "0.7",
+                "latency": "0.8",
+                "trunc": "1.0",
+            },
+        },
+    )
+    db_session.add(
+        PublishReceipt(
+            publish_decision_id=str(uuid.uuid4()),
+            process_id="P_OBS_REPORT_BLOCKED",
+            manifest_decision_id=str(uuid.uuid4()),
+            pipeline_status="blocked",
+            execution_status="blocked",
+            target="test",
+            external_post_id=None,
+            error_type="ArtifactNotFound",
+            error_message="manifest ausente",
+            published_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await db_session.flush()
+
+    response = await client.get(
+        "/api/v1/observability/report",
+        params={
+            "include_worst_runs": True,
+            "include_alert_items": True,
+            "include_receipts": True,
+            "window_days": 7,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["runs"]["worst"]
+    assert payload["slo_alerts"]["items"]
+    assert payload["publish_receipts"]["errors_7d"]
+    assert payload["publish_receipts"]["latest_7d"]
 
 
 @pytest.mark.anyio
