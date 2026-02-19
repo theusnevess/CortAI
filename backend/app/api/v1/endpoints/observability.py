@@ -287,30 +287,49 @@ async def get_observability_report(
 
         alembic_head = await _get_alembic_head_cached(db, db_stats)
 
-        timing_row = (
+        timing_and_alerts_row = (
             await _execute_with_db_stats(
                 db,
                 text(
                     """
+                    WITH timing AS (
+                      SELECT
+                        COUNT(*)::int AS events,
+                        MIN(timestamp) AS min_ts,
+                        MAX(timestamp) AS max_ts,
+                        SUM(
+                          CASE
+                            WHEN (facts->>'duration_ms') IS NULL
+                              OR (facts->>'duration_ms') = ''
+                              OR (facts->>'duration_ms')::numeric < 0
+                            THEN 1 ELSE 0
+                          END
+                        )::int AS bad_duration
+                      FROM observations
+                      WHERE facts->>'event_type' = 'metrics_endpoint_timing'
+                        AND timestamp >= NOW() - make_interval(mins => :timing_minutes)
+                    ),
+                    alerts AS (
+                      SELECT COUNT(*)::int AS alerts_count
+                      FROM observations
+                      WHERE facts->>'event_type' = 'metrics_slo_alert'
+                        AND timestamp >= NOW() - make_interval(days => :alert_window_days)
+                    )
                     SELECT
-                      COUNT(*)::int AS events,
-                      MIN(timestamp) AS min_ts,
-                      MAX(timestamp) AS max_ts,
-                      SUM(
-                        CASE
-                          WHEN (facts->>'duration_ms') IS NULL
-                            OR (facts->>'duration_ms') = ''
-                            OR (facts->>'duration_ms')::numeric < 0
-                          THEN 1 ELSE 0
-                        END
-                      )::int AS bad_duration
-                    FROM observations
-                    WHERE facts->>'event_type' = 'metrics_endpoint_timing'
-                      AND timestamp >= NOW() - make_interval(mins => :timing_minutes)
+                      timing.events,
+                      timing.min_ts,
+                      timing.max_ts,
+                      timing.bad_duration,
+                      alerts.alerts_count
+                    FROM timing
+                    CROSS JOIN alerts
                     """
                 ),
                 db_stats,
-                {"timing_minutes": timing_minutes},
+                {
+                    "timing_minutes": timing_minutes,
+                    "alert_window_days": REPORT_ALERTS_WINDOW_DAYS,
+                },
             )
         ).mappings().one()
 
@@ -352,23 +371,8 @@ async def get_observability_report(
         # Summary derivado em memoria para manter o report em 1 query para slo_daily.
         slo_daily_summary_json = _build_slo_daily_summary(slo_daily_items_json)
 
-        # Default lean: sempre calcula count de alertas; lista detalhada e opt-in.
-        alerts_count_row = (
-            await _execute_with_db_stats(
-                db,
-                text(
-                    """
-                    SELECT COUNT(*)::int AS n
-                    FROM observations
-                    WHERE facts->>'event_type' = 'metrics_slo_alert'
-                      AND timestamp >= NOW() - make_interval(days => :alert_window_days)
-                    """
-                ),
-                db_stats,
-                {"alert_window_days": REPORT_ALERTS_WINDOW_DAYS},
-            )
-        ).mappings().one()
-        alerts_count = int(alerts_count_row["n"] or 0)
+        # Count de alertas vem junto da query de timing para reduzir db_queries no modo default.
+        alerts_count = int(timing_and_alerts_row["alerts_count"] or 0)
         alerts_json: list[dict] = []
         if include_alert_items:
             alerts_rows = (
@@ -534,10 +538,10 @@ async def get_observability_report(
 
         path_leaks_30d = await _get_path_leaks_30d_cached(db, db_stats)
 
-        timing_events = int(timing_row["events"] or 0)
-        timing_min_ts = timing_row["min_ts"].isoformat() if timing_row["min_ts"] else None
-        timing_max_ts = timing_row["max_ts"].isoformat() if timing_row["max_ts"] else None
-        bad_duration = int(timing_row["bad_duration"] or 0)
+        timing_events = int(timing_and_alerts_row["events"] or 0)
+        timing_min_ts = timing_and_alerts_row["min_ts"].isoformat() if timing_and_alerts_row["min_ts"] else None
+        timing_max_ts = timing_and_alerts_row["max_ts"].isoformat() if timing_and_alerts_row["max_ts"] else None
+        bad_duration = int(timing_and_alerts_row["bad_duration"] or 0)
 
         has_requests = any(int(item["count_requests"]) > 0 for item in slo_daily_items_json)
         alerts_reasons_shape_ok = all(isinstance(item.get("reasons"), list) for item in alerts_json)
