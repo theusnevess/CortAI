@@ -701,3 +701,200 @@ Checks esperados do script:
 - `report.slo_alerts.count > 0` quando ha breach
 - `bad_duration == 0`
 - `path_leaks_30d == 0`
+
+## P2-B2.3a - Edge/Keepalive/Backlog (C=2, 3 reps, 60s)
+
+Escopo:
+- Ambiente local atual.
+- Paths: direct (`:8000`) e edge (`:8001`).
+- Objetivo: verificar se tuning de edge aproxima `C=2` dos SLOs sem alterar logica de endpoint.
+
+Artefatos:
+- `.tmp_p2/p2_b2_3a_baseline_direct.csv`
+- `.tmp_p2/p2_b2_3a_baseline_edge.csv`
+- `.tmp_p2/p2_b2_3a_keepalive_off_edge.csv`
+- `.tmp_p2/p2_b2_3a_keepalive_on_edge.csv`
+- `.tmp_p2/p2_b2_3a_buffering_on_edge.csv`
+- `.tmp_p2/p2_b2_3a_buffering_off_edge.csv`
+- `.tmp_p2/p2_b2_3a_workerconn4096_edge.csv`
+- `.tmp_p2/edge_logs_15m_tail400.txt`
+- `.tmp_p2/edge_p95_on.json`
+- `.tmp_p2/p2_b2_3a_server_pivot.json`
+
+Preflight:
+- `/health`: `status=ok`, `api_version=1.9.6`.
+- `/api/v1/observability/report`: `bad_duration=0`, `path_leaks_30d=0`.
+
+Diagnostico de edge (logs):
+- `p95_uct=0.0s`
+- `p95_uht~=0.815s`
+- `p95_rt~=0.812s`
+- Interpretacao: TTFB domina; connect nginx->api nao e o gargalo.
+
+A/B keepalive OFF vs ON (p99, edge):
+- `overview`: `829.59ms -> 800.37ms` (`-3.52%`)
+- `runs`: `787.70ms -> 805.60ms` (`+2.27%`)
+- `report`: `799.69ms -> 834.41ms` (`+4.34%`)
+- Resultado: **FAIL** (criterio de ganho `>=20%` nao atingido).
+
+A/B buffering ON vs OFF:
+- Resultado: **FAIL** (ganho inconsistente e regressao em `report`).
+
+Capacidade edge (`worker_connections 4096`):
+- Resultado: **FAIL** (sem melhora consistente; regressao em parte dos cenarios).
+- Mantido `worker_connections=8192` no estado final local.
+
+Decisao P2-B2.3a:
+- **FAIL** para objetivo de aproximar `C=2` do SLO via tuning de edge.
+- Melhor equilibrio local entre testadas: `keepalive OFF + proxy_buffering OFF + worker_connections=8192` (sem ganho suficiente para promocao de envelope).
+- Endpoint limitante: `/api/v1/metrics/overview` (principal), com `/api/v1/metrics/runs` como co-limitante.
+
+Proxima etapa canonica:
+- Avancar para **P2-B2.3b** (infra/OS/backlog/limits): backlog/accept queue, `ulimit`/sockets, portas efemeras/TIME_WAIT, tuning de accept loop, e validacao final com runner separado para decisao estrutural.
+
+## P2-B2.3b - Infra/OS Path (Backlog, Sockets, Accept Loop)
+
+Escopo:
+- Ambiente Linux (preferencialmente runner separado).
+- Objetivo: validar se gargalo `C=2` esta na camada OS/socket/accept e nao no app/DB/edge tuning.
+
+Criterio de sucesso:
+- ganho `>=15-20%` em `p99` no `C=2` sem alterar logica de endpoint
+- `timeouts=0`
+- `bad_duration=0`
+- `db_pool_wait_us=0`
+
+1) Backlog efetivo (listen / accept queue)
+- Checklist:
+  - `ss -ltnp | grep 8000`
+  - verificar `Recv-Q` vs `Send-Q`
+  - verificar `net.core.somaxconn`
+  - verificar `net.ipv4.tcp_max_syn_backlog`
+- Teste:
+  - aumentar `somaxconn=4096`
+  - aumentar `tcp_max_syn_backlog=4096`
+  - reiniciar edge + api
+  - rodar `C=2` (3 reps, 60s)
+- PASS se:
+  - `p99` reduzir `>=15%`
+  - `Recv-Q` nao saturar sob carga
+
+2) File descriptors (`ulimit`)
+- Checklist:
+  - `ulimit -n`
+  - `cat /proc/<nginx_pid>/limits`
+  - `cat /proc/<uvicorn_pid>/limits`
+- Teste:
+  - ajustar para `>=65535`
+  - reexecutar `C=2`
+- PASS se:
+  - `p99` reduzir `>=15%`
+  - nenhum erro de socket
+
+3) TIME_WAIT / portas efemeras
+- Checklist:
+  - `ss -s`
+  - `net.ipv4.ip_local_port_range`
+  - `net.ipv4.tcp_tw_reuse`
+- Teste:
+  - expandir port range (ex.: `10000-65000`)
+  - habilitar `tcp_tw_reuse=1`
+  - reexecutar `C=2`
+- PASS se:
+  - `p99` reduzir `>=15%`
+  - `TIME_WAIT` nao crescer descontroladamente
+
+4) Accept loop tuning (nginx / uvicorn)
+- Edge:
+  - `multi_accept on;`
+  - `reuseport on;`
+- API:
+  - testar com:
+    - `workers=2` (baseline)
+    - `workers=2 + --loop uvloop` (se aplicavel)
+    - `workers=2 + --http httptools`
+- PASS se:
+  - `p99` reduzir `>=15%`
+  - latencia mais estavel (menor variancia)
+
+Artefatos obrigatorios:
+- `.tmp_p2/p2_b2_3b_summary.csv`
+- `.tmp_p2/p2_b2_3b_sysctl.txt`
+- `.tmp_p2/p2_b2_3b_ss.txt`
+- (se edge) logs com `rt/uct/uht`
+
+Decisao P2-B2.3b:
+- se nenhum ajuste infra produzir ganho `>=15-20%` em `C=2`:
+  - concluir que `C=2` esta acima do envelope estrutural do ambiente atual
+  - `safe_envelope_v2.0` permanece `C1`
+  - proximo passo real passa a ser:
+    - revisao deliberada de SLO, ou
+    - mudanca de arquitetura (P2-C)
+
+## P2-C - Architecture Path (caso P2-B2.3b nao atinja meta)
+
+Escopo:
+- Aplicavel somente se `P2-B2.3b` (infra/OS) nao produzir ganho `>=15-20%` em `p99` (`C=2`).
+- Objetivo: revisar arquitetura para tornar `C=2` estruturalmente viavel sem degradar governanca/observabilidade.
+
+Estado de entrada:
+- `timeouts=0`
+- `db_pool_wait_us=0`
+- edge tuning nao resolve
+- infra/OS tuning nao resolve
+- limitantes: `/api/v1/metrics/overview` (principal), `/api/v1/metrics/runs` (co)
+
+1) Opcao A - Revisao deliberada de SLO (envelope realista)
+- Acao:
+  - formalizar que `C2` excede envelope estrutural do ambiente atual
+  - ajustar SLO para:
+    - `C1` como envelope oficial
+    - `C2` como best-effort nao contratual
+- Criterio:
+  - evidencia consolidada `P2-A + P2-B2.3a + P2-B2.3b`
+- Impacto:
+  - nenhuma alteracao arquitetural
+  - mantem simplicidade operacional
+
+2) Opcao B - Materializacao/cache estrutural (read path)
+- Objetivo:
+  - reduzir TTFB no `/metrics/overview` e `/metrics/runs`
+- Possiveis intervencoes:
+  - snapshot diario materializado (job assincrono)
+  - cache Redis para overview (TTL curto)
+  - pre-agregacao de metricas (write-time, nao read-time)
+  - separar read-model (CQRS leve)
+- Criterio de sucesso:
+  - `p99 C=2 < 400ms` (ou meta definida)
+  - `db_queries` estaveis
+  - `bad_duration=0`
+
+3) Opcao C - Separacao de servico (read API isolada)
+- Acao:
+  - separar endpoints de leitura pesada em servico dedicado
+  - API principal mantem status/health/observability leve
+- Objetivo:
+  - isolar throughput read path
+  - permitir tuning dedicado (workers, cache, autoscale)
+- Criterio:
+  - `C2` passa SLO com arquitetura segmentada
+
+4) Opcao D - Ajuste de modelo de execucao
+- Intervencoes possiveis:
+  - async full-stack real (sem bloqueios sincronos residuais)
+  - `uvloop` obrigatorio
+  - HTTP server diferente (ex.: hypercorn/uvicorn config otimizada)
+  - HTTP/2 (se edge suportar)
+
+Decisao P2-C:
+- Escolher exatamente uma:
+  - revisao de SLO (operacional)
+  - cache/materializacao (arquitetura leve)
+  - servico dedicado read-path
+  - mudanca de modelo de execucao
+
+Observacao canonica:
+- Se `P2-B2.3b` falhar:
+  - concluir que gargalo e estrutural do ambiente/process model atual
+  - `safe_envelope_v2.0` permanece `C1`
+  - `C2` so passa com intervencao arquitetural deliberada
