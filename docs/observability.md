@@ -396,6 +396,8 @@ Otimizacoes v1.3.2 (sem mudanca de contrato):
 - `publish_receipts.path_leaks_30d` usa cache in-memory curto (TTL 30s) para reduzir custo recorrente.
 - `slo_daily.summary` passa a ser derivado de `slo_daily.items` em memoria (sem query adicional).
 - Em ambiente de testes (`pytest`), caches locais sao desativados para manter casos deterministas.
+- Meta medida em regime (cache aquecido): `p95_db_queries ~= 2` e `p95_db_us ~= 3-4ms` no caminho default lean.
+- Comportamento de cold-start (apos restart): o `p95_db_us` pode subir temporariamente para a faixa de `~20-25ms`.
 
 ## Metrics SLO
 
