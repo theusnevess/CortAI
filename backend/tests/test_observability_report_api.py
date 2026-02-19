@@ -110,6 +110,11 @@ async def test_report_happy_path_shape(client, db_session, seed_observation):
     assert payload["slo_alerts"]["items"] == []
     assert payload["publish_receipts"]["errors_7d"] == []
     assert payload["publish_receipts"]["latest_7d"] == []
+    assert payload["slo_daily"]["summary"]
+    summary_row = next(
+        item for item in payload["slo_daily"]["summary"] if item["endpoint"] == "/api/v1/metrics/runs"
+    )
+    assert summary_row["total_requests"] == 10
 
 
 @pytest.mark.anyio
