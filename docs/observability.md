@@ -613,3 +613,61 @@ Justificativa:
 
 Endpoint limitante:
 - `/api/v1/metrics/overview`
+
+## Stable Baseline Declaration - v1.9.x
+
+A linha `v1.9.x` e considerada baseline estavel, auditavel e governada, com:
+- Governanca de versao consistente (`/health` refletindo a versao operacional da release).
+- Observabilidade completa em runtime (`timing`, `queue_us`, `db_us`, `server_total_us`).
+- Endpoint `/api/v1/observability/report` em modo lean por default.
+- Envelope oficial documentado e validado em Linux nativo.
+- Sanitizacao validada (`path_leaks_30d = 0`).
+- Sanidade de timing validada (`bad_duration = 0`).
+- Telemetria append-only preservada.
+
+A partir desta baseline:
+- Mudancas estruturais devem abrir linha evolutiva explicita (ex.: v2.0).
+- Ajustes de SLO/envelope devem ser deliberados, medidos e documentados.
+- Evolucoes de performance devem manter rastreabilidade por evidencias runtime + pivot DB.
+
+## Matriz P1 (workers x DB pool) - resultado e decisao (Linux nativo)
+
+Objetivo:
+- Validar se ajuste de process model (`API_WORKERS`) e DB pool (`DB_POOL_SIZE`) e suficiente para elevar o `safe_envelope v2.0` para `C=2` (mix 60/25/15), sem alterar logica dos endpoints.
+
+Execucao:
+- Artefato: `.tmp_matrix_p1/matrix_p1_summary.csv`
+- Ambiente: Linux nativo
+- Mix: `60/25/15`, duracao `60s` por degrau, timeout `10s`
+- Concurrency avaliada: `C=2`
+- Endpoints: `/api/v1/metrics/overview`, `/api/v1/metrics/runs`, `/api/v1/observability/report`
+
+Checklist operacional P1 (PASS/FAIL):
+- PASS: `timeouts=0` em todos os combos.
+- PASS: `db_pool_wait_us=0` em todos os combos (sem contention de pool).
+- FAIL: `safe_envelope_v2.0 = C2` nao atingido (latencia acima do SLO).
+- PASS: endpoint limitante identificado de forma consistente: `/api/v1/metrics/overview`.
+
+Winner P1 (melhor equilibrio geral):
+- Config vencedora: `API_WORKERS=2`, `DB_POOL_SIZE=10`.
+- Motivo: melhor equilibrio de `p90/p99` entre `overview/runs/report`, mantendo DB estavel e sem timeouts.
+
+Resultados (C=2, winner):
+- `/api/v1/metrics/overview`: `p90 587.3ms`, `p99 640.73ms`
+- `/api/v1/metrics/runs`: `p90 600.26ms`, `p99 668.0ms`
+- `/api/v1/observability/report`: `p90 572.5ms`, `p99 635.95ms`
+
+Telemetria (p95):
+- `queue_us` (`overview/runs`): `~1289us / ~1268us`
+- `db_us` (`overview/runs/report`): `~8096us / ~6784us / ~6739us`
+- `db_queries`: `2` (`overview/runs`), `3` (`report`)
+
+Decisao P1:
+- Conclusao: P1 confirma que `workers/pool` nao sao o gargalo dominante para viabilizar `C=2` com os SLOs atuais.
+- `queue_us` baixo (ordem de `~1-2ms p95`) e `db_pool_wait_us=0` indicam ausencia de contencao de pool/fila interna.
+- Mesmo assim, a latencia cliente (`p90/p99`) permanece alta e viola SLO em todos os combos.
+- Endpoint limitante principal: `/api/v1/metrics/overview`, com `/metrics/runs` tambem acima do SLO no mesmo patamar.
+
+Proximo passo canonico (P2):
+- Seguir para P2 (throughput/process model/infra path) sem mexer em logica de endpoint.
+- Alternativamente, revisao deliberada dos SLOs alvo para `C=2` (decisao de produto/operacao).
