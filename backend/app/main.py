@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.endpoints import videos, metrics, observability, status
 from app.cognitive_core import run_cognitive_cycle
+from app.version import get_app_version
 from app.worker import execute_action
 
 # --- Inicialização da Aplicação ---
@@ -19,7 +20,7 @@ app = FastAPI(
     redoc_url="/redoc" # URL da documentação alternativa (ReDoc)
 )
 
-APP_VERSION = os.getenv("APP_VERSION", "1.9.3")
+APP_VERSION = get_app_version()
 GIT_TAG = os.getenv("GIT_TAG")
 GIT_COMMIT = os.getenv("GIT_COMMIT")
 

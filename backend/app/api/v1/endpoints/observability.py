@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.metrics import CES_DEFAULT_VERSION, _emit_metrics_endpoint_timing
 from app.db.session import get_db
+from app.version import get_app_version
 
 router = APIRouter()
 
@@ -281,7 +282,7 @@ async def get_observability_report(
         )
 
         generated_at_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-        api_version = os.getenv("APP_VERSION", "1.8.2")
+        api_version = get_app_version()
         git_tag = os.getenv("GIT_TAG")
         git_commit = os.getenv("GIT_COMMIT")
 
