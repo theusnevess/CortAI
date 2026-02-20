@@ -31,10 +31,10 @@ for ep in "${ENDPOINTS[@]}"; do
       raw="$OUTDIR/wrk_${name}_c${c}_r${rep}.txt"
       wrk -t"$THREADS" -c"$c" -d"$DURATION" --timeout "$TIMEOUT" --latency "${BASE_URL}${ep}" > "$raw" 2>&1 || true
 
-      p90="$(grep -E '^\s*90(\.000)?%' "$raw" | awk '{print $2}' | tail -n1)"
-      p99="$(grep -E '^\s*99(\.000)?%' "$raw" | awk '{print $2}' | tail -n1)"
-      rps="$(grep -E 'Requests/sec:' "$raw" | awk '{print $2}' | tail -n1)"
-      timeouts="$(grep -Eo 'timeout [0-9]+' "$raw" | awk '{sum+=$2} END {print sum+0}')"
+      p90="$(grep -E '^\s*90(\.000)?%' "$raw" | awk '{print $2}' | tail -n1 || true)"
+      p99="$(grep -E '^\s*99(\.000)?%' "$raw" | awk '{print $2}' | tail -n1 || true)"
+      rps="$(grep -E 'Requests/sec:' "$raw" | awk '{print $2}' | tail -n1 || true)"
+      timeouts="$(grep -Eo 'timeout [0-9]+' "$raw" | awk '{sum+=$2} END {print sum+0}' || true)"
 
       echo "${name},${c},${rep},${p90:-NA},${p99:-NA},${rps:-0},${timeouts:-0}" >> "$SUMMARY"
     done
