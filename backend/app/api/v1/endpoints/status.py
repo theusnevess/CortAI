@@ -1,10 +1,13 @@
 from datetime import datetime
+from time import perf_counter_ns
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.metrics import _emit_metrics_endpoint_timing
+from app.db.session import engine
 from app.db.session import get_db
 from app.slo_contract import (
     SLO_ENDPOINT_THRESHOLDS,
@@ -15,6 +18,108 @@ from app.slo_contract import (
 router = APIRouter()
 
 
+def _new_db_stats() -> dict[str, int]:
+    """
+    Inicializa acumuladores de custo de banco por request.
+    """
+    return {"db_us": 0, "db_queries": 0, "db_pool_wait_us": 0}
+
+
+async def _execute_with_db_stats(
+    db: AsyncSession,
+    statement,
+    db_stats: dict[str, int],
+    params: dict | None = None,
+):
+    """
+    Executa query contabilizando tempo e volume de chamadas ao banco.
+    """
+    started_ns = perf_counter_ns()
+    if params is None:
+        result = await db.execute(statement)
+    else:
+        result = await db.execute(statement, params)
+    elapsed_us = max(0, (perf_counter_ns() - started_ns) // 1000)
+    db_stats["db_us"] = int(db_stats.get("db_us", 0)) + int(elapsed_us)
+    db_stats["db_queries"] = int(db_stats.get("db_queries", 0)) + 1
+    return result
+
+
+def _read_capacity_config() -> dict:
+    """
+    Retorna configuracao efetiva de capacidade para auditoria operacional.
+    """
+    pool = engine.sync_engine.pool
+    # Usa metodos do pool quando disponiveis; fallback para envs conhecidos.
+    def _pool_int(method_name: str, env_name: str, default: int) -> int:
+        method = getattr(pool, method_name, None)
+        if callable(method):
+            try:
+                return int(method())
+            except Exception:
+                pass
+        raw = os.getenv(env_name)
+        try:
+            return int(raw) if raw is not None else default
+        except Exception:
+            return default
+
+    def _pool_float(method_name: str, env_name: str, default: float) -> float:
+        method = getattr(pool, method_name, None)
+        if callable(method):
+            try:
+                return float(method())
+            except Exception:
+                pass
+        raw = os.getenv(env_name)
+        try:
+            return float(raw) if raw is not None else default
+        except Exception:
+            return default
+
+    def _effective_api_workers(default: int = 1) -> int:
+        """
+        Prioriza workers efetivos do processo (cmdline) e cai para env vars.
+        """
+        try:
+            with open("/proc/1/cmdline", "rb") as fh:
+                parts = [p.decode("utf-8", errors="ignore") for p in fh.read().split(b"\x00") if p]
+            for idx, part in enumerate(parts):
+                if part == "--workers" and idx + 1 < len(parts):
+                    return int(parts[idx + 1])
+        except Exception:
+            pass
+        raw = os.getenv("API_WORKERS") or os.getenv("WEB_CONCURRENCY")
+        try:
+            return int(raw) if raw is not None else default
+        except Exception:
+            return default
+
+    def _pool_max_overflow(default: int = 10) -> int:
+        """
+        Expondo max_overflow configurado (nao overflow atual, que pode ser negativo).
+        """
+        raw_attr = getattr(pool, "_max_overflow", None)
+        try:
+            if raw_attr is not None:
+                return int(raw_attr)
+        except Exception:
+            pass
+        raw_env = os.getenv("DB_MAX_OVERFLOW")
+        try:
+            return int(raw_env) if raw_env is not None else default
+        except Exception:
+            return default
+
+    return {
+        "db_pool_size": _pool_int("size", "DB_POOL_SIZE", 5),
+        "db_max_overflow": _pool_max_overflow(10),
+        "db_pool_timeout": _pool_float("timeout", "DB_POOL_TIMEOUT", 30.0),
+        "db_checked_out": _pool_int("checkedout", "DB_CHECKEDOUT", 0),
+        "api_workers": _effective_api_workers(1),
+    }
+
+
 @router.get("/status")
 async def get_status(
     window_days: int = Query(SLO_STATUS_WINDOW_DAYS_DEFAULT, ge=1),
@@ -23,6 +128,7 @@ async def get_status(
     started_at = datetime.utcnow()
     status_code = 500
     query_fingerprint = f"window_days={window_days}"
+    db_stats = _new_db_stats()
     try:
         if window_days > SLO_STATUS_WINDOW_DAYS_MAX:
             raise HTTPException(
@@ -36,7 +142,8 @@ async def get_status(
 
         # Reaproveita agregado diario para evitar query pesada no endpoint executivo.
         rows = (
-            await db.execute(
+            await _execute_with_db_stats(
+                db,
                 text(
                     """
                     SELECT
@@ -54,6 +161,7 @@ async def get_status(
                     GROUP BY endpoint
                     """
                 ),
+                db_stats,
                 {"window_days": window_days},
             )
         ).mappings().all()
@@ -170,7 +278,34 @@ async def get_status(
                 "status": "INFO",
                 "reason": "not_evaluated_in_status_v1",
             },
+            # Config efetiva para correlacionar contensao C2 sem inspecao manual.
+            "capacity_config": _read_capacity_config(),
+            "read_path": {
+                "overview_freshness_seconds": None,
+            },
         }
+        # Exibe freshness do read model para auditoria do caminho materializado.
+        try:
+            fresh_stmt = (
+                text(
+                    """
+                    SELECT EXTRACT(EPOCH FROM (NOW() - MAX(refreshed_at)))::int AS freshness_seconds
+                    FROM metrics_overview_read_model
+                    """
+                )
+            )
+            freshness = (
+                await _execute_with_db_stats(
+                    db,
+                    fresh_stmt,
+                    db_stats,
+                )
+            ).scalar()
+            if freshness is not None:
+                response["read_path"]["overview_freshness_seconds"] = max(0, int(freshness))
+        except Exception:
+            # Em ambientes sem migration aplicada, mantem campo nulo.
+            response["read_path"]["overview_freshness_seconds"] = None
         status_code = 200
         return response
     except HTTPException as e:
@@ -184,4 +319,7 @@ async def get_status(
             status_code=status_code,
             duration_ms=duration_ms,
             query_fingerprint=query_fingerprint,
+            db_us=db_stats["db_us"],
+            db_queries=db_stats["db_queries"],
+            db_pool_wait_us=db_stats["db_pool_wait_us"],
         )

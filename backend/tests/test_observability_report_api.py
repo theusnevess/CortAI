@@ -15,12 +15,24 @@ async def _ensure_tables(db_session) -> None:
 
 
 async def _seed_minimum_pass_data(db_session, seed_observation) -> None:
+    """
+    Semeia o minimo para report PASS em ambiente com historico existente.
+
+    O endpoint usa janelas de dias; por isso limpamos a janela recente para
+    evitar contaminacao por dados antigos do banco compartilhado de testes.
+    """
     now = datetime.utcnow()
     metric_day = date.today()
     await _ensure_tables(db_session)
+    # Limpa janela operacional usada pelo report para evitar drift de fixtures.
+    window_start = metric_day - timedelta(days=30)
     await db_session.execute(delete(ObservationRecord).where(ObservationRecord.process_id.like("P_OBS_REPORT_%")))
-    await db_session.execute(delete(MetricsEndpointDaily).where(MetricsEndpointDaily.metric_date == metric_day))
-    await db_session.execute(delete(PublishReceipt).where(PublishReceipt.process_id.like("P_OBS_REPORT_%")))
+    await db_session.execute(
+        delete(MetricsEndpointDaily).where(MetricsEndpointDaily.metric_date >= window_start)
+    )
+    await db_session.execute(
+        delete(PublishReceipt).where(PublishReceipt.created_at >= datetime.combine(window_start, datetime.min.time()))
+    )
     await db_session.flush()
 
     await seed_observation(

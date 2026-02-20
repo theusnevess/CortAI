@@ -183,6 +183,33 @@ class MetricsEndpointDaily(Base):
     )
 
 
+class MetricsOverviewReadModel(Base):
+    __tablename__ = "metrics_overview_read_model"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=False)
+    include_reasons = Column(Boolean, nullable=False, default=False)
+    include_baseline = Column(Boolean, nullable=False, default=False)
+    payload = Column(JSONB, nullable=False, default=dict)
+    refreshed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_overview_read_model_start_date", "start_date"),
+        Index("ix_overview_read_model_end_date", "end_date"),
+        Index(
+            "ux_overview_read_model_key",
+            "start_date",
+            "end_date",
+            "include_reasons",
+            "include_baseline",
+            unique=True,
+        ),
+    )
+
+
 # --- Tabela de Recibos de Publicacao ---
 class PublishReceipt(Base):
     __tablename__ = "publish_receipts"
