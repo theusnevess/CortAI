@@ -1013,3 +1013,22 @@ Invariantes preservados:
 - contrato publico de `/api/v1/metrics/overview` mantido
 - sem alteracao de shape em `/health` e `/observability/report`
 - hard checks operacionais seguem validos (`timeouts=0`, `bad_duration=0`, `path_leaks_30d=0`)
+
+### P2-C.2.1 (execucao minima) - runs read-path
+
+Implementado no read-path de `GET /api/v1/metrics/runs`:
+- tabela `metrics_runs_read_model` para snapshot por chave (`start_date/end_date/limit/offset`)
+- leitura preferencial via read model no modo default
+- `force_live=true` para refresh explicito do snapshot
+- telemetria `runs_source` em `metrics_endpoint_timing` (`live|read_model|cache`)
+- `GET /api/v1/status` expoe:
+  - `read_path.runs_freshness_seconds`
+  - `read_path.runs_key_count`
+
+Guardrail de `force_live=true` em runs:
+- cooldown deterministico com HTTP `429`
+- payload `detail`:
+  - `error_type="RateLimited"`
+  - `retry_after_seconds`
+  - `cooldown_seconds`
+  - `scope="runs_force_live"`
