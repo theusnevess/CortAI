@@ -66,3 +66,28 @@ Interpretacao:
 Decisao:
 - `safe_envelope_v2.0` permanece `C1`.
 - P2-C2.1 foi eficaz para isolamento de leitura e custo DB de runs, mas nao alterou o limite estrutural de envelope.
+
+## P2-C2.2 (async snapshot-first) - validacao funcional
+
+Objetivo:
+- remover agregacao live do request path de `overview` e `runs`, migrando `force_live` para enqueue assíncrono.
+
+Implementado:
+- `force_live=true` retorna `202 Accepted` (sem calcular no request).
+- fila idempotente `metrics_read_refresh_jobs` (TTL + `job_key` unico).
+- runner de refresh: `python scripts/run_read_refresh_jobs.py --limit 100`.
+- request normal le somente snapshot; sem snapshot retorna `503 SnapshotMissing`.
+- `status` expoe snapshot status/freshness e jobs enfileirados.
+
+Validacao:
+- `python -m pytest -q` -> `62 passed`.
+- `tests/test_metrics_api.py` e `tests/test_status_api.py` cobrem:
+  - `202 Accepted` com payload deterministico;
+  - dedupe de enqueue por `job_key`;
+  - `503 SnapshotMissing` sem snapshot;
+  - leitura `200` apos processamento do runner;
+  - telemetria com `snapshot_status`, `job_enqueued`, `job_key_hash`.
+
+Decisao:
+- C2.2 conclui a mudanca arquitetural de request path (snapshot-first).
+- `safe_envelope_v2.0` permanece `C1` ate rodada estrutural P2-B1 com runner externo.

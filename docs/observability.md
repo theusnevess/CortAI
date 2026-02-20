@@ -979,56 +979,63 @@ Para fechar PR de P2-C:
 Gate estrutural (fora do DoD do PR, obrigatorio para promover envelope):
 - Rodar P2-B1 com runner externo e atualizar decisao estrutural
 
-### P2-C.1 (execucao minima C1) - status
+### P2-C2.2 (async snapshot-first)
 
-Implementado no read-path de `/api/v1/metrics/overview`:
-- tabela `metrics_overview_read_model` para snapshot por chave de consulta (`start_date/end_date/include_*`)
-- leitura preferencial via read model (com `force_live=true` para refresh explicito)
-- persistencia do snapshot com `refreshed_at` para auditoria de freshness
-- emissao de `overview_source` em `metrics_endpoint_timing` (`live|read_model|cache`)
-- exposicao de `read_path.overview_freshness_seconds` em `/api/v1/status`
-- guardrail anti-abuso para `force_live=true` (cooldown deterministico de 10s por escopo)
+Objetivo:
+- remover agregacao live do request path de `/api/v1/metrics/overview` e `/api/v1/metrics/runs`.
 
-Contrato do guardrail (`force_live=true`):
-- quando em cooldown, retorna HTTP `429`
-- payload `detail`:
-  - `error_type="RateLimited"`
-  - `retry_after_seconds`
-  - `cooldown_seconds`
-  - `scope="overview_force_live"`
+Contrato C2.2:
+- `force_live=true` nao calcula no request.
+- `force_live=true` retorna HTTP `202 Accepted` e enfileira refresh idempotente.
+- request normal (sem `force_live`) le somente snapshot do read model.
+- sem snapshot, retorna HTTP `503` com erro deterministico `SnapshotMissing`.
 
-Exemplo de erro:
+Fila de refresh:
+- tabela `metrics_read_refresh_jobs` com `job_key` unico por (`endpoint`, `query_key`).
+- enqueue com `INSERT ... ON CONFLICT DO NOTHING` e TTL (`expires_at`).
+- `job_key = sha256(endpoint + query_key_canonica)`.
+- runner minimo: `python scripts/run_read_refresh_jobs.py --limit 100`.
+
+Payload esperado para `force_live=true`:
+```json
+{
+  "error_type": "Accepted",
+  "scope": "overview_force_live",
+  "job_key": "<sha256>",
+  "job_enqueued": true,
+  "retry_after_seconds": 5
+}
+```
+
+Erro deterministico sem snapshot:
 ```json
 {
   "detail": {
-    "error_type": "RateLimited",
-    "retry_after_seconds": 7,
-    "cooldown_seconds": 10,
-    "scope": "overview_force_live"
+    "error_type": "SnapshotMissing",
+    "scope": "overview_snapshot",
+    "retry_after_seconds": 5
   }
 }
 ```
 
-Invariantes preservados:
-- contrato publico de `/api/v1/metrics/overview` mantido
-- sem alteracao de shape em `/health` e `/observability/report`
-- hard checks operacionais seguem validos (`timeouts=0`, `bad_duration=0`, `path_leaks_30d=0`)
-
-### P2-C.2.1 (execucao minima) - runs read-path
-
-Implementado no read-path de `GET /api/v1/metrics/runs`:
-- tabela `metrics_runs_read_model` para snapshot por chave (`start_date/end_date/limit/offset`)
-- leitura preferencial via read model no modo default
-- `force_live=true` para refresh explicito do snapshot
-- telemetria `runs_source` em `metrics_endpoint_timing` (`live|read_model|cache`)
+Status/read-path:
 - `GET /api/v1/status` expoe:
+  - `read_path.overview_snapshot_status`
+  - `read_path.overview_last_refreshed_at`
+  - `read_path.overview_freshness_seconds`
+  - `read_path.runs_snapshot_status`
+  - `read_path.runs_last_refreshed_at`
   - `read_path.runs_freshness_seconds`
   - `read_path.runs_key_count`
+  - `read_path.jobs_queued_count`
 
-Guardrail de `force_live=true` em runs:
-- cooldown deterministico com HTTP `429`
-- payload `detail`:
-  - `error_type="RateLimited"`
-  - `retry_after_seconds`
-  - `cooldown_seconds`
-  - `scope="runs_force_live"`
+Telemetria:
+- `metrics_endpoint_timing` mantem `db_us`, `db_queries`, `db_pool_wait_us`, `queue_us`, `server_total_us`.
+- adiciona `snapshot_status`.
+- para `202`, adiciona `job_enqueued` e `job_key_hash`.
+- `overview_source` e `runs_source` continuam para auditoria do read-path.
+
+Invariantes preservados:
+- `bad_duration=0`
+- `path_leaks_30d=0`
+- `db_pool_wait_us=0` no steady-state observado
