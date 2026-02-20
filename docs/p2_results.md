@@ -91,3 +91,17 @@ Validacao:
 Decisao:
 - C2.2 conclui a mudanca arquitetural de request path (snapshot-first).
 - `safe_envelope_v2.0` permanece `C1` ate rodada estrutural P2-B1 com runner externo.
+
+## P2-C2.3 (read-path split) - kickoff
+
+Objetivo:
+- isolar read-path em processo dedicado para reduzir contencao de throughput sob C=2.
+
+Escopo:
+- novo servico `read_api` com `metrics + observability/report + status`.
+- edge roteia endpoints de leitura para `read_api`.
+- API principal permanece como origem das rotas nao-read.
+
+Gate de validacao:
+- benchmark C=2 (3x60s) comparando p99 com baseline C2.2.
+- criterio de impacto: queda >=20% em p99 (`overview` e `runs`) com `timeouts=0`.

@@ -1039,3 +1039,27 @@ Invariantes preservados:
 - `bad_duration=0`
 - `path_leaks_30d=0`
 - `db_pool_wait_us=0` no steady-state observado
+
+### P2-C2.3 (split leve do read-path)
+
+Objetivo:
+- isolar throughput de leitura em processo dedicado (`read_api`) sem alterar logica de endpoint.
+
+Wiring:
+- novo app: `app.read_main:app` com routers read-only:
+  - `/api/v1/metrics/*`
+  - `/api/v1/observability/report`
+  - `/api/v1/status`
+  - `/health`
+- novo servico compose: `read_api` (porta host `8002`).
+- edge roteia:
+  - `/api/v1/metrics/*` -> `cortai_read_api`
+  - `/api/v1/observability/report` -> `cortai_read_api`
+  - `/api/v1/status` e `/health` -> `cortai_read_api`
+  - restante -> `cortai_api`
+
+Status operacional:
+- `/api/v1/status` inclui bloco `read_api`:
+  - `enabled`
+  - `up`
+  - `base_url`
