@@ -1007,6 +1007,11 @@ Payload esperado para `force_live=true`:
 }
 ```
 
+Headers canonicos de envelope/degradacao:
+- `X-Envelope: C1`
+- `X-Reason: throughput_path` (quando degradado)
+- `Retry-After: <segundos>` para respostas `202 Accepted` e `503 SnapshotMissing`
+
 Erro deterministico sem snapshot:
 ```json
 {
