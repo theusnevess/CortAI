@@ -237,6 +237,23 @@ class MetricsRunsReadModel(Base):
     )
 
 
+class MetricsReadRefreshJob(Base):
+    __tablename__ = "metrics_read_refresh_jobs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_key = Column(String, nullable=False, unique=True, index=True)
+    endpoint = Column(String, nullable=False, index=True)
+    query_key = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="queued", index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    last_error = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_metrics_read_refresh_jobs_status_expires_at", "status", "expires_at"),
+    )
+
+
 # --- Tabela de Recibos de Publicacao ---
 class PublishReceipt(Base):
     __tablename__ = "publish_receipts"

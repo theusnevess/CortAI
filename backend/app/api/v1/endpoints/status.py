@@ -282,8 +282,13 @@ async def get_status(
             "capacity_config": _read_capacity_config(),
             "read_path": {
                 "overview_freshness_seconds": None,
+                "overview_snapshot_status": "missing",
+                "overview_last_refreshed_at": None,
                 "runs_freshness_seconds": None,
+                "runs_snapshot_status": "missing",
+                "runs_last_refreshed_at": None,
                 "runs_key_count": 0,
+                "jobs_queued_count": 0,
             },
         }
         # Exibe freshness do read model para auditoria do caminho materializado.
@@ -291,28 +296,41 @@ async def get_status(
             fresh_stmt = (
                 text(
                     """
-                    SELECT EXTRACT(EPOCH FROM (NOW() - MAX(refreshed_at)))::int AS freshness_seconds
+                    SELECT
+                      EXTRACT(EPOCH FROM (NOW() - MAX(refreshed_at)))::int AS freshness_seconds,
+                      MAX(refreshed_at) AS last_refreshed_at
                     FROM metrics_overview_read_model
                     """
                 )
             )
-            freshness = (
+            row = (
                 await _execute_with_db_stats(
                     db,
                     fresh_stmt,
                     db_stats,
                 )
-            ).scalar()
-            if freshness is not None:
-                response["read_path"]["overview_freshness_seconds"] = max(0, int(freshness))
+            ).mappings().first()
+            if row is not None:
+                freshness = row.get("freshness_seconds")
+                last_refreshed_at = row.get("last_refreshed_at")
+                if freshness is not None:
+                    response["read_path"]["overview_freshness_seconds"] = max(0, int(freshness))
+                if last_refreshed_at is not None:
+                    response["read_path"]["overview_last_refreshed_at"] = last_refreshed_at.isoformat()
+                    response["read_path"]["overview_snapshot_status"] = (
+                        "fresh" if int(freshness or 0) <= 60 else "stale"
+                    )
         except Exception:
             # Em ambientes sem migration aplicada, mantem campo nulo.
             response["read_path"]["overview_freshness_seconds"] = None
+            response["read_path"]["overview_snapshot_status"] = "missing"
+            response["read_path"]["overview_last_refreshed_at"] = None
         try:
             runs_stmt = text(
                 """
                 SELECT
                   EXTRACT(EPOCH FROM (NOW() - MAX(refreshed_at)))::int AS freshness_seconds,
+                  MAX(refreshed_at) AS last_refreshed_at,
                   COUNT(*)::int AS key_count
                 FROM metrics_runs_read_model
                 """
@@ -326,15 +344,42 @@ async def get_status(
             ).mappings().first()
             if row is not None:
                 freshness = row.get("freshness_seconds")
+                last_refreshed_at = row.get("last_refreshed_at")
                 key_count = row.get("key_count")
                 if freshness is not None:
                     response["read_path"]["runs_freshness_seconds"] = max(0, int(freshness))
+                if last_refreshed_at is not None:
+                    response["read_path"]["runs_last_refreshed_at"] = last_refreshed_at.isoformat()
+                    response["read_path"]["runs_snapshot_status"] = (
+                        "fresh" if int(freshness or 0) <= 60 else "stale"
+                    )
                 if key_count is not None:
                     response["read_path"]["runs_key_count"] = max(0, int(key_count))
         except Exception:
             # Em ambientes sem migration aplicada, mantem campos default.
             response["read_path"]["runs_freshness_seconds"] = None
+            response["read_path"]["runs_snapshot_status"] = "missing"
+            response["read_path"]["runs_last_refreshed_at"] = None
             response["read_path"]["runs_key_count"] = 0
+        try:
+            jobs_stmt = text(
+                """
+                SELECT COUNT(*)::int AS queued_count
+                FROM metrics_read_refresh_jobs
+                WHERE status = 'queued' AND expires_at > NOW()
+                """
+            )
+            queued_count = (
+                await _execute_with_db_stats(
+                    db,
+                    jobs_stmt,
+                    db_stats,
+                )
+            ).scalar()
+            if queued_count is not None:
+                response["read_path"]["jobs_queued_count"] = max(0, int(queued_count))
+        except Exception:
+            response["read_path"]["jobs_queued_count"] = 0
         status_code = 200
         return response
     except HTTPException as e:
