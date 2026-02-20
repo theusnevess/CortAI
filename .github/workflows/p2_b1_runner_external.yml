@@ -59,6 +59,7 @@ jobs:
             echo "::error::scripts/run_p2_matrix.sh nao encontrado no repo."
             exit 1
           fi
+          sed -i 's/\r$//' scripts/run_p2_matrix.sh
           chmod +x scripts/run_p2_matrix.sh
 
       - name: Run direct benchmark
@@ -69,7 +70,7 @@ jobs:
           after_list="$(mktemp)"
           find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$before_list"
 
-          ./scripts/run_p2_matrix.sh "http://${{ inputs.sut_host }}:${{ inputs.direct_port }}"
+          bash ./scripts/run_p2_matrix.sh "http://${{ inputs.sut_host }}:${{ inputs.direct_port }}"
 
           find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$after_list"
           new_csv="$(comm -13 "$before_list" "$after_list" | head -n 1 || true)"
@@ -101,7 +102,7 @@ jobs:
           after_list="$(mktemp)"
           find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$before_list"
 
-          ./scripts/run_p2_matrix.sh "http://${{ inputs.sut_host }}:${{ inputs.edge_port }}"
+          bash ./scripts/run_p2_matrix.sh "http://${{ inputs.sut_host }}:${{ inputs.edge_port }}"
 
           find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$after_list"
           new_csv="$(comm -13 "$before_list" "$after_list" | grep -v 'p2_a_summary_direct.csv' | head -n 1 || true)"
