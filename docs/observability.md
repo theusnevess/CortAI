@@ -978,3 +978,17 @@ Para fechar PR de P2-C:
 
 Gate estrutural (fora do DoD do PR, obrigatorio para promover envelope):
 - Rodar P2-B1 com runner externo e atualizar decisao estrutural
+
+### P2-C.1 (execucao minima C1) - status
+
+Implementado no read-path de `/api/v1/metrics/overview`:
+- tabela `metrics_overview_read_model` para snapshot por chave de consulta (`start_date/end_date/include_*`)
+- leitura preferencial via read model (com `force_live=true` para refresh explicito)
+- persistencia do snapshot com `refreshed_at` para auditoria de freshness
+- emissao de `overview_source` em `metrics_endpoint_timing` (`live|read_model|cache`)
+- exposicao de `read_path.overview_freshness_seconds` em `/api/v1/status`
+
+Invariantes preservados:
+- contrato publico de `/api/v1/metrics/overview` mantido
+- sem alteracao de shape em `/health` e `/observability/report`
+- hard checks operacionais seguem validos (`timeouts=0`, `bad_duration=0`, `path_leaks_30d=0`)
