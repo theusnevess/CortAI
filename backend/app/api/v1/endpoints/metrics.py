@@ -102,6 +102,8 @@ METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS = 5
 METRICS_READ_REFRESH_STATUS_QUEUED = "queued"
 METRICS_READ_REFRESH_STATUS_DONE = "done"
 METRICS_READ_REFRESH_STATUS_FAILED = "failed"
+SAFE_ENVELOPE_LEVEL = "C1"
+ENVELOPE_REASON_THROUGHPUT_PATH = "throughput_path"
 _metrics_overview_cache: dict[str, tuple[float, str]] = {}
 _metrics_overview_cache_lock = Lock()
 _metrics_overview_force_live_limiter: dict[str, float] = {}
@@ -229,6 +231,18 @@ def _clear_force_live_limiter() -> None:
     """
     with _metrics_overview_force_live_limiter_lock:
         _metrics_overview_force_live_limiter.clear()
+
+
+def _build_envelope_headers(*, degraded: bool, retry_after_seconds: int | None = None) -> dict[str, str]:
+    """
+    Gera headers canonicos para sinalizar envelope operacional e degradacao.
+    """
+    headers: dict[str, str] = {"X-Envelope": SAFE_ENVELOPE_LEVEL}
+    if degraded:
+        headers["X-Reason"] = ENVELOPE_REASON_THROUGHPUT_PATH
+    if retry_after_seconds is not None:
+        headers["Retry-After"] = str(max(1, int(retry_after_seconds)))
+    return headers
 
 
 def _new_db_stats() -> dict[str, int]:
@@ -1822,8 +1836,10 @@ async def get_metrics_overview(
                     "scope": "overview_force_live",
                     "job_key": job_key,
                     "job_enqueued": job_enqueued,
+                    "snapshot_status": "queued",
                     "retry_after_seconds": retry_after,
                 },
+                headers=_build_envelope_headers(degraded=True, retry_after_seconds=retry_after),
             )
 
         cache_hit_flag = False
@@ -1851,8 +1867,12 @@ async def get_metrics_overview(
                 detail={
                     "error_type": "SnapshotMissing",
                     "scope": "overview_snapshot",
+                    "snapshot_status": "missing",
                     "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
                 },
+                headers=_build_envelope_headers(
+                    degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
+                ),
             )
 
         overview_source = "read_model"
@@ -1869,7 +1889,12 @@ async def get_metrics_overview(
         status_code = 200
         payload_json = json.dumps(response_payload, separators=(",", ":"), ensure_ascii=False)
         _set_overview_cache(cache_key, payload_json)
-        return Response(content=payload_json, media_type="application/json", status_code=200)
+        return Response(
+            content=payload_json,
+            media_type="application/json",
+            status_code=200,
+            headers=_build_envelope_headers(degraded=(snapshot_status != "fresh")),
+        )
     except HTTPException as exc:
         status_code = exc.status_code
         raise
@@ -2055,8 +2080,10 @@ async def get_runs(
                     "scope": "runs_force_live",
                     "job_key": job_key,
                     "job_enqueued": job_enqueued,
+                    "snapshot_status": "queued",
                     "retry_after_seconds": retry_after,
                 },
+                headers=_build_envelope_headers(degraded=True, retry_after_seconds=retry_after),
             )
 
         read_payload, refreshed_at = await _get_runs_read_model_payload(
@@ -2074,8 +2101,12 @@ async def get_runs(
                 detail={
                     "error_type": "SnapshotMissing",
                     "scope": "runs_snapshot",
+                    "snapshot_status": "missing",
                     "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
                 },
+                headers=_build_envelope_headers(
+                    degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
+                ),
             )
 
         runs_source = "read_model"
@@ -2088,7 +2119,11 @@ async def get_runs(
         payload["last_refreshed_at"] = refreshed_at.isoformat() if refreshed_at else None
         payload["freshness_seconds"] = age_seconds
         status_code = 200
-        return payload
+        return JSONResponse(
+            status_code=200,
+            content=payload,
+            headers=_build_envelope_headers(degraded=(snapshot_status != "fresh")),
+        )
     except HTTPException as exc:
         status_code = exc.status_code
         raise
