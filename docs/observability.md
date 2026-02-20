@@ -1012,6 +1012,16 @@ Headers canonicos de envelope/degradacao:
 - `X-Reason: throughput_path` (quando degradado)
 - `Retry-After: <segundos>` para respostas `202 Accepted` e `503 SnapshotMissing`
 
+Cache de edge (P2-D2, SLO-aware delivery):
+- aplicado apenas em `GET /api/v1/metrics/overview` e `GET /api/v1/metrics/runs`
+- bypass canonico: `force_live=true` (`proxy_cache_bypass`/`proxy_no_cache`)
+- TTLs no edge:
+  - `200`: `10s`
+  - `503 SnapshotMissing`: `1s` (amortecer thundering herd)
+  - `202` e `429`: `0s` (nao cachear)
+- stale policy: `stale-while-revalidate` com `proxy_cache_background_update on`
+- header diagnostico no edge: `X-Edge-Cache: HIT|MISS|BYPASS|EXPIRED`
+
 Erro deterministico sem snapshot:
 ```json
 {
