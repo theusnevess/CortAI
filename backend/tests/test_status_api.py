@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 import uuid
 
@@ -20,6 +20,15 @@ async def _clear_metric_day(db_session, metric_day: date) -> None:
     await db_session.flush()
 
 
+async def _clear_metric_window(db_session, window_days: int) -> None:
+    """
+    Limpa janela recente para manter os testes deterministas mesmo com historico.
+    """
+    window_start = date.today() - timedelta(days=window_days)
+    await db_session.execute(delete(MetricsEndpointDaily).where(MetricsEndpointDaily.metric_date >= window_start))
+    await db_session.flush()
+
+
 @pytest.mark.anyio
 async def test_status_guardrail_window_days(client):
     response = await client.get("/api/v1/status", params={"window_days": 31})
@@ -34,7 +43,7 @@ async def test_status_guardrail_window_days(client):
 async def test_status_warn_when_missing_endpoints(client, db_session):
     metric_day = date.today()
     await _ensure_metrics_endpoint_daily_table(db_session)
-    await _clear_metric_day(db_session, metric_day)
+    await _clear_metric_window(db_session, 7)
     db_session.add(
         MetricsEndpointDaily(
             id=uuid.uuid4(),
@@ -61,7 +70,7 @@ async def test_status_warn_when_missing_endpoints(client, db_session):
 async def test_status_pass_with_all_endpoints_present(client, db_session):
     metric_day = date.today()
     await _ensure_metrics_endpoint_daily_table(db_session)
-    await _clear_metric_day(db_session, metric_day)
+    await _clear_metric_window(db_session, 7)
 
     rows = [
         ("/api/v1/metrics/runs", 40, 40, 90, 140, "0.0050"),
@@ -97,7 +106,7 @@ async def test_status_pass_with_all_endpoints_present(client, db_session):
 async def test_status_fail_on_slo_breach(client, db_session):
     metric_day = date.today()
     await _ensure_metrics_endpoint_daily_table(db_session)
-    await _clear_metric_day(db_session, metric_day)
+    await _clear_metric_window(db_session, 7)
 
     db_session.add(
         MetricsEndpointDaily(
