@@ -132,3 +132,28 @@ async def test_status_fail_on_slo_breach(client, db_session):
     )
     assert failed_runs_endpoint["status"] == "FAIL"
     assert "p95_slo_breach" in failed_runs_endpoint["breaches"]
+
+
+@pytest.mark.anyio
+async def test_status_expoe_overview_freshness_seconds(client, seed_daily_metric):
+    """
+    Status deve expor freshness do read model do overview quando houver snapshot.
+    """
+    await seed_daily_metric(
+        metric_date=date.today(),
+        total_runs=2,
+        completed_runs=2,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 2},
+    )
+    overview = await client.get("/api/v1/metrics/overview", params={"days": 1, "force_live": "true"})
+    assert overview.status_code == 200
+
+    response = await client.get("/api/v1/status", params={"window_days": 7})
+    assert response.status_code == 200
+    payload = response.json()
+    assert "read_path" in payload
+    assert "overview_freshness_seconds" in payload["read_path"]
+    assert payload["read_path"]["overview_freshness_seconds"] is None or payload["read_path"]["overview_freshness_seconds"] >= 0

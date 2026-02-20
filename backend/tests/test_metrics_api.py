@@ -282,6 +282,38 @@ async def test_overview_deterministico_mesma_request_mesmo_payload(client, seed_
 
 
 @pytest.mark.anyio
+async def test_overview_timing_inclui_source(client, db_session, seed_daily_metric):
+    """
+    Timing do overview deve carregar origem do read-path para auditoria.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=3,
+        completed_runs=3,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 3},
+    )
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10", "force_live": "true"},
+    )
+    assert response.status_code == 200
+
+    stmt = (
+        select(ObservationRecord)
+        .where(ObservationRecord.facts["event_type"].astext == "metrics_endpoint_timing")
+        .where(ObservationRecord.facts["endpoint"].astext == "/api/v1/metrics/overview")
+        .order_by(ObservationRecord.timestamp.desc())
+        .limit(1)
+    )
+    row = (await db_session.execute(stmt)).scalars().first()
+    assert row is not None
+    assert row.facts.get("overview_source") in {"live", "read_model", "cache"}
+
+
+@pytest.mark.anyio
 async def test_daily_alerted_true_quando_ha_alerta(client, seed_daily_metric, seed_observation):
     """
     Valida enrichment de alerta no /metrics/daily.

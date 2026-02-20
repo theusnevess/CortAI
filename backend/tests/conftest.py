@@ -15,7 +15,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from app.db.models import CognitiveMetricsDaily, MetricsEndpointDaily, ObservationRecord
+from app.db.models import CognitiveMetricsDaily, MetricsEndpointDaily, MetricsOverviewReadModel, ObservationRecord
 from app.db.session import get_db
 from app.main import app
 
@@ -233,6 +233,8 @@ def cleanup_metrics(sync_session_factory):
             session.execute(
                 delete(MetricsEndpointDaily).where(MetricsEndpointDaily.metric_date.in_(target_dates))
             )
+        if inspect(session.get_bind()).has_table("metrics_overview_read_model"):
+            session.execute(delete(MetricsOverviewReadModel))
         session.commit()
         yield
     finally:
