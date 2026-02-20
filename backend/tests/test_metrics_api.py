@@ -775,6 +775,91 @@ async def test_runs_emite_metrics_endpoint_timing(client, seed_observation, db_s
     assert "timestamp" in facts
     assert "query_fingerprint" in facts
     assert "metric_date" in facts
+    assert facts["runs_source"] in {"live", "read_model", "cache"}
+
+
+@pytest.mark.anyio
+async def test_runs_read_model_source_apos_refresh(client, seed_observation, db_session):
+    """
+    /metrics/runs deve alternar runs_source live -> read_model apos refresh.
+    """
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 12, 0, 0),
+        process_id="P_RUN_SOURCE_1",
+        source_outcome_id="outcome-run-source-1",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "completed",
+            "actions_executed": 1,
+        },
+    )
+    params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "limit": 50, "offset": 0}
+    first = await client.get("/api/v1/metrics/runs", params={**params, "force_live": "true"})
+    assert first.status_code == 200
+    second = await client.get("/api/v1/metrics/runs", params=params)
+    assert second.status_code == 200
+
+    stmt = (
+        select(ObservationRecord)
+        .where(ObservationRecord.facts["event_type"].astext == "metrics_endpoint_timing")
+        .where(ObservationRecord.facts["endpoint"].astext == "/api/v1/metrics/runs")
+        .order_by(ObservationRecord.created_at.desc())
+        .limit(2)
+    )
+    rows = (await db_session.execute(stmt)).scalars().all()
+    assert len(rows) >= 2
+    sources = [row.facts.get("runs_source") for row in rows]
+    assert "live" in sources
+    assert "read_model" in sources
+
+
+@pytest.mark.anyio
+async def test_runs_force_live_rate_limit(client, seed_observation):
+    """
+    force_live=true em /metrics/runs aplica cooldown deterministico (429).
+    """
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 12, 0, 0),
+        process_id="P_RUN_FORCE_LIVE_RATE_1",
+        source_outcome_id="outcome-run-force-live-rate-1",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "completed",
+            "actions_executed": 1,
+        },
+    )
+    params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "force_live": "true", "limit": 50, "offset": 0}
+    first = await client.get("/api/v1/metrics/runs", params=params)
+    second = await client.get("/api/v1/metrics/runs", params=params)
+    assert first.status_code == 200
+    assert second.status_code == 429
+    detail = second.json()["detail"]
+    assert detail["error_type"] == "RateLimited"
+    assert detail["scope"] == "runs_force_live"
+    assert int(detail["cooldown_seconds"]) == 10
+    assert int(detail["retry_after_seconds"]) >= 1
+
+
+@pytest.mark.anyio
+async def test_runs_sem_force_live_nao_aplica_rate_limit(client, seed_observation):
+    """
+    /metrics/runs sem force_live nao deve cair no guardrail.
+    """
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 12, 0, 0),
+        process_id="P_RUN_FORCE_LIVE_RATE_2",
+        source_outcome_id="outcome-run-force-live-rate-2",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "completed",
+            "actions_executed": 1,
+        },
+    )
+    params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "limit": 50, "offset": 0}
+    first = await client.get("/api/v1/metrics/runs", params=params)
+    second = await client.get("/api/v1/metrics/runs", params=params)
+    assert first.status_code == 200
+    assert second.status_code == 200
 
 
 @pytest.mark.anyio

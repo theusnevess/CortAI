@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 import uuid
 
@@ -157,3 +157,34 @@ async def test_status_expoe_overview_freshness_seconds(client, seed_daily_metric
     assert "read_path" in payload
     assert "overview_freshness_seconds" in payload["read_path"]
     assert payload["read_path"]["overview_freshness_seconds"] is None or payload["read_path"]["overview_freshness_seconds"] >= 0
+
+
+@pytest.mark.anyio
+async def test_status_expoe_runs_freshness_e_key_count(client, seed_observation):
+    """
+    Status deve expor freshness e quantidade de chaves do runs read model.
+    """
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 12, 0, 0),
+        process_id="P_STATUS_RUNS_FRESHNESS_1",
+        source_outcome_id="outcome-status-runs-freshness-1",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "completed",
+            "actions_executed": 1,
+        },
+    )
+    runs = await client.get(
+        "/api/v1/metrics/runs",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10", "limit": 50, "offset": 0, "force_live": "true"},
+    )
+    assert runs.status_code == 200
+
+    response = await client.get("/api/v1/status", params={"window_days": 7})
+    assert response.status_code == 200
+    payload = response.json()
+    assert "read_path" in payload
+    assert "runs_freshness_seconds" in payload["read_path"]
+    assert "runs_key_count" in payload["read_path"]
+    assert payload["read_path"]["runs_freshness_seconds"] is None or payload["read_path"]["runs_freshness_seconds"] >= 0
+    assert isinstance(payload["read_path"]["runs_key_count"], int)
