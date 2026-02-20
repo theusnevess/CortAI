@@ -280,7 +280,32 @@ async def get_status(
             },
             # Config efetiva para correlacionar contensao C2 sem inspecao manual.
             "capacity_config": _read_capacity_config(),
+            "read_path": {
+                "overview_freshness_seconds": None,
+            },
         }
+        # Exibe freshness do read model para auditoria do caminho materializado.
+        try:
+            fresh_stmt = (
+                text(
+                    """
+                    SELECT EXTRACT(EPOCH FROM (NOW() - MAX(refreshed_at)))::int AS freshness_seconds
+                    FROM metrics_overview_read_model
+                    """
+                )
+            )
+            freshness = (
+                await _execute_with_db_stats(
+                    db,
+                    fresh_stmt,
+                    db_stats,
+                )
+            ).scalar()
+            if freshness is not None:
+                response["read_path"]["overview_freshness_seconds"] = max(0, int(freshness))
+        except Exception:
+            # Em ambientes sem migration aplicada, mantem campo nulo.
+            response["read_path"]["overview_freshness_seconds"] = None
         status_code = 200
         return response
     except HTTPException as e:

@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import CognitiveMetricsDaily, ObservationRecord, PublishReceipt
+from app.db.models import CognitiveMetricsDaily, MetricsOverviewReadModel, ObservationRecord, PublishReceipt
 from app.db.session import get_db
 from app.observations import persist_observation
 from app.schemas.observation import Observation
@@ -84,6 +84,7 @@ METRICS_RUNS_LIMIT_MAX = 200
 METRICS_RUNS_RANGE_MAX_DAYS = 31
 METRICS_OVERVIEW_CACHE_TTL_SECONDS = 10
 METRICS_OVERVIEW_CACHE_MAX_ENTRIES = 128
+METRICS_OVERVIEW_READ_MODEL_ENABLED = True
 _metrics_overview_cache: dict[str, tuple[float, str]] = {}
 _metrics_overview_cache_lock = Lock()
 
@@ -185,6 +186,88 @@ def _set_overview_cache(key: str, payload_json: str) -> None:
             if oldest_key is not None:
                 _metrics_overview_cache.pop(oldest_key, None)
         _metrics_overview_cache[key] = (expires_at, payload_json)
+
+
+async def _ensure_overview_read_model_table(db: AsyncSession) -> None:
+    """
+    Garante tabela do read model em ambientes de teste sem migration aplicada.
+    """
+    conn = await db.connection()
+    await conn.run_sync(
+        lambda sync_conn: MetricsOverviewReadModel.__table__.create(bind=sync_conn, checkfirst=True)
+    )
+
+
+async def _get_overview_read_model_payload(
+    db: AsyncSession,
+    *,
+    start: date,
+    end: date,
+    include_reasons: bool,
+    include_baseline: bool,
+) -> tuple[dict | None, datetime | None]:
+    """
+    Busca payload materializado por chave de consulta do overview.
+    """
+    if not METRICS_OVERVIEW_READ_MODEL_ENABLED:
+        return None, None
+    stmt = (
+        select(MetricsOverviewReadModel)
+        .where(MetricsOverviewReadModel.start_date == start)
+        .where(MetricsOverviewReadModel.end_date == end)
+        .where(MetricsOverviewReadModel.include_reasons == include_reasons)
+        .where(MetricsOverviewReadModel.include_baseline == include_baseline)
+        .order_by(desc(MetricsOverviewReadModel.refreshed_at))
+        .limit(1)
+    )
+    row = (await db.execute(stmt)).scalars().first()
+    if row is None or not isinstance(row.payload, dict):
+        return None, None
+    return row.payload, row.refreshed_at
+
+
+async def _upsert_overview_read_model_payload(
+    db: AsyncSession,
+    *,
+    start: date,
+    end: date,
+    include_reasons: bool,
+    include_baseline: bool,
+    payload: dict,
+) -> datetime:
+    """
+    Atualiza read model do overview para manter caminho de leitura previsivel.
+    """
+    refreshed_at = datetime.utcnow()
+    stmt = (
+        select(MetricsOverviewReadModel)
+        .where(MetricsOverviewReadModel.start_date == start)
+        .where(MetricsOverviewReadModel.end_date == end)
+        .where(MetricsOverviewReadModel.include_reasons == include_reasons)
+        .where(MetricsOverviewReadModel.include_baseline == include_baseline)
+        .limit(1)
+    )
+    row = (await db.execute(stmt)).scalars().first()
+    if row is None:
+        row = MetricsOverviewReadModel(
+            start_date=start,
+            end_date=end,
+            include_reasons=include_reasons,
+            include_baseline=include_baseline,
+            payload=payload,
+            refreshed_at=refreshed_at,
+            created_at=refreshed_at,
+            updated_at=refreshed_at,
+        )
+        db.add(row)
+    else:
+        row.payload = payload
+        row.refreshed_at = refreshed_at
+        row.updated_at = refreshed_at
+    await db.flush()
+    # Persistencia explicita: get_db fecha sessao sem commit automatico.
+    await db.commit()
+    return refreshed_at
 
 
 def _filter_facts(facts: dict) -> dict:
@@ -340,6 +423,10 @@ def _emit_metrics_endpoint_timing(
     process_id: str | None = None,
     cache_hit: bool | None = None,
     cache_key_hash: str | None = None,
+    overview_source: str | None = None,
+    db_us: int = 0,
+    db_queries: int = 0,
+    db_pool_wait_us: int = 0,
 ) -> None:
     """
     Emite telemetria append-only por request dos endpoints de metricas.
@@ -383,6 +470,9 @@ def _emit_metrics_endpoint_timing(
             "query_fingerprint": str(query_fingerprint),
             "metric_date": metric_date,
             "timestamp": event_ts,
+            "db_us": int(max(0, db_us)),
+            "db_queries": int(max(0, db_queries)),
+            "db_pool_wait_us": int(max(0, db_pool_wait_us)),
         }
         if process_id:
             facts["process_id"] = process_id
@@ -390,6 +480,8 @@ def _emit_metrics_endpoint_timing(
             facts["cache_hit"] = bool(cache_hit)
         if cache_key_hash:
             facts["cache_key_hash"] = str(cache_key_hash)
+        if overview_source:
+            facts["overview_source"] = str(overview_source)
         observation = Observation(
             observation_id=str(uuid.uuid4()),
             timestamp=event_ts,
@@ -1062,6 +1154,7 @@ async def get_metrics_overview(
     end_date: str | None = None,
     include_reasons: bool = Query(False),
     include_baseline: bool = Query(False),
+    force_live: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -1076,10 +1169,12 @@ async def get_metrics_overview(
     status_code = 500
     cache_hit_flag: bool | None = None
     cache_key_hash: str | None = None
+    overview_source = "live"
     query_fingerprint = (
         f"days={days}&start_date={start_date or ''}&end_date={end_date or ''}"
         f"&include_reasons={str(include_reasons).lower()}"
         f"&include_baseline={str(include_baseline).lower()}"
+        f"&force_live={str(force_live).lower()}"
     )
     try:
         if days < 1 or days > 365:
@@ -1106,9 +1201,26 @@ async def get_metrics_overview(
         cached_payload_json = _get_overview_cache(cache_key)
         if cached_payload_json is not None:
             cache_hit_flag = True
+            overview_source = "cache"
             status_code = 200
             return Response(content=cached_payload_json, media_type="application/json", status_code=200)
         cache_hit_flag = False
+
+        await _ensure_overview_read_model_table(db)
+        if not force_live:
+            read_payload, _ = await _get_overview_read_model_payload(
+                db,
+                start=start,
+                end=end,
+                include_reasons=include_reasons,
+                include_baseline=include_baseline,
+            )
+            if read_payload is not None:
+                overview_source = "read_model"
+                status_code = 200
+                payload_json = json.dumps(read_payload, separators=(",", ":"), ensure_ascii=False)
+                _set_overview_cache(cache_key, payload_json)
+                return Response(content=payload_json, media_type="application/json", status_code=200)
 
         stmt = (
             select(CognitiveMetricsDaily)
@@ -1246,6 +1358,14 @@ async def get_metrics_overview(
 
         status_code = 200
         response_payload = {"items": items, "summary": summary}
+        await _upsert_overview_read_model_payload(
+            db,
+            start=start,
+            end=end,
+            include_reasons=include_reasons,
+            include_baseline=include_baseline,
+            payload=response_payload,
+        )
         _set_overview_cache(
             cache_key,
             json.dumps(response_payload, separators=(",", ":"), ensure_ascii=False),
@@ -1277,6 +1397,7 @@ async def get_metrics_overview(
             query_fingerprint=query_fingerprint,
             cache_hit=cache_hit_flag,
             cache_key_hash=cache_key_hash,
+            overview_source=overview_source,
         )
 
 
