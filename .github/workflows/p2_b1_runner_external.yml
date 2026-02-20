@@ -61,6 +61,8 @@ jobs:
           fi
           sed -i 's/\r$//' scripts/run_p2_matrix.sh
           chmod +x scripts/run_p2_matrix.sh
+          ls -lah scripts/run_p2_matrix.sh
+          head -n 5 scripts/run_p2_matrix.sh
 
       - name: Run direct benchmark
         shell: bash
