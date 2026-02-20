@@ -127,3 +127,44 @@ Decisao:
 - anomalia `db_us` classificada como ruido/contensao de runtime, nao `SQL slow` repetivel.
 - `safe_envelope_v2.0` permanece `C1`.
 - gate estrutural continua em `P2-B1` com runner externo.
+
+## P2-B1 estrutural (runner externo GitHub Actions)
+
+Objetivo:
+- fechar o gate estrutural de capacidade com runner externo (fora do host do SUT).
+
+Fonte de execucao:
+- GitHub Actions (`ubuntu-latest`) com workflow manual `p2_b1_runner_external`.
+- Artefatos:
+  - `.tmp_p2/p2_a_summary_direct.csv`
+  - `.tmp_p2/p2_a_summary_edge.csv`
+
+Escopo da comparacao:
+- Cenario: `C=2`, `3` repeticoes, `60s` por repeticao.
+- Endpoints: `overview`, `runs`, `report`.
+- Caminhos:
+  - `direct` (API direta)
+  - `edge` (proxy/read path)
+
+Resultado consolidado (media das 3 repeticoes, C=2):
+
+| path   | endpoint | avg p90 | avg p99 | avg req/s | timeouts |
+|--------|----------|---------|---------|-----------|----------|
+| direct | overview | 1123.33ms | 2503.33ms | 1.92 | 0 |
+| direct | runs     | 1106.67ms | 1866.67ms | 1.98 | 0 |
+| direct | report   | 1170.00ms | 1830.00ms | 1.89 | 0 |
+| edge   | overview | 1273.33ms | 1660.00ms | 1.75 | 0 |
+| edge   | runs     | 1146.67ms | 1496.67ms | 1.90 | 0 |
+| edge   | report   | 1226.67ms | 1706.67ms | 1.83 | 0 |
+
+Decisao:
+- `P2-B1`: `PASS` (metodologia estrutural concluida).
+- `safe_envelope_v2.0` (estrutural): `C1`.
+- `C2`: `FAIL` por latencia de cauda (p99 acima do SLO), mesmo com `timeouts=0`.
+
+Endpoint limitante:
+- principal: `/api/v1/metrics/overview`
+- co-limitante: `/api/v1/metrics/runs`
+
+Observacao:
+- o caminho `edge` reduziu parte da cauda vs `direct` em alguns cenarios, mas nao o suficiente para promover `C2`.
