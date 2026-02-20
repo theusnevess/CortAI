@@ -12,6 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import desc, func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import CognitiveMetricsDaily, MetricsOverviewReadModel, ObservationRecord, PublishReceipt
@@ -85,8 +86,11 @@ METRICS_RUNS_RANGE_MAX_DAYS = 31
 METRICS_OVERVIEW_CACHE_TTL_SECONDS = 10
 METRICS_OVERVIEW_CACHE_MAX_ENTRIES = 128
 METRICS_OVERVIEW_READ_MODEL_ENABLED = True
+METRICS_OVERVIEW_FORCE_LIVE_COOLDOWN_SECONDS = 10
 _metrics_overview_cache: dict[str, tuple[float, str]] = {}
 _metrics_overview_cache_lock = Lock()
+_metrics_overview_force_live_limiter: dict[str, float] = {}
+_metrics_overview_force_live_limiter_lock = Lock()
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -188,6 +192,32 @@ def _set_overview_cache(key: str, payload_json: str) -> None:
         _metrics_overview_cache[key] = (expires_at, payload_json)
 
 
+def _consume_force_live_token(scope_key: str) -> int:
+    """
+    Aplica cooldown deterministico por escopo para evitar abuso de force_live.
+    Returns:
+        Segundos restantes de cooldown quando bloqueado; 0 quando permitido.
+    """
+    now = perf_counter()
+    with _metrics_overview_force_live_limiter_lock:
+        release_at = _metrics_overview_force_live_limiter.get(scope_key, 0.0)
+        if release_at > now:
+            remaining = int(math.ceil(release_at - now))
+            return max(1, remaining)
+        _metrics_overview_force_live_limiter[scope_key] = (
+            now + METRICS_OVERVIEW_FORCE_LIVE_COOLDOWN_SECONDS
+        )
+    return 0
+
+
+def _clear_force_live_limiter() -> None:
+    """
+    Limpa estado do rate limiter para manter testes deterministas.
+    """
+    with _metrics_overview_force_live_limiter_lock:
+        _metrics_overview_force_live_limiter.clear()
+
+
 async def _ensure_overview_read_model_table(db: AsyncSession) -> None:
     """
     Garante tabela do read model em ambientes de teste sem migration aplicada.
@@ -239,32 +269,26 @@ async def _upsert_overview_read_model_payload(
     Atualiza read model do overview para manter caminho de leitura previsivel.
     """
     refreshed_at = datetime.utcnow()
-    stmt = (
-        select(MetricsOverviewReadModel)
-        .where(MetricsOverviewReadModel.start_date == start)
-        .where(MetricsOverviewReadModel.end_date == end)
-        .where(MetricsOverviewReadModel.include_reasons == include_reasons)
-        .where(MetricsOverviewReadModel.include_baseline == include_baseline)
-        .limit(1)
+    upsert_stmt = insert(MetricsOverviewReadModel).values(
+        id=uuid.uuid4(),
+        start_date=start,
+        end_date=end,
+        include_reasons=include_reasons,
+        include_baseline=include_baseline,
+        payload=payload,
+        refreshed_at=refreshed_at,
+        created_at=refreshed_at,
+        updated_at=refreshed_at,
     )
-    row = (await db.execute(stmt)).scalars().first()
-    if row is None:
-        row = MetricsOverviewReadModel(
-            start_date=start,
-            end_date=end,
-            include_reasons=include_reasons,
-            include_baseline=include_baseline,
-            payload=payload,
-            refreshed_at=refreshed_at,
-            created_at=refreshed_at,
-            updated_at=refreshed_at,
-        )
-        db.add(row)
-    else:
-        row.payload = payload
-        row.refreshed_at = refreshed_at
-        row.updated_at = refreshed_at
-    await db.flush()
+    upsert_stmt = upsert_stmt.on_conflict_do_update(
+        index_elements=["start_date", "end_date", "include_reasons", "include_baseline"],
+        set_={
+            "payload": payload,
+            "refreshed_at": refreshed_at,
+            "updated_at": refreshed_at,
+        },
+    )
+    await db.execute(upsert_stmt)
     # Persistencia explicita: get_db fecha sessao sem commit automatico.
     await db.commit()
     return refreshed_at
@@ -445,6 +469,7 @@ def _emit_metrics_endpoint_timing(
             "duration_ms": int(max(0, duration_ms)),
             # Alta resolucao para diferenciar handler sub-ms de fila/infra.
             "duration_us": int(max(0, duration_us if duration_us is not None else duration_ms * 1000)),
+            "handler_us": int(max(0, duration_us if duration_us is not None else duration_ms * 1000)),
             "queue_us": int(max(0, queue_us if queue_us is not None else 0)),
             "server_total_us": int(
                 max(
@@ -1198,13 +1223,28 @@ async def get_metrics_overview(
             include_baseline=include_baseline,
         )
         cache_key_hash = _overview_cache_key_hash(cache_key)
-        cached_payload_json = _get_overview_cache(cache_key)
-        if cached_payload_json is not None:
-            cache_hit_flag = True
-            overview_source = "cache"
-            status_code = 200
-            return Response(content=cached_payload_json, media_type="application/json", status_code=200)
+        if force_live:
+            client_host = (request.client.host if request.client else "unknown") or "unknown"
+            limiter_scope = f"overview_force_live:{client_host}:{cache_key_hash}"
+            retry_after_seconds = _consume_force_live_token(limiter_scope)
+            if retry_after_seconds > 0:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error_type": "RateLimited",
+                        "retry_after_seconds": retry_after_seconds,
+                        "cooldown_seconds": METRICS_OVERVIEW_FORCE_LIVE_COOLDOWN_SECONDS,
+                        "scope": "overview_force_live",
+                    },
+                )
         cache_hit_flag = False
+        if not force_live:
+            cached_payload_json = _get_overview_cache(cache_key)
+            if cached_payload_json is not None:
+                cache_hit_flag = True
+                overview_source = "cache"
+                status_code = 200
+                return Response(content=cached_payload_json, media_type="application/json", status_code=200)
 
         await _ensure_overview_read_model_table(db)
         if not force_live:
