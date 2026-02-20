@@ -282,6 +282,8 @@ async def get_status(
             "capacity_config": _read_capacity_config(),
             "read_path": {
                 "overview_freshness_seconds": None,
+                "runs_freshness_seconds": None,
+                "runs_key_count": 0,
             },
         }
         # Exibe freshness do read model para auditoria do caminho materializado.
@@ -306,6 +308,33 @@ async def get_status(
         except Exception:
             # Em ambientes sem migration aplicada, mantem campo nulo.
             response["read_path"]["overview_freshness_seconds"] = None
+        try:
+            runs_stmt = text(
+                """
+                SELECT
+                  EXTRACT(EPOCH FROM (NOW() - MAX(refreshed_at)))::int AS freshness_seconds,
+                  COUNT(*)::int AS key_count
+                FROM metrics_runs_read_model
+                """
+            )
+            row = (
+                await _execute_with_db_stats(
+                    db,
+                    runs_stmt,
+                    db_stats,
+                )
+            ).mappings().first()
+            if row is not None:
+                freshness = row.get("freshness_seconds")
+                key_count = row.get("key_count")
+                if freshness is not None:
+                    response["read_path"]["runs_freshness_seconds"] = max(0, int(freshness))
+                if key_count is not None:
+                    response["read_path"]["runs_key_count"] = max(0, int(key_count))
+        except Exception:
+            # Em ambientes sem migration aplicada, mantem campos default.
+            response["read_path"]["runs_freshness_seconds"] = None
+            response["read_path"]["runs_key_count"] = 0
         status_code = 200
         return response
     except HTTPException as e:
