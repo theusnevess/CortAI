@@ -33,3 +33,36 @@ Observacao:
 - Resultado sintetico e util para validar pipeline e contratos.
 - Decisao estrutural de capacidade segue dependente de medicao com runner externo.
 
+## P2-C2.1 pos-merge (runs read-path, C=2)
+
+Objetivo:
+- Validar impacto do read-path materializado de `/api/v1/metrics/runs` em C=2 apos merge.
+
+Escopo da rodada:
+- Endpoint: `/api/v1/metrics/runs?start_date=2026-02-11&end_date=2026-02-18&limit=200&offset=0`
+- Cenario: C=2, 3 repeticoes, 60s por repeticao
+- Caminhos: direct (`:8000`) e edge (`:8001`)
+- Artefatos:
+  - `.tmp_p2/p2_c21_runs_c2_postmerge.csv`
+  - `.tmp_p2/p2_c21_runs_c2_postmerge_summary.json`
+
+Resultado consolidado:
+
+| path   | avg p90 | avg p99 | avg req/s | timeouts |
+|--------|---------|---------|-----------|----------|
+| direct | 853.07ms | 894.33ms | 2.42 | 0 |
+| edge   | 855.64ms | 889.17ms | 2.40 | 0 |
+
+Pivot server-side (`metrics_endpoint_timing`, janela curta):
+- `runs_source=read_model`: `n=875`, `avg_db_queries=1.00`, `p95_db_us=1181.50`
+- `runs_source=live`: `n=4`, `avg_db_queries=3.25`, `p95_db_us=9410.50`
+- `db_pool_wait_us=0` (sem contencao de pool)
+
+Interpretacao:
+- O read-path de runs ficou efetivo e previsivel no servidor (predominio `read_model`).
+- Houve reducao objetiva de cauda em relacao ao baseline anterior (~1108.82ms p99 direct para ~894.33ms, cerca de -19%).
+- Mesmo com melhora de runs, C=2 permanece fora do SLO de latencia no ambiente atual.
+
+Decisao:
+- `safe_envelope_v2.0` permanece `C1`.
+- P2-C2.1 foi eficaz para isolamento de leitura e custo DB de runs, mas nao alterou o limite estrutural de envelope.
