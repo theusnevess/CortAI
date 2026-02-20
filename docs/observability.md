@@ -987,6 +987,27 @@ Implementado no read-path de `/api/v1/metrics/overview`:
 - persistencia do snapshot com `refreshed_at` para auditoria de freshness
 - emissao de `overview_source` em `metrics_endpoint_timing` (`live|read_model|cache`)
 - exposicao de `read_path.overview_freshness_seconds` em `/api/v1/status`
+- guardrail anti-abuso para `force_live=true` (cooldown deterministico de 10s por escopo)
+
+Contrato do guardrail (`force_live=true`):
+- quando em cooldown, retorna HTTP `429`
+- payload `detail`:
+  - `error_type="RateLimited"`
+  - `retry_after_seconds`
+  - `cooldown_seconds`
+  - `scope="overview_force_live"`
+
+Exemplo de erro:
+```json
+{
+  "detail": {
+    "error_type": "RateLimited",
+    "retry_after_seconds": 7,
+    "cooldown_seconds": 10,
+    "scope": "overview_force_live"
+  }
+}
+```
 
 Invariantes preservados:
 - contrato publico de `/api/v1/metrics/overview` mantido
