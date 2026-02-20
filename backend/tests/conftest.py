@@ -19,6 +19,7 @@ from app.db.models import (
     CognitiveMetricsDaily,
     MetricsEndpointDaily,
     MetricsOverviewReadModel,
+    MetricsReadRefreshJob,
     MetricsRunsReadModel,
     ObservationRecord,
 )
@@ -245,6 +246,8 @@ def cleanup_metrics(sync_session_factory):
             session.execute(delete(MetricsOverviewReadModel))
         if inspect(session.get_bind()).has_table("metrics_runs_read_model"):
             session.execute(delete(MetricsRunsReadModel))
+        if inspect(session.get_bind()).has_table("metrics_read_refresh_jobs"):
+            session.execute(delete(MetricsReadRefreshJob))
         session.commit()
         yield
     finally:

@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import delete
 
 from app.db.models import MetricsEndpointDaily
+from app.api.v1.endpoints.metrics import process_read_refresh_jobs_once
 
 
 async def _ensure_metrics_endpoint_daily_table(db_session) -> None:
@@ -135,7 +136,7 @@ async def test_status_fail_on_slo_breach(client, db_session):
 
 
 @pytest.mark.anyio
-async def test_status_expoe_overview_freshness_seconds(client, seed_daily_metric):
+async def test_status_expoe_overview_freshness_seconds(client, seed_daily_metric, db_session):
     """
     Status deve expor freshness do read model do overview quando houver snapshot.
     """
@@ -149,18 +150,21 @@ async def test_status_expoe_overview_freshness_seconds(client, seed_daily_metric
         last_action_type_distribution={"write_artifact": 2},
     )
     overview = await client.get("/api/v1/metrics/overview", params={"days": 1, "force_live": "true"})
-    assert overview.status_code == 200
+    assert overview.status_code == 202
+    await process_read_refresh_jobs_once(db=db_session, limit=10)
 
     response = await client.get("/api/v1/status", params={"window_days": 7})
     assert response.status_code == 200
     payload = response.json()
     assert "read_path" in payload
     assert "overview_freshness_seconds" in payload["read_path"]
+    assert "overview_snapshot_status" in payload["read_path"]
+    assert "overview_last_refreshed_at" in payload["read_path"]
     assert payload["read_path"]["overview_freshness_seconds"] is None or payload["read_path"]["overview_freshness_seconds"] >= 0
 
 
 @pytest.mark.anyio
-async def test_status_expoe_runs_freshness_e_key_count(client, seed_observation):
+async def test_status_expoe_runs_freshness_e_key_count(client, seed_observation, db_session):
     """
     Status deve expor freshness e quantidade de chaves do runs read model.
     """
@@ -178,13 +182,17 @@ async def test_status_expoe_runs_freshness_e_key_count(client, seed_observation)
         "/api/v1/metrics/runs",
         params={"start_date": "2026-02-10", "end_date": "2026-02-10", "limit": 50, "offset": 0, "force_live": "true"},
     )
-    assert runs.status_code == 200
+    assert runs.status_code == 202
+    await process_read_refresh_jobs_once(db=db_session, limit=10)
 
     response = await client.get("/api/v1/status", params={"window_days": 7})
     assert response.status_code == 200
     payload = response.json()
     assert "read_path" in payload
     assert "runs_freshness_seconds" in payload["read_path"]
+    assert "runs_snapshot_status" in payload["read_path"]
+    assert "runs_last_refreshed_at" in payload["read_path"]
     assert "runs_key_count" in payload["read_path"]
+    assert "jobs_queued_count" in payload["read_path"]
     assert payload["read_path"]["runs_freshness_seconds"] is None or payload["read_path"]["runs_freshness_seconds"] >= 0
     assert isinstance(payload["read_path"]["runs_key_count"], int)

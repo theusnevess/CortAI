@@ -6,9 +6,35 @@ import json
 import pytest
 from sqlalchemy import delete, select
 
-from app.api.v1.endpoints.metrics import PROHIBITED_FACT_KEYS
+from app.api.v1.endpoints.metrics import PROHIBITED_FACT_KEYS, process_read_refresh_jobs_once
 from app.cognitive_metrics import aggregate_daily_metrics_for_date
 from app.db.models import CognitiveMetricsDaily, MetricsEndpointDaily, ObservationRecord
+
+
+async def _materialize_overview_snapshot(client, db_session, *, start_date: str, end_date: str, include_reasons: bool = False, include_baseline: bool = False) -> None:
+    params = {
+        "start_date": start_date,
+        "end_date": end_date,
+        "force_live": "true",
+        "include_reasons": str(include_reasons).lower(),
+        "include_baseline": str(include_baseline).lower(),
+    }
+    accepted = await client.get("/api/v1/metrics/overview", params=params)
+    assert accepted.status_code == 202
+    await process_read_refresh_jobs_once(db=db_session, limit=20)
+
+
+async def _materialize_runs_snapshot(client, db_session, *, start_date: str, end_date: str, limit: int = 50, offset: int = 0) -> None:
+    params = {
+        "start_date": start_date,
+        "end_date": end_date,
+        "limit": limit,
+        "offset": offset,
+        "force_live": "true",
+    }
+    accepted = await client.get("/api/v1/metrics/runs", params=params)
+    assert accepted.status_code == 202
+    await process_read_refresh_jobs_once(db=db_session, limit=20)
 
 
 @pytest.mark.anyio
@@ -259,7 +285,7 @@ async def test_daily_ces_v3_fallback_para_budget_fixo(client, seed_daily_metric)
 
 
 @pytest.mark.anyio
-async def test_overview_deterministico_mesma_request_mesmo_payload(client, seed_daily_metric):
+async def test_overview_deterministico_mesma_request_mesmo_payload(client, seed_daily_metric, db_session):
     """
     Mesma request deve retornar payload identico.
     """
@@ -274,6 +300,7 @@ async def test_overview_deterministico_mesma_request_mesmo_payload(client, seed_
         latency_by_action={"write_artifact": {"n": 10, "p95_ms": 500}},
     )
     params = {"start_date": "2026-02-10", "end_date": "2026-02-10"}
+    await _materialize_overview_snapshot(client, db_session, start_date="2026-02-10", end_date="2026-02-10")
     first = await client.get("/api/v1/metrics/overview", params=params)
     second = await client.get("/api/v1/metrics/overview", params=params)
     assert first.status_code == 200
@@ -295,9 +322,16 @@ async def test_overview_timing_inclui_source(client, db_session, seed_daily_metr
         avg_actions_executed=1.0,
         last_action_type_distribution={"write_artifact": 3},
     )
-    response = await client.get(
+    accepted = await client.get(
         "/api/v1/metrics/overview",
         params={"start_date": "2026-02-10", "end_date": "2026-02-10", "force_live": "true"},
+    )
+    assert accepted.status_code == 202
+    from app.api.v1.endpoints.metrics import process_read_refresh_jobs_once
+    await process_read_refresh_jobs_once(db=db_session, limit=10)
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
     )
     assert response.status_code == 200
 
@@ -310,13 +344,50 @@ async def test_overview_timing_inclui_source(client, db_session, seed_daily_metr
     )
     row = (await db_session.execute(stmt)).scalars().first()
     assert row is not None
-    assert row.facts.get("overview_source") in {"live", "read_model", "cache"}
+    assert row.facts.get("overview_source") in {"read_model", "cache", "live"}
 
 
 @pytest.mark.anyio
-async def test_overview_force_live_rate_limit(client, seed_daily_metric):
+async def test_overview_force_live_enfileira_job_accepted(client, seed_daily_metric, db_session):
     """
-    force_live=true deve aplicar cooldown deterministico para evitar abuso.
+    force_live=true deve retornar 202 Accepted com payload deterministico.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=2,
+        completed_runs=2,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 2},
+    )
+    params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "force_live": "true"}
+    accepted = await client.get("/api/v1/metrics/overview", params=params)
+    assert accepted.status_code == 202
+    payload = accepted.json()
+    assert payload["error_type"] == "Accepted"
+    assert payload["scope"] == "overview_force_live"
+    assert isinstance(payload["job_key"], str) and len(payload["job_key"]) == 64
+    assert isinstance(payload["job_enqueued"], bool)
+    assert int(payload["retry_after_seconds"]) >= 1
+
+    stmt = (
+        select(ObservationRecord)
+        .where(ObservationRecord.facts["event_type"].astext == "metrics_endpoint_timing")
+        .where(ObservationRecord.facts["endpoint"].astext == "/api/v1/metrics/overview")
+        .order_by(ObservationRecord.timestamp.desc())
+        .limit(1)
+    )
+    row = (await db_session.execute(stmt)).scalars().first()
+    assert row is not None
+    assert row.facts.get("job_enqueued") in {True, False}
+    assert row.facts.get("job_key_hash")
+
+
+@pytest.mark.anyio
+async def test_overview_force_live_dedupe_cria_um_job(client, seed_daily_metric, db_session):
+    """
+    Duas chamadas force_live para mesma key devem deduplicar o job.
     """
     await seed_daily_metric(
         metric_date=date(2026, 2, 10),
@@ -330,35 +401,12 @@ async def test_overview_force_live_rate_limit(client, seed_daily_metric):
     params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "force_live": "true"}
     first = await client.get("/api/v1/metrics/overview", params=params)
     second = await client.get("/api/v1/metrics/overview", params=params)
+    assert first.status_code == 202
+    assert second.status_code == 202
 
-    assert first.status_code == 200
-    assert second.status_code == 429
-    detail = second.json()["detail"]
-    assert detail["error_type"] == "RateLimited"
-    assert detail["scope"] == "overview_force_live"
-    assert int(detail["cooldown_seconds"]) == 10
-    assert int(detail["retry_after_seconds"]) >= 1
-
-
-@pytest.mark.anyio
-async def test_overview_sem_force_live_nao_aplica_rate_limit(client, seed_daily_metric):
-    """
-    Chamadas normais do overview nao devem cair no guardrail de force_live.
-    """
-    await seed_daily_metric(
-        metric_date=date(2026, 2, 10),
-        total_runs=2,
-        completed_runs=2,
-        failed_runs=0,
-        blocked_runs=0,
-        avg_actions_executed=1.0,
-        last_action_type_distribution={"write_artifact": 2},
-    )
-    params = {"start_date": "2026-02-10", "end_date": "2026-02-10"}
-    first = await client.get("/api/v1/metrics/overview", params=params)
-    second = await client.get("/api/v1/metrics/overview", params=params)
-    assert first.status_code == 200
-    assert second.status_code == 200
+    from app.db.models import MetricsReadRefreshJob
+    rows = (await db_session.execute(select(MetricsReadRefreshJob).where(MetricsReadRefreshJob.endpoint == "/api/v1/metrics/overview"))).scalars().all()
+    assert len(rows) == 1
 
 
 @pytest.mark.anyio
@@ -398,7 +446,7 @@ async def test_daily_alerted_true_quando_ha_alerta(client, seed_daily_metric, se
 
 
 @pytest.mark.anyio
-async def test_overview_soma_bate(client, seed_daily_metric):
+async def test_overview_soma_bate(client, seed_daily_metric, db_session):
     """
     Valida consistencia entre itens e summary no /metrics/overview.
     """
@@ -429,6 +477,7 @@ async def test_overview_soma_bate(client, seed_daily_metric):
         avg_actions_executed=0.75,
         last_action_type_distribution={"unknown": 1, "write_artifact": 3},
     )
+    await _materialize_overview_snapshot(client, db_session, start_date="2026-02-08", end_date="2026-02-10")
     response = await client.get(
         "/api/v1/metrics/overview",
         params={"start_date": "2026-02-08", "end_date": "2026-02-10"},
@@ -450,7 +499,7 @@ async def test_overview_soma_bate(client, seed_daily_metric):
 
 
 @pytest.mark.anyio
-async def test_overview_alert_reasons_default_vazio(client, seed_daily_metric):
+async def test_overview_alert_reasons_default_vazio(client, seed_daily_metric, db_session):
     """
     include_reasons default false deve preservar alert_count/alerted com alert_reasons vazio.
     """
@@ -466,6 +515,7 @@ async def test_overview_alert_reasons_default_vazio(client, seed_daily_metric):
         alert_reasons=["p95_slo_breach"],
     )
 
+    await _materialize_overview_snapshot(client, db_session, start_date="2026-02-10", end_date="2026-02-10")
     response = await client.get(
         "/api/v1/metrics/overview",
         params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
@@ -478,7 +528,7 @@ async def test_overview_alert_reasons_default_vazio(client, seed_daily_metric):
 
 
 @pytest.mark.anyio
-async def test_overview_include_reasons_true_retorna_reasons(client, seed_daily_metric):
+async def test_overview_include_reasons_true_retorna_reasons(client, seed_daily_metric, db_session):
     """
     include_reasons=true deve retornar reasons deduplicadas/ordenadas no overview.
     """
@@ -494,6 +544,7 @@ async def test_overview_include_reasons_true_retorna_reasons(client, seed_daily_
         alert_reasons=["p99_slo_breach", "p95_slo_breach", "p95_slo_breach"],
     )
 
+    await _materialize_overview_snapshot(client, db_session, start_date="2026-02-10", end_date="2026-02-10", include_reasons=True)
     response = await client.get(
         "/api/v1/metrics/overview",
         params={"start_date": "2026-02-10", "end_date": "2026-02-10", "include_reasons": "true"},
@@ -506,7 +557,7 @@ async def test_overview_include_reasons_true_retorna_reasons(client, seed_daily_
 
 
 @pytest.mark.anyio
-async def test_overview_include_baseline_default_vazio(client, seed_daily_metric):
+async def test_overview_include_baseline_default_vazio(client, seed_daily_metric, db_session):
     """
     include_baseline default false deve retornar baseline vazio no overview.
     """
@@ -531,6 +582,7 @@ async def test_overview_include_baseline_default_vazio(client, seed_daily_metric
         latency_by_action={"write_artifact": {"n": 10, "p95_ms": 220}},
     )
 
+    await _materialize_overview_snapshot(client, db_session, start_date="2026-02-10", end_date="2026-02-10")
     response = await client.get(
         "/api/v1/metrics/overview",
         params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
@@ -542,7 +594,7 @@ async def test_overview_include_baseline_default_vazio(client, seed_daily_metric
 
 
 @pytest.mark.anyio
-async def test_overview_include_baseline_true_retorna_baseline(client, seed_daily_metric):
+async def test_overview_include_baseline_true_retorna_baseline(client, seed_daily_metric, db_session):
     """
     include_baseline=true deve retornar baseline dinamico no overview.
     """
@@ -567,6 +619,7 @@ async def test_overview_include_baseline_true_retorna_baseline(client, seed_dail
         latency_by_action={"write_artifact": {"n": 10, "p95_ms": 220}},
     )
 
+    await _materialize_overview_snapshot(client, db_session, start_date="2026-02-10", end_date="2026-02-10", include_baseline=True)
     response = await client.get(
         "/api/v1/metrics/overview",
         params={
@@ -582,7 +635,7 @@ async def test_overview_include_baseline_true_retorna_baseline(client, seed_dail
 
 
 @pytest.mark.anyio
-async def test_overview_ces_bad_days_in_window(client, seed_daily_metric, monkeypatch):
+async def test_overview_ces_bad_days_in_window(client, seed_daily_metric, monkeypatch, db_session):
     """
     Valida contador de dias ruins de CES com janela/threshold do alerta.
     """
@@ -620,6 +673,7 @@ async def test_overview_ces_bad_days_in_window(client, seed_daily_metric, monkey
         last_action_type_distribution={"write_artifact": 10},
     )
 
+    await _materialize_overview_snapshot(client, db_session, start_date="2026-02-08", end_date="2026-02-10")
     response = await client.get(
         "/api/v1/metrics/overview",
         params={"start_date": "2026-02-08", "end_date": "2026-02-10"},
@@ -636,7 +690,7 @@ async def test_overview_ces_bad_days_in_window(client, seed_daily_metric, monkey
 
 
 @pytest.mark.anyio
-async def test_overview_ces_window_sem_runs_ratio_null(client, seed_daily_metric, monkeypatch):
+async def test_overview_ces_window_sem_runs_ratio_null(client, seed_daily_metric, monkeypatch, db_session):
     """
     Valida janela CES sem dias validos: effective_days=0 e ratio nulo.
     """
@@ -654,6 +708,7 @@ async def test_overview_ces_window_sem_runs_ratio_null(client, seed_daily_metric
         last_action_type_distribution={},
     )
 
+    await _materialize_overview_snapshot(client, db_session, start_date="2026-02-10", end_date="2026-02-10")
     response = await client.get(
         "/api/v1/metrics/overview",
         params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
@@ -684,10 +739,11 @@ async def test_alerts_range_vazio(client):
 
 
 @pytest.mark.anyio
-async def test_runs_range_vazio(client):
+async def test_runs_range_vazio(client, db_session):
     """
     Valida /metrics/runs sem dados no periodo.
     """
+    await _materialize_runs_snapshot(client, db_session, start_date="2099-01-01", end_date="2099-01-01", limit=10, offset=0)
     response = await client.get(
         "/api/v1/metrics/runs",
         params={"start_date": "2099-01-01", "end_date": "2099-01-01", "limit": 10, "offset": 0},
@@ -698,6 +754,38 @@ async def test_runs_range_vazio(client):
     assert payload["total"] == 0
     assert payload["limit"] == 10
     assert payload["offset"] == 0
+
+
+@pytest.mark.anyio
+async def test_overview_sem_snapshot_retorna_snapshot_missing(client):
+    """
+    Sem snapshot materializado, overview deve retornar 503 deterministico.
+    """
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+    )
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["error_type"] == "SnapshotMissing"
+    assert detail["scope"] == "overview_snapshot"
+    assert int(detail["retry_after_seconds"]) >= 1
+
+
+@pytest.mark.anyio
+async def test_runs_sem_snapshot_retorna_snapshot_missing(client):
+    """
+    Sem snapshot materializado, runs deve retornar 503 deterministico.
+    """
+    response = await client.get(
+        "/api/v1/metrics/runs",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10", "limit": 50, "offset": 0},
+    )
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["error_type"] == "SnapshotMissing"
+    assert detail["scope"] == "runs_snapshot"
+    assert int(detail["retry_after_seconds"]) >= 1
 
 
 @pytest.mark.anyio
@@ -748,6 +836,7 @@ async def test_runs_emite_metrics_endpoint_timing(client, seed_observation, db_s
         },
     )
 
+    await _materialize_runs_snapshot(client, db_session, start_date="2026-02-10", end_date="2026-02-10", limit=50, offset=0)
     response = await client.get(
         "/api/v1/metrics/runs",
         params={"start_date": "2026-02-10", "end_date": "2026-02-10", "limit": 50, "offset": 0},
@@ -795,9 +884,12 @@ async def test_runs_read_model_source_apos_refresh(client, seed_observation, db_
     )
     params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "limit": 50, "offset": 0}
     first = await client.get("/api/v1/metrics/runs", params={**params, "force_live": "true"})
-    assert first.status_code == 200
+    assert first.status_code == 202
+    from app.api.v1.endpoints.metrics import process_read_refresh_jobs_once
+    await process_read_refresh_jobs_once(db=db_session, limit=10)
     second = await client.get("/api/v1/metrics/runs", params=params)
     assert second.status_code == 200
+    assert second.json()["snapshot_status"] in {"fresh", "stale"}
 
     stmt = (
         select(ObservationRecord)
@@ -809,14 +901,13 @@ async def test_runs_read_model_source_apos_refresh(client, seed_observation, db_
     rows = (await db_session.execute(stmt)).scalars().all()
     assert len(rows) >= 2
     sources = [row.facts.get("runs_source") for row in rows]
-    assert "live" in sources
     assert "read_model" in sources
 
 
 @pytest.mark.anyio
-async def test_runs_force_live_rate_limit(client, seed_observation):
+async def test_runs_force_live_accepted_payload(client, seed_observation):
     """
-    force_live=true em /metrics/runs aplica cooldown deterministico (429).
+    force_live=true em /metrics/runs retorna 202 com payload deterministico.
     """
     await seed_observation(
         timestamp=datetime(2026, 2, 10, 12, 0, 0),
@@ -829,21 +920,20 @@ async def test_runs_force_live_rate_limit(client, seed_observation):
         },
     )
     params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "force_live": "true", "limit": 50, "offset": 0}
-    first = await client.get("/api/v1/metrics/runs", params=params)
-    second = await client.get("/api/v1/metrics/runs", params=params)
-    assert first.status_code == 200
-    assert second.status_code == 429
-    detail = second.json()["detail"]
-    assert detail["error_type"] == "RateLimited"
-    assert detail["scope"] == "runs_force_live"
-    assert int(detail["cooldown_seconds"]) == 10
-    assert int(detail["retry_after_seconds"]) >= 1
+    response = await client.get("/api/v1/metrics/runs", params=params)
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["error_type"] == "Accepted"
+    assert payload["scope"] == "runs_force_live"
+    assert isinstance(payload["job_key"], str) and len(payload["job_key"]) == 64
+    assert isinstance(payload["job_enqueued"], bool)
+    assert int(payload["retry_after_seconds"]) >= 1
 
 
 @pytest.mark.anyio
-async def test_runs_sem_force_live_nao_aplica_rate_limit(client, seed_observation):
+async def test_runs_force_live_dedupe_cria_um_job(client, seed_observation, db_session):
     """
-    /metrics/runs sem force_live nao deve cair no guardrail.
+    Duas chamadas force_live para runs devem deduplicar o job.
     """
     await seed_observation(
         timestamp=datetime(2026, 2, 10, 12, 0, 0),
@@ -855,11 +945,15 @@ async def test_runs_sem_force_live_nao_aplica_rate_limit(client, seed_observatio
             "actions_executed": 1,
         },
     )
-    params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "limit": 50, "offset": 0}
+    params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "limit": 50, "offset": 0, "force_live": "true"}
     first = await client.get("/api/v1/metrics/runs", params=params)
     second = await client.get("/api/v1/metrics/runs", params=params)
-    assert first.status_code == 200
-    assert second.status_code == 200
+    assert first.status_code == 202
+    assert second.status_code == 202
+
+    from app.db.models import MetricsReadRefreshJob
+    rows = (await db_session.execute(select(MetricsReadRefreshJob).where(MetricsReadRefreshJob.endpoint == "/api/v1/metrics/runs"))).scalars().all()
+    assert len(rows) == 1
 
 
 @pytest.mark.anyio
@@ -874,12 +968,16 @@ async def test_overview_emite_metrics_endpoint_timing_tres_chamadas(client, db_s
     )
     before = len((await db_session.execute(stmt)).scalars().all())
 
+    accepted = await client.get("/api/v1/metrics/overview", params={"days": 7, "force_live": "true"})
+    assert accepted.status_code == 202
+    await process_read_refresh_jobs_once(db=db_session, limit=20)
     for _ in range(3):
         response = await client.get("/api/v1/metrics/overview", params={"days": 7})
         assert response.status_code == 200
 
     after_rows = (await db_session.execute(stmt)).scalars().all()
-    assert len(after_rows) - before == 3
+    # C2.2 emite timing tambem para o request force_live (202 Accepted).
+    assert len(after_rows) - before == 4
     for row in after_rows[-3:]:
         facts = row.facts
         assert facts["status_code"] == 200
@@ -900,7 +998,7 @@ async def test_overview_emite_metrics_endpoint_timing_tres_chamadas(client, db_s
 
 
 @pytest.mark.anyio
-async def test_runs_um_completed(client, seed_observation):
+async def test_runs_um_completed(client, seed_observation, db_session):
     """
     Valida CES_run_v1 para run completed.
     """
@@ -915,6 +1013,7 @@ async def test_runs_um_completed(client, seed_observation):
             "termination_reason": "pipeline_complete",
         },
     )
+    await _materialize_runs_snapshot(client, db_session, start_date="2026-02-10", end_date="2026-02-10")
     response = await client.get(
         "/api/v1/metrics/runs",
         params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
@@ -935,7 +1034,7 @@ async def test_runs_um_completed(client, seed_observation):
 
 
 @pytest.mark.anyio
-async def test_runs_dedupe_por_process_id(client, seed_observation):
+async def test_runs_dedupe_por_process_id(client, seed_observation, db_session):
     """
     Valida dedupe por process_id usando o registro mais recente.
     """
@@ -959,6 +1058,7 @@ async def test_runs_dedupe_por_process_id(client, seed_observation):
             "actions_executed": 1,
         },
     )
+    await _materialize_runs_snapshot(client, db_session, start_date="2026-02-10", end_date="2026-02-10")
     response = await client.get(
         "/api/v1/metrics/runs",
         params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
@@ -970,7 +1070,7 @@ async def test_runs_dedupe_por_process_id(client, seed_observation):
 
 
 @pytest.mark.anyio
-async def test_runs_ordenacao_desc(client, seed_observation):
+async def test_runs_ordenacao_desc(client, seed_observation, db_session):
     """
     Valida ordenacao por timestamp_finished desc.
     """
@@ -994,6 +1094,7 @@ async def test_runs_ordenacao_desc(client, seed_observation):
             "actions_executed": 1,
         },
     )
+    await _materialize_runs_snapshot(client, db_session, start_date="2026-02-10", end_date="2026-02-10")
     response = await client.get(
         "/api/v1/metrics/runs",
         params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
