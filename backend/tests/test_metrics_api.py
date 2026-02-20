@@ -314,6 +314,54 @@ async def test_overview_timing_inclui_source(client, db_session, seed_daily_metr
 
 
 @pytest.mark.anyio
+async def test_overview_force_live_rate_limit(client, seed_daily_metric):
+    """
+    force_live=true deve aplicar cooldown deterministico para evitar abuso.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=2,
+        completed_runs=2,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 2},
+    )
+    params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "force_live": "true"}
+    first = await client.get("/api/v1/metrics/overview", params=params)
+    second = await client.get("/api/v1/metrics/overview", params=params)
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    detail = second.json()["detail"]
+    assert detail["error_type"] == "RateLimited"
+    assert detail["scope"] == "overview_force_live"
+    assert int(detail["cooldown_seconds"]) == 10
+    assert int(detail["retry_after_seconds"]) >= 1
+
+
+@pytest.mark.anyio
+async def test_overview_sem_force_live_nao_aplica_rate_limit(client, seed_daily_metric):
+    """
+    Chamadas normais do overview nao devem cair no guardrail de force_live.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=2,
+        completed_runs=2,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 2},
+    )
+    params = {"start_date": "2026-02-10", "end_date": "2026-02-10"}
+    first = await client.get("/api/v1/metrics/overview", params=params)
+    second = await client.get("/api/v1/metrics/overview", params=params)
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+
+@pytest.mark.anyio
 async def test_daily_alerted_true_quando_ha_alerta(client, seed_daily_metric, seed_observation):
     """
     Valida enrichment de alerta no /metrics/daily.
