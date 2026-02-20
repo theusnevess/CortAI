@@ -120,6 +120,20 @@ def _read_capacity_config() -> dict:
     }
 
 
+def _read_read_api_config() -> dict:
+    """
+    Exibe configuracao declarativa do read-api para auditoria operacional.
+    """
+    enabled_raw = str(os.getenv("READ_API_ENABLED", "false")).strip().lower()
+    enabled = enabled_raw in {"1", "true", "yes", "on"}
+    base_url = os.getenv("READ_API_BASE_URL", "")
+    return {
+        "enabled": enabled,
+        "up": enabled,
+        "base_url": base_url,
+    }
+
+
 @router.get("/status")
 async def get_status(
     window_days: int = Query(SLO_STATUS_WINDOW_DAYS_DEFAULT, ge=1),
@@ -280,6 +294,7 @@ async def get_status(
             },
             # Config efetiva para correlacionar contensao C2 sem inspecao manual.
             "capacity_config": _read_capacity_config(),
+            "read_api": _read_read_api_config(),
             "read_path": {
                 "overview_freshness_seconds": None,
                 "overview_snapshot_status": "missing",
