@@ -1,0 +1,213 @@
+name: P2-B1 Runner External
+
+on:
+  workflow_dispatch:
+    inputs:
+      sut_host:
+        description: "SUT host/IP sem protocolo (ex: my-sut.example.com)"
+        required: true
+        type: string
+      direct_port:
+        description: "Porta do direct path"
+        required: true
+        default: "8000"
+        type: string
+      edge_port:
+        description: "Porta do edge path"
+        required: true
+        default: "8001"
+        type: string
+      run_edge:
+        description: "Executar benchmark no edge path"
+        required: true
+        default: true
+        type: boolean
+      sut_ssh_host:
+        description: "Host/IP para SSH no SUT (opcional)"
+        required: false
+        type: string
+      sut_ssh_user:
+        description: "Usuario SSH no SUT (opcional)"
+        required: false
+        type: string
+      collect_edge_logs:
+        description: "Coletar logs do edge via SSH"
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  p2-b1:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bash coreutils curl jq wrk openssh-client
+
+      - name: Prepare workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp_p2
+          if [[ ! -f "scripts/run_p2_matrix.sh" ]]; then
+            echo "::error::scripts/run_p2_matrix.sh nao encontrado no repo."
+            exit 1
+          fi
+          chmod +x scripts/run_p2_matrix.sh
+
+      - name: Run direct benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_list="$(mktemp)"
+          after_list="$(mktemp)"
+          find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$before_list"
+
+          ./scripts/run_p2_matrix.sh "http://${{ inputs.sut_host }}:${{ inputs.direct_port }}"
+
+          find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$after_list"
+          new_csv="$(comm -13 "$before_list" "$after_list" | head -n 1 || true)"
+
+          if [[ -n "$new_csv" ]]; then
+            cp "$new_csv" .tmp_p2/p2_a_summary_direct.csv
+          elif [[ -f ".tmp_p2/p2_a_summary_direct.csv" ]]; then
+            true
+          else
+            fallback="$(find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | head -n 1 || true)"
+            if [[ -z "$fallback" ]]; then
+              echo "::error::Nenhum CSV foi gerado para o direct."
+              exit 1
+            fi
+            cp "$fallback" .tmp_p2/p2_a_summary_direct.csv
+          fi
+
+          if [[ ! -s ".tmp_p2/p2_a_summary_direct.csv" ]]; then
+            echo "::error::CSV direct ausente ou vazio."
+            exit 1
+          fi
+
+      - name: Run edge benchmark
+        if: ${{ inputs.run_edge }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_list="$(mktemp)"
+          after_list="$(mktemp)"
+          find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$before_list"
+
+          ./scripts/run_p2_matrix.sh "http://${{ inputs.sut_host }}:${{ inputs.edge_port }}"
+
+          find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$after_list"
+          new_csv="$(comm -13 "$before_list" "$after_list" | grep -v 'p2_a_summary_direct.csv' | head -n 1 || true)"
+
+          if [[ -n "$new_csv" ]]; then
+            cp "$new_csv" .tmp_p2/p2_a_summary_edge.csv
+          elif [[ -f ".tmp_p2/p2_a_summary_edge.csv" ]]; then
+            true
+          else
+            fallback="$(find .tmp_p2 -maxdepth 1 -type f \( -name '*edge*.csv' -o -name "*${{ inputs.edge_port }}*.csv" \) | head -n 1 || true)"
+            if [[ -n "$fallback" ]]; then
+              cp "$fallback" .tmp_p2/p2_a_summary_edge.csv
+            fi
+          fi
+
+      - name: Collect edge logs via SSH
+        if: ${{ inputs.collect_edge_logs }}
+        shell: bash
+        env:
+          SUT_SSH_KEY: ${{ secrets.SUT_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ inputs.sut_ssh_host }}" || -z "${{ inputs.sut_ssh_user }}" ]]; then
+            echo "::error::collect_edge_logs=true exige sut_ssh_host e sut_ssh_user."
+            exit 1
+          fi
+          if [[ -z "${SUT_SSH_KEY}" ]]; then
+            echo "::error::Secret SUT_SSH_KEY ausente."
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SUT_SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          ssh -o StrictHostKeyChecking=no -o BatchMode=yes "${{ inputs.sut_ssh_user }}@${{ inputs.sut_ssh_host }}" '
+            set -euo pipefail
+            if [ -f /var/log/nginx/access.log ]; then
+              tail -n 400 /var/log/nginx/access.log
+            elif [ -f /var/log/nginx/edge_access.log ]; then
+              tail -n 400 /var/log/nginx/edge_access.log
+            elif command -v docker >/dev/null 2>&1; then
+              docker logs cortai_edge --since 15m | tail -n 400
+            else
+              echo "Nenhum metodo de coleta de logs do edge disponivel." >&2
+              exit 1
+            fi
+          ' > .tmp_p2/edge_logs_15m_tail400.txt
+
+      - name: List .tmp_p2
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lah .tmp_p2
+
+      - name: Upload direct artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-b1-artifacts
+          path: .tmp_p2/p2_a_summary_direct.csv
+          if-no-files-found: error
+
+      - name: Upload edge CSV artifact
+        if: ${{ hashFiles('.tmp_p2/p2_a_summary_edge.csv') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-b1-artifacts
+          path: .tmp_p2/p2_a_summary_edge.csv
+          if-no-files-found: ignore
+
+      - name: Upload edge logs artifact
+        if: ${{ hashFiles('.tmp_p2/edge_logs_15m_tail400.txt') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-b1-artifacts
+          path: .tmp_p2/edge_logs_15m_tail400.txt
+          if-no-files-found: ignore
+
+      - name: Write summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## P2-B1 Runner External"
+            echo
+            echo "- direct csv: \`.tmp_p2/p2_a_summary_direct.csv\`"
+            if [[ -f .tmp_p2/p2_a_summary_edge.csv ]]; then
+              echo "- edge csv: \`.tmp_p2/p2_a_summary_edge.csv\`"
+            else
+              echo "- edge csv: nao gerado"
+            fi
+            if [[ -f .tmp_p2/edge_logs_15m_tail400.txt ]]; then
+              echo "- edge logs: \`.tmp_p2/edge_logs_15m_tail400.txt\`"
+            else
+              echo "- edge logs: nao gerado"
+            fi
+            echo
+            echo "### direct (head -n 5)"
+            echo '```csv'
+            head -n 5 .tmp_p2/p2_a_summary_direct.csv || true
+            echo '```'
+            if [[ -f .tmp_p2/p2_a_summary_edge.csv ]]; then
+              echo
+              echo "### edge (head -n 5)"
+              echo '```csv'
+              head -n 5 .tmp_p2/p2_a_summary_edge.csv || true
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
