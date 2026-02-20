@@ -1063,3 +1063,14 @@ Status operacional:
   - `enabled`
   - `up`
   - `base_url`
+
+### Nota de anomalia (db_us)
+
+Em janelas longas, pode aparecer `db_us` alto em `metrics_endpoint_timing` sem reproduzir em SQL:
+- amostras pontuais mostraram `db_us` alto em `/metrics/runs` e `/observability/report`;
+- `EXPLAIN (ANALYZE, BUFFERS)` das queries equivalentes permaneceu sub-ms;
+- pivots curtos voltaram para `p95_db_us` em poucos ms, com `db_pool_wait_us=0`.
+
+Regra operacional:
+- nao tratar `db_us` alto isolado como `SQL slow` sem repetibilidade em rodada curta + `EXPLAIN`.
+- priorizar correlacao com `rt/uct/uht` no edge para diagnostico de TTFB/infra-path.

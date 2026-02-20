@@ -105,3 +105,25 @@ Escopo:
 Gate de validacao:
 - benchmark C=2 (3x60s) comparando p99 com baseline C2.2.
 - criterio de impacto: queda >=20% em p99 (`overview` e `runs`) com `timeouts=0`.
+
+## P2-C2.4 (diagnostico curto de anomalia db_us)
+
+Objetivo:
+- verificar se `db_us` alto observado em janela longa era gargalo SQL real.
+
+Resultado:
+- logs do edge com formato `rt/uct/uht` ativos.
+- p95: `uct=0.0s`, `uht~1.118s`, `rt~1.104s` (TTFB domina; connect nao domina).
+- top amostras com `db_us` alto em janela longa apareceram para:
+  - `/api/v1/metrics/runs` (`query_fingerprint=limit=200&offset=0&range=8d`)
+  - `/api/v1/observability/report` (modo lean default)
+- `EXPLAIN (ANALYZE, BUFFERS)` das queries representativas permaneceu sub-ms.
+- rodada curta C=2 (20s) confirmou `p99` ~1s+ com:
+  - `timeouts=0`
+  - `p95_db_us` novamente em poucos ms
+  - `db_pool_wait_us=0`
+
+Decisao:
+- anomalia `db_us` classificada como ruido/contensao de runtime, nao `SQL slow` repetivel.
+- `safe_envelope_v2.0` permanece `C1`.
+- gate estrutural continua em `P2-B1` com runner externo.
