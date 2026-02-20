@@ -15,7 +15,13 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import CognitiveMetricsDaily, MetricsOverviewReadModel, ObservationRecord, PublishReceipt
+from app.db.models import (
+    CognitiveMetricsDaily,
+    MetricsOverviewReadModel,
+    MetricsRunsReadModel,
+    ObservationRecord,
+    PublishReceipt,
+)
 from app.db.session import get_db
 from app.observations import persist_observation
 from app.schemas.observation import Observation
@@ -87,6 +93,8 @@ METRICS_OVERVIEW_CACHE_TTL_SECONDS = 10
 METRICS_OVERVIEW_CACHE_MAX_ENTRIES = 128
 METRICS_OVERVIEW_READ_MODEL_ENABLED = True
 METRICS_OVERVIEW_FORCE_LIVE_COOLDOWN_SECONDS = 10
+METRICS_RUNS_READ_MODEL_ENABLED = True
+METRICS_RUNS_FORCE_LIVE_COOLDOWN_SECONDS = 10
 _metrics_overview_cache: dict[str, tuple[float, str]] = {}
 _metrics_overview_cache_lock = Lock()
 _metrics_overview_force_live_limiter: dict[str, float] = {}
@@ -192,7 +200,7 @@ def _set_overview_cache(key: str, payload_json: str) -> None:
         _metrics_overview_cache[key] = (expires_at, payload_json)
 
 
-def _consume_force_live_token(scope_key: str) -> int:
+def _consume_force_live_token(scope_key: str, cooldown_seconds: int) -> int:
     """
     Aplica cooldown deterministico por escopo para evitar abuso de force_live.
     Returns:
@@ -204,9 +212,7 @@ def _consume_force_live_token(scope_key: str) -> int:
         if release_at > now:
             remaining = int(math.ceil(release_at - now))
             return max(1, remaining)
-        _metrics_overview_force_live_limiter[scope_key] = (
-            now + METRICS_OVERVIEW_FORCE_LIVE_COOLDOWN_SECONDS
-        )
+        _metrics_overview_force_live_limiter[scope_key] = now + max(1, int(cooldown_seconds))
     return 0
 
 
@@ -216,6 +222,33 @@ def _clear_force_live_limiter() -> None:
     """
     with _metrics_overview_force_live_limiter_lock:
         _metrics_overview_force_live_limiter.clear()
+
+
+def _new_db_stats() -> dict[str, int]:
+    """
+    Inicializa acumuladores de custo de banco por request.
+    """
+    return {"db_us": 0, "db_queries": 0, "db_pool_wait_us": 0}
+
+
+async def _execute_with_db_stats(
+    db: AsyncSession,
+    statement,
+    db_stats: dict[str, int],
+    params: dict | None = None,
+):
+    """
+    Executa query contabilizando tempo e quantidade de chamadas ao banco.
+    """
+    started_ns = perf_counter_ns()
+    if params is None:
+        result = await db.execute(statement)
+    else:
+        result = await db.execute(statement, params)
+    elapsed_us = max(0, (perf_counter_ns() - started_ns) // 1000)
+    db_stats["db_us"] = int(db_stats.get("db_us", 0)) + int(elapsed_us)
+    db_stats["db_queries"] = int(db_stats.get("db_queries", 0)) + 1
+    return result
 
 
 async def _ensure_overview_read_model_table(db: AsyncSession) -> None:
@@ -290,6 +323,107 @@ async def _upsert_overview_read_model_payload(
     )
     await db.execute(upsert_stmt)
     # Persistencia explicita: get_db fecha sessao sem commit automatico.
+    await db.commit()
+    return refreshed_at
+
+
+async def _ensure_runs_read_model_table(db: AsyncSession) -> None:
+    """
+    Garante tabela do read model de runs em ambientes sem migration aplicada.
+    """
+    conn = await db.connection()
+    await conn.run_sync(
+        lambda sync_conn: MetricsRunsReadModel.__table__.create(bind=sync_conn, checkfirst=True)
+    )
+
+
+async def _get_runs_read_model_payload(
+    db: AsyncSession,
+    *,
+    start: date,
+    end: date,
+    limit: int,
+    offset: int,
+    db_stats: dict[str, int],
+) -> tuple[dict | None, datetime | None]:
+    """
+    Busca payload materializado de runs por chave de consulta.
+    """
+    if not METRICS_RUNS_READ_MODEL_ENABLED:
+        return None, None
+    stmt = (
+        select(MetricsRunsReadModel)
+        .where(MetricsRunsReadModel.start_date == start)
+        .where(MetricsRunsReadModel.end_date == end)
+        .where(MetricsRunsReadModel.limit == limit)
+        .where(MetricsRunsReadModel.offset == offset)
+        .order_by(desc(MetricsRunsReadModel.refreshed_at))
+        .limit(1)
+    )
+    row = (await _execute_with_db_stats(db, stmt, db_stats)).scalars().first()
+    if row is None or not isinstance(row.payload, dict):
+        return None, None
+    return row.payload, row.refreshed_at
+
+
+async def _get_runs_read_model_refreshed_at(
+    db: AsyncSession,
+    *,
+    start: date,
+    end: date,
+    limit: int,
+    offset: int,
+    db_stats: dict[str, int],
+) -> datetime | None:
+    """
+    Retorna timestamp de refresh da chave de runs para cooldown deterministico.
+    """
+    stmt = (
+        select(MetricsRunsReadModel.refreshed_at)
+        .where(MetricsRunsReadModel.start_date == start)
+        .where(MetricsRunsReadModel.end_date == end)
+        .where(MetricsRunsReadModel.limit == limit)
+        .where(MetricsRunsReadModel.offset == offset)
+        .order_by(desc(MetricsRunsReadModel.refreshed_at))
+        .limit(1)
+    )
+    return (await _execute_with_db_stats(db, stmt, db_stats)).scalar()
+
+
+async def _upsert_runs_read_model_payload(
+    db: AsyncSession,
+    *,
+    start: date,
+    end: date,
+    limit: int,
+    offset: int,
+    payload: dict,
+    db_stats: dict[str, int],
+) -> datetime:
+    """
+    Atualiza read model de runs para manter leitura previsivel no endpoint list.
+    """
+    refreshed_at = datetime.utcnow()
+    upsert_stmt = insert(MetricsRunsReadModel).values(
+        id=uuid.uuid4(),
+        start_date=start,
+        end_date=end,
+        limit=limit,
+        offset=offset,
+        payload=payload,
+        refreshed_at=refreshed_at,
+        created_at=refreshed_at,
+        updated_at=refreshed_at,
+    )
+    upsert_stmt = upsert_stmt.on_conflict_do_update(
+        index_elements=["start_date", "end_date", "limit", "offset"],
+        set_={
+            "payload": payload,
+            "refreshed_at": refreshed_at,
+            "updated_at": refreshed_at,
+        },
+    )
+    await _execute_with_db_stats(db, upsert_stmt, db_stats)
     await db.commit()
     return refreshed_at
 
@@ -448,6 +582,7 @@ def _emit_metrics_endpoint_timing(
     cache_hit: bool | None = None,
     cache_key_hash: str | None = None,
     overview_source: str | None = None,
+    runs_source: str | None = None,
     db_us: int = 0,
     db_queries: int = 0,
     db_pool_wait_us: int = 0,
@@ -507,6 +642,8 @@ def _emit_metrics_endpoint_timing(
             facts["cache_key_hash"] = str(cache_key_hash)
         if overview_source:
             facts["overview_source"] = str(overview_source)
+        if runs_source:
+            facts["runs_source"] = str(runs_source)
         observation = Observation(
             observation_id=str(uuid.uuid4()),
             timestamp=event_ts,
@@ -1226,7 +1363,7 @@ async def get_metrics_overview(
         if force_live:
             client_host = (request.client.host if request.client else "unknown") or "unknown"
             limiter_scope = f"overview_force_live:{client_host}:{cache_key_hash}"
-            retry_after_seconds = _consume_force_live_token(limiter_scope)
+            retry_after_seconds = _consume_force_live_token(limiter_scope, METRICS_OVERVIEW_FORCE_LIVE_COOLDOWN_SECONDS)
             if retry_after_seconds > 0:
                 raise HTTPException(
                     status_code=429,
@@ -1519,6 +1656,7 @@ async def get_runs(
     request: Request,
     start_date: str | None = None,
     end_date: str | None = None,
+    force_live: bool = Query(False),
     limit: int = Query(50, ge=1),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -1530,6 +1668,8 @@ async def get_runs(
     started_at = perf_counter()
     status_code = 500
     query_fingerprint = f"limit={limit}&offset={offset}&range=unknown"
+    runs_source = "live"
+    db_stats = _new_db_stats()
     try:
         start = _parse_date(start_date, "start_date")
         end = _parse_date(end_date, "end_date")
@@ -1564,6 +1704,45 @@ async def get_runs(
             )
 
         query_fingerprint = _build_runs_query_fingerprint(limit, offset, start, end)
+        await _ensure_runs_read_model_table(db)
+        if force_live:
+            last_refresh = await _get_runs_read_model_refreshed_at(
+                db,
+                start=start,
+                end=end,
+                limit=limit,
+                offset=offset,
+                db_stats=db_stats,
+            )
+            retry_after_seconds = 0
+            if isinstance(last_refresh, datetime):
+                elapsed = (datetime.utcnow() - last_refresh).total_seconds()
+                remaining = METRICS_RUNS_FORCE_LIVE_COOLDOWN_SECONDS - elapsed
+                if remaining > 0:
+                    retry_after_seconds = max(1, int(math.ceil(remaining)))
+            if retry_after_seconds:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error_type": "RateLimited",
+                        "retry_after_seconds": retry_after_seconds,
+                        "cooldown_seconds": METRICS_RUNS_FORCE_LIVE_COOLDOWN_SECONDS,
+                        "scope": "runs_force_live",
+                    },
+                )
+        else:
+            read_payload, _ = await _get_runs_read_model_payload(
+                db,
+                start=start,
+                end=end,
+                limit=limit,
+                offset=offset,
+                db_stats=db_stats,
+            )
+            if read_payload is not None:
+                runs_source = "read_model"
+                status_code = 200
+                return read_payload
 
         count_stmt = (
             select(func.count(func.distinct(ObservationRecord.process_id)))
@@ -1571,7 +1750,7 @@ async def get_runs(
             .where(ObservationRecord.timestamp >= datetime.combine(start, datetime.min.time()))
             .where(ObservationRecord.timestamp < datetime.combine(end + timedelta(days=1), datetime.min.time()))
         )
-        total = (await db.execute(count_stmt)).scalar() or 0
+        total = (await _execute_with_db_stats(db, count_stmt, db_stats)).scalar() or 0
 
         stmt = (
             select(
@@ -1585,7 +1764,7 @@ async def get_runs(
             .where(ObservationRecord.timestamp < datetime.combine(end + timedelta(days=1), datetime.min.time()))
             .order_by(desc(ObservationRecord.timestamp))
         )
-        rows = (await db.execute(stmt)).all()
+        rows = (await _execute_with_db_stats(db, stmt, db_stats)).all()
 
         latest_by_process: dict[str, tuple] = {}
         for process_id, observation_id, ts, facts in rows:
@@ -1625,13 +1804,23 @@ async def get_runs(
                 }
             )
 
-        status_code = 200
-        return {
+        response_payload = {
             "items": items,
             "total": total,
             "limit": limit,
             "offset": offset,
         }
+        await _upsert_runs_read_model_payload(
+            db,
+            start=start,
+            end=end,
+            limit=limit,
+            offset=offset,
+            payload=response_payload,
+            db_stats=db_stats,
+        )
+        status_code = 200
+        return response_payload
     except HTTPException as exc:
         status_code = exc.status_code
         raise
@@ -1656,6 +1845,10 @@ async def get_runs(
             server_total_ms=server_total_us // 1000,
             server_total_us=server_total_us,
             query_fingerprint=query_fingerprint,
+            runs_source=runs_source,
+            db_us=db_stats["db_us"],
+            db_queries=db_stats["db_queries"],
+            db_pool_wait_us=db_stats["db_pool_wait_us"],
         )
 
 
@@ -1798,3 +1991,4 @@ async def get_run_debug(
             query_fingerprint=query_fingerprint,
             process_id=process_id,
         )
+

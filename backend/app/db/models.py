@@ -210,6 +210,33 @@ class MetricsOverviewReadModel(Base):
     )
 
 
+class MetricsRunsReadModel(Base):
+    __tablename__ = "metrics_runs_read_model"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=False)
+    limit = Column(Integer, nullable=False)
+    offset = Column(Integer, nullable=False)
+    payload = Column(JSONB, nullable=False, default=dict)
+    refreshed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_runs_read_model_start_date", "start_date"),
+        Index("ix_runs_read_model_end_date", "end_date"),
+        Index(
+            "ux_runs_read_model_key",
+            "start_date",
+            "end_date",
+            "limit",
+            "offset",
+            unique=True,
+        ),
+    )
+
+
 # --- Tabela de Recibos de Publicacao ---
 class PublishReceipt(Base):
     __tablename__ = "publish_receipts"
