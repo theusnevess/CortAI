@@ -364,9 +364,13 @@ async def test_overview_force_live_enfileira_job_accepted(client, seed_daily_met
     params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "force_live": "true"}
     accepted = await client.get("/api/v1/metrics/overview", params=params)
     assert accepted.status_code == 202
+    assert accepted.headers.get("X-Envelope") == "C1"
+    assert accepted.headers.get("X-Reason") == "throughput_path"
+    assert accepted.headers.get("Retry-After") is not None
     payload = accepted.json()
     assert payload["error_type"] == "Accepted"
     assert payload["scope"] == "overview_force_live"
+    assert payload["snapshot_status"] == "queued"
     assert isinstance(payload["job_key"], str) and len(payload["job_key"]) == 64
     assert isinstance(payload["job_enqueued"], bool)
     assert int(payload["retry_after_seconds"]) >= 1
@@ -766,9 +770,13 @@ async def test_overview_sem_snapshot_retorna_snapshot_missing(client):
         params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
     )
     assert response.status_code == 503
+    assert response.headers.get("X-Envelope") == "C1"
+    assert response.headers.get("X-Reason") == "throughput_path"
+    assert response.headers.get("Retry-After") is not None
     detail = response.json()["detail"]
     assert detail["error_type"] == "SnapshotMissing"
     assert detail["scope"] == "overview_snapshot"
+    assert detail["snapshot_status"] == "missing"
     assert int(detail["retry_after_seconds"]) >= 1
 
 
@@ -782,9 +790,13 @@ async def test_runs_sem_snapshot_retorna_snapshot_missing(client):
         params={"start_date": "2026-02-10", "end_date": "2026-02-10", "limit": 50, "offset": 0},
     )
     assert response.status_code == 503
+    assert response.headers.get("X-Envelope") == "C1"
+    assert response.headers.get("X-Reason") == "throughput_path"
+    assert response.headers.get("Retry-After") is not None
     detail = response.json()["detail"]
     assert detail["error_type"] == "SnapshotMissing"
     assert detail["scope"] == "runs_snapshot"
+    assert detail["snapshot_status"] == "missing"
     assert int(detail["retry_after_seconds"]) >= 1
 
 
@@ -922,9 +934,13 @@ async def test_runs_force_live_accepted_payload(client, seed_observation):
     params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "force_live": "true", "limit": 50, "offset": 0}
     response = await client.get("/api/v1/metrics/runs", params=params)
     assert response.status_code == 202
+    assert response.headers.get("X-Envelope") == "C1"
+    assert response.headers.get("X-Reason") == "throughput_path"
+    assert response.headers.get("Retry-After") is not None
     payload = response.json()
     assert payload["error_type"] == "Accepted"
     assert payload["scope"] == "runs_force_live"
+    assert payload["snapshot_status"] == "queued"
     assert isinstance(payload["job_key"], str) and len(payload["job_key"]) == 64
     assert isinstance(payload["job_enqueued"], bool)
     assert int(payload["retry_after_seconds"]) >= 1
