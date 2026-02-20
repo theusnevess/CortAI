@@ -898,3 +898,83 @@ Observacao canonica:
   - concluir que gargalo e estrutural do ambiente/process model atual
   - `safe_envelope_v2.0` permanece `C1`
   - `C2` so passa com intervencao arquitetural deliberada
+
+## P2-C - Kickoff (com gate explicito)
+
+Premissas (gate):
+- `safe_envelope_v2.0` (operacional) = `C1`
+- `safe_envelope_v2.0` (estrutural) = `pending` (P2-B1 runner externo)
+- Qualquer melhoria em P2-C deve:
+  - manter `timeouts = 0`
+  - manter `bad_duration = 0`
+  - manter `path_leaks_30d = 0`
+  - manter `db_pool_wait_us = 0` (ou evidenciar por que subiu)
+- Sem mudanca de logica/contrato dos endpoints (apenas read-path/materializacao/cache/infra do read).
+
+Objetivo P2-C (mensuravel):
+- Tornar `C2` viavel sob SLO atual em Linux nativo (rodada estrutural posterior), reduzindo latencia do read-path para:
+  - `p99 C2 <= SLO` por endpoint (`overview/runs/report`)
+  - com `db_us` e `queue_us` previsiveis e baixos
+
+### Metricas-alvo e hard checks
+
+Hard checks (nao pode piorar):
+- `timeouts = 0` (direct e edge)
+- `error_rate = 0` (ou `<= SLO`, se aplicavel)
+- `bad_duration = 0`
+- `path_leaks_30d = 0`
+- `db_pool_wait_us p95 = 0` (ou justificativa + fix)
+
+Alvos de performance:
+- `/metrics/overview` em `C2`: `p99` dentro do SLO
+- `/metrics/runs` em `C2`: `p99` dentro do SLO
+- `/observability/report` (default lean) em `C2`: `p99` dentro do SLO
+
+Instrumentacao obrigatoria para P2-C:
+- Pivot por endpoint no timing: `queue_us`, `handler_us`, `db_us`, `db_queries`, `db_pool_wait_us`, `server_total_us`
+- Pivot por caminho (direct vs edge): `rt/uct/uht` (edge logs)
+- Evidencia do read-path por request (fonte DB/materializado/cache em facts)
+
+### Escolha de trilha (sem mudar logica de endpoint)
+
+Trilha C1 - Materializacao/Cache (recomendado primeiro):
+- Definir read models minimos por endpoint:
+  - `overview_read_model` (agregado pronto)
+  - `runs_read_model` (lista latest per process_id ja otimizada)
+  - `report_read_model` (default lean mantendo `db_queries <= 4`)
+- Estrategia de atualizacao:
+  - job periodico (ex.: 1-5 min) ou trigger/append-only (se aplicavel)
+- Contrato de consistencia:
+  - `freshness_seconds` exposto em `/status` (somente leitura)
+- Guardrails:
+  - fallback para DB on-demand desligado por default
+- Migracoes + indices:
+  - indices alinhados com top queries do read model
+
+Criterio de saida da Trilha C1:
+- `db_queries` por endpoint em `C2` previsivel e baixo (ex.: 0-2)
+- `db_us` reduzido e estavel
+- `queue_us` sem explosao por saturacao do read-path
+
+Trilha C2 - Servico read-path (se C1 nao bastar):
+- Novo servico `metrics-read` (mesmo repo/compose)
+- API principal consome read-service (HTTP interno) ou mesmo DB/read model
+- Rate limits e timeouts internos definidos
+- Observabilidade por hop (timing no chamador e no servico)
+
+Criterio de saida da Trilha C2:
+- Latencia C2 dentro do SLO com isolamento de recursos
+- Evidencia de contensao de processo/loop (nao DB)
+
+### DoD P2-C
+
+Para fechar PR de P2-C:
+- Sem mudanca de contrato publico
+- Testes verdes (suite completa)
+- Documentacao atualizada em `docs/observability.md`
+- Tabela de evidencia (`C=1/2/5`) + pivots (`queue_us/db_us/db_queries`)
+- Execucao local (operacional) demonstra melhoria vs baseline
+- Sem regressao em `/observability/report` (`db_queries <= 4` e `p95_db_us` baixo em steady-state)
+
+Gate estrutural (fora do DoD do PR, obrigatorio para promover envelope):
+- Rodar P2-B1 com runner externo e atualizar decisao estrutural
