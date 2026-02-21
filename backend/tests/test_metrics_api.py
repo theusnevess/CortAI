@@ -801,6 +801,64 @@ async def test_runs_sem_snapshot_retorna_snapshot_missing(client):
 
 
 @pytest.mark.anyio
+async def test_overview_etag_retorna_304_com_if_none_match(client, db_session, seed_daily_metric):
+    """
+    Com snapshot presente, overview deve suportar validacao condicional via ETag/304.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=3,
+        completed_runs=3,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 3},
+    )
+    await _materialize_overview_snapshot(client, db_session, start_date="2026-02-10", end_date="2026-02-10")
+
+    first = await client.get("/api/v1/metrics/overview", params={"start_date": "2026-02-10", "end_date": "2026-02-10"})
+    assert first.status_code == 200
+    etag = first.headers.get("etag")
+    assert etag
+
+    second = await client.get(
+        "/api/v1/metrics/overview",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
+        headers={"If-None-Match": etag},
+    )
+    assert second.status_code == 304
+    assert second.headers.get("etag") == etag
+
+
+@pytest.mark.anyio
+async def test_runs_etag_retorna_304_com_if_none_match(client, db_session, seed_observation):
+    """
+    Com snapshot presente, runs deve suportar validacao condicional via ETag/304.
+    """
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 12, 0, 0),
+        process_id="P_RUN_ETAG_1",
+        source_outcome_id="outcome-run-etag-1",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "completed",
+            "actions_executed": 1,
+        },
+    )
+    await _materialize_runs_snapshot(client, db_session, start_date="2026-02-10", end_date="2026-02-10", limit=50, offset=0)
+
+    params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "limit": 50, "offset": 0}
+    first = await client.get("/api/v1/metrics/runs", params=params)
+    assert first.status_code == 200
+    etag = first.headers.get("etag")
+    assert etag
+
+    second = await client.get("/api/v1/metrics/runs", params=params, headers={"If-None-Match": etag})
+    assert second.status_code == 304
+    assert second.headers.get("etag") == etag
+
+
+@pytest.mark.anyio
 async def test_runs_guardrail_limit_too_high(client):
     """
     Valida guardrail de limit maximo no /metrics/runs.
