@@ -104,7 +104,7 @@ METRICS_READ_REFRESH_STATUS_DONE = "done"
 METRICS_READ_REFRESH_STATUS_FAILED = "failed"
 SAFE_ENVELOPE_LEVEL = "C1"
 ENVELOPE_REASON_THROUGHPUT_PATH = "throughput_path"
-_metrics_overview_cache: dict[str, tuple[float, str]] = {}
+_metrics_overview_cache: dict[str, tuple[float, str, str]] = {}
 _metrics_overview_cache_lock = Lock()
 _metrics_overview_force_live_limiter: dict[str, float] = {}
 _metrics_overview_force_live_limiter_lock = Lock()
@@ -181,7 +181,7 @@ def _overview_cache_key_hash(key: str) -> str:
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
 
 
-def _get_overview_cache(key: str) -> str | None:
+def _get_overview_cache(key: str) -> tuple[str, str] | None:
     if not _overview_cache_enabled():
         return None
     now = perf_counter()
@@ -189,14 +189,22 @@ def _get_overview_cache(key: str) -> str | None:
         payload = _metrics_overview_cache.get(key)
         if payload is None:
             return None
-        expires_at, data = payload
+        expires_at: float
+        data: str
+        etag: str
+        if len(payload) == 2:
+            # Compatibilidade com entradas antigas em memoria (antes de ETag).
+            expires_at, data = payload  # type: ignore[misc]
+            etag = ""
+        else:
+            expires_at, data, etag = payload
         if expires_at <= now:
             _metrics_overview_cache.pop(key, None)
             return None
-        return data
+        return data, etag
 
 
-def _set_overview_cache(key: str, payload_json: str) -> None:
+def _set_overview_cache(key: str, payload_json: str, etag: str) -> None:
     if not _overview_cache_enabled():
         return
     expires_at = perf_counter() + METRICS_OVERVIEW_CACHE_TTL_SECONDS
@@ -206,7 +214,7 @@ def _set_overview_cache(key: str, payload_json: str) -> None:
             oldest_key = next(iter(_metrics_overview_cache), None)
             if oldest_key is not None:
                 _metrics_overview_cache.pop(oldest_key, None)
-        _metrics_overview_cache[key] = (expires_at, payload_json)
+        _metrics_overview_cache[key] = (expires_at, payload_json, etag)
 
 
 def _consume_force_live_token(scope_key: str, cooldown_seconds: int) -> int:
@@ -242,6 +250,45 @@ def _build_envelope_headers(*, degraded: bool, retry_after_seconds: int | None =
         headers["X-Reason"] = ENVELOPE_REASON_THROUGHPUT_PATH
     if retry_after_seconds is not None:
         headers["Retry-After"] = str(max(1, int(retry_after_seconds)))
+    return headers
+
+
+def _build_snapshot_etag(*, endpoint: str, query_key: str, refreshed_at: datetime | None) -> str:
+    """
+    Gera ETag fraco e deterministico baseado na versao do snapshot.
+    Nao inclui freshness_seconds para evitar churn de ETag a cada request.
+    """
+    refreshed_token = refreshed_at.isoformat() if isinstance(refreshed_at, datetime) else "missing"
+    digest = hashlib.sha1(f"{endpoint}|{query_key}|{refreshed_token}".encode("utf-8")).hexdigest()[:16]
+    return f'W/"{digest}"'
+
+
+def _if_none_match_matches(request: Request, etag: str) -> bool:
+    """
+    Verifica match de If-None-Match para suporte a 304.
+    """
+    raw = request.headers.get("if-none-match", "").strip()
+    if not raw:
+        return False
+    if raw == "*":
+        return True
+    tokens = [token.strip() for token in raw.split(",") if token.strip()]
+    return etag in tokens
+
+
+def _build_snapshot_headers(
+    *,
+    degraded: bool,
+    etag: str | None = None,
+    retry_after_seconds: int | None = None,
+) -> dict[str, str]:
+    """
+    Agrega headers de envelope com semantica HTTP para snapshot/read-path.
+    """
+    headers = _build_envelope_headers(degraded=degraded, retry_after_seconds=retry_after_seconds)
+    headers["Cache-Control"] = "private, max-age=0"
+    if etag:
+        headers["ETag"] = etag
     return headers
 
 
@@ -1843,13 +1890,26 @@ async def get_metrics_overview(
             )
 
         cache_hit_flag = False
-        cached_payload_json = _get_overview_cache(cache_key)
-        if cached_payload_json is not None:
+        cached_payload = _get_overview_cache(cache_key)
+        if cached_payload is not None:
+            cached_payload_json, cached_etag = cached_payload
             cache_hit_flag = True
             overview_source = "cache"
             snapshot_status = "fresh"
+            response_headers = _build_snapshot_headers(
+                degraded=False,
+                etag=cached_etag if cached_etag else None,
+            )
+            if cached_etag and _if_none_match_matches(request, cached_etag):
+                status_code = 304
+                return Response(status_code=304, headers=response_headers)
             status_code = 200
-            return Response(content=cached_payload_json, media_type="application/json", status_code=200)
+            return Response(
+                content=cached_payload_json,
+                media_type="application/json",
+                status_code=200,
+                headers=response_headers,
+            )
 
         await _ensure_overview_read_model_table(db)
         read_payload, read_refreshed_at = await _get_overview_read_model_payload(
@@ -1880,6 +1940,18 @@ async def get_metrics_overview(
         if isinstance(read_refreshed_at, datetime):
             age_seconds = max(0, int((datetime.utcnow() - read_refreshed_at).total_seconds()))
         snapshot_status = "fresh" if age_seconds <= METRICS_READ_REFRESH_JOB_TTL_SECONDS else "stale"
+        snapshot_etag = _build_snapshot_etag(
+            endpoint="/api/v1/metrics/overview",
+            query_key=query_key,
+            refreshed_at=read_refreshed_at,
+        )
+        response_headers = _build_snapshot_headers(
+            degraded=(snapshot_status != "fresh"),
+            etag=snapshot_etag,
+        )
+        if _if_none_match_matches(request, snapshot_etag):
+            status_code = 304
+            return Response(status_code=304, headers=response_headers)
 
         response_payload = dict(read_payload)
         response_payload["snapshot_status"] = snapshot_status
@@ -1888,12 +1960,12 @@ async def get_metrics_overview(
 
         status_code = 200
         payload_json = json.dumps(response_payload, separators=(",", ":"), ensure_ascii=False)
-        _set_overview_cache(cache_key, payload_json)
+        _set_overview_cache(cache_key, payload_json, snapshot_etag)
         return Response(
             content=payload_json,
             media_type="application/json",
             status_code=200,
-            headers=_build_envelope_headers(degraded=(snapshot_status != "fresh")),
+            headers=response_headers,
         )
     except HTTPException as exc:
         status_code = exc.status_code
@@ -2114,6 +2186,19 @@ async def get_runs(
         if isinstance(refreshed_at, datetime):
             age_seconds = max(0, int((datetime.utcnow() - refreshed_at).total_seconds()))
         snapshot_status = "fresh" if age_seconds <= METRICS_READ_REFRESH_JOB_TTL_SECONDS else "stale"
+        snapshot_etag = _build_snapshot_etag(
+            endpoint="/api/v1/metrics/runs",
+            query_key=query_key,
+            refreshed_at=refreshed_at,
+        )
+        response_headers = _build_snapshot_headers(
+            degraded=(snapshot_status != "fresh"),
+            etag=snapshot_etag,
+        )
+        if _if_none_match_matches(request, snapshot_etag):
+            status_code = 304
+            return Response(status_code=304, headers=response_headers)
+
         payload = dict(read_payload)
         payload["snapshot_status"] = snapshot_status
         payload["last_refreshed_at"] = refreshed_at.isoformat() if refreshed_at else None
@@ -2122,7 +2207,7 @@ async def get_runs(
         return JSONResponse(
             status_code=200,
             content=payload,
-            headers=_build_envelope_headers(degraded=(snapshot_status != "fresh")),
+            headers=response_headers,
         )
     except HTTPException as exc:
         status_code = exc.status_code
