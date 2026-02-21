@@ -1022,6 +1022,12 @@ Cache de edge (P2-D2, SLO-aware delivery):
 - stale policy: `stale-while-revalidate` com `proxy_cache_background_update on`
 - header diagnostico no edge: `X-Edge-Cache: HIT|MISS|BYPASS|EXPIRED`
 
+Revalidacao HTTP (P2-D3):
+- backend (`overview`/`runs`) expõe `ETag` deterministico por versao de snapshot.
+- requests com `If-None-Match` retornam `304 Not Modified` quando o snapshot nao mudou.
+- edge ativa `proxy_cache_revalidate on` para aproveitar revalidacao condicional no upstream.
+- `ETag` nao e emitido em `202 Accepted` nem em `503 SnapshotMissing`.
+
 Erro deterministico sem snapshot:
 ```json
 {
