@@ -68,28 +68,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          before_list="$(mktemp)"
-          after_list="$(mktemp)"
-          find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$before_list"
-
           bash ./scripts/run_p2_matrix.sh "http://${{ inputs.sut_host }}:${{ inputs.direct_port }}"
-
-          find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$after_list"
-          new_csv="$(comm -13 "$before_list" "$after_list" | head -n 1 || true)"
-
-          if [[ -n "$new_csv" ]]; then
-            cp "$new_csv" .tmp_p2/p2_a_summary_direct.csv
-          elif [[ -f ".tmp_p2/p2_a_summary_direct.csv" ]]; then
-            true
-          else
-            fallback="$(find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | head -n 1 || true)"
-            if [[ -z "$fallback" ]]; then
-              echo "::error::Nenhum CSV foi gerado para o direct."
-              exit 1
-            fi
-            cp "$fallback" .tmp_p2/p2_a_summary_direct.csv
+          if [[ ! -s ".tmp_p2/p2_a_summary.csv" ]]; then
+            echo "::error::CSV base nao foi gerado para o direct."
+            exit 1
           fi
-
+          cp .tmp_p2/p2_a_summary.csv .tmp_p2/p2_a_summary_direct.csv
           if [[ ! -s ".tmp_p2/p2_a_summary_direct.csv" ]]; then
             echo "::error::CSV direct ausente ou vazio."
             exit 1
@@ -100,24 +84,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          before_list="$(mktemp)"
-          after_list="$(mktemp)"
-          find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$before_list"
-
           bash ./scripts/run_p2_matrix.sh "http://${{ inputs.sut_host }}:${{ inputs.edge_port }}"
-
-          find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$after_list"
-          new_csv="$(comm -13 "$before_list" "$after_list" | grep -v 'p2_a_summary_direct.csv' | head -n 1 || true)"
-
-          if [[ -n "$new_csv" ]]; then
-            cp "$new_csv" .tmp_p2/p2_a_summary_edge.csv
-          elif [[ -f ".tmp_p2/p2_a_summary_edge.csv" ]]; then
-            true
-          else
-            fallback="$(find .tmp_p2 -maxdepth 1 -type f \( -name '*edge*.csv' -o -name "*${{ inputs.edge_port }}*.csv" \) | head -n 1 || true)"
-            if [[ -n "$fallback" ]]; then
-              cp "$fallback" .tmp_p2/p2_a_summary_edge.csv
-            fi
+          if [[ ! -s ".tmp_p2/p2_a_summary.csv" ]]; then
+            echo "::error::CSV base nao foi gerado para o edge."
+            exit 1
+          fi
+          cp .tmp_p2/p2_a_summary.csv .tmp_p2/p2_a_summary_edge.csv
+          if [[ ! -s ".tmp_p2/p2_a_summary_edge.csv" ]]; then
+            echo "::error::CSV edge ausente ou vazio."
+            exit 1
           fi
 
       - name: Collect edge logs via SSH
