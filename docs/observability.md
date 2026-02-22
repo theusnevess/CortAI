@@ -1079,6 +1079,28 @@ Exemplo `202 Accepted` (overview/runs):
 Nota operacional:
 - repita o `GET` (ou consulte `/api/v1/status`) ate `freshness_seconds ~ 0` ou ate a resposta virar `200`.
 
+### Warm-up opcional no deploy (read-path)
+
+Quando usar:
+- apos deploy/restart para reduzir `503 SnapshotMissing` nas primeiras chamadas.
+
+Host (usa edge + runner no container `cortai_api`):
+```bash
+bash scripts/warmup_read_path.sh
+```
+
+Dentro do container da API (sem depender de `curl`):
+```bash
+docker exec -i cortai_api sh -lc "cd /app && bash scripts/warmup_read_path.sh"
+```
+
+Saida esperada (resumo):
+- `overview_get_http=200`
+- `runs_get_http=200`
+- `overview_snapshot_status` / `runs_snapshot_status`
+- `*_freshness_seconds`
+- `jobs_queued_count=0`
+
 Status/read-path:
 - `GET /api/v1/status` expoe:
   - `read_path.overview_snapshot_status`
