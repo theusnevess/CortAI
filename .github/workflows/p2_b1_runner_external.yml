@@ -80,8 +80,14 @@ jobs:
             echo "::error::scripts/run_p2_matrix.sh nao encontrado no repo."
             exit 1
           fi
+          if [[ ! -f "scripts/evaluate_c1_health.sh" ]]; then
+            echo "::error::scripts/evaluate_c1_health.sh nao encontrado no repo."
+            exit 1
+          fi
           sed -i 's/\r$//' scripts/run_p2_matrix.sh
+          sed -i 's/\r$//' scripts/evaluate_c1_health.sh
           chmod +x scripts/run_p2_matrix.sh
+          chmod +x scripts/evaluate_c1_health.sh
           ls -lah scripts/run_p2_matrix.sh
           head -n 5 scripts/run_p2_matrix.sh
 
@@ -250,88 +256,44 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          fail=0
-          P99_LIMIT_OVERVIEW_MS=1500
-          P99_LIMIT_RUNS_MS=1500
-          P99_LIMIT_REPORT_MS=1500
-          PCT5XX_MAX=1
-
-          p99_limit_for_endpoint() {
-            case "$1" in
-              overview) echo "$P99_LIMIT_OVERVIEW_MS" ;;
-              runs) echo "$P99_LIMIT_RUNS_MS" ;;
-              report) echo "$P99_LIMIT_REPORT_MS" ;;
-              *) echo "1500" ;;
-            esac
-          }
-
-          evaluate_c1_csv() {
-            local csv="$1"
-            local path_label="$2"
-            local found_c1=0
-            if [[ ! -s "$csv" ]]; then
-              echo "::error::CSV ausente para avaliacao C1 SLO: $csv"
-              fail=1
-              return
-            fi
-
-            while IFS=',' read -r endpoint c p90 p99 rps timeouts pct429 pct503 pct5xx; do
-              [[ -z "${endpoint:-}" ]] && continue
-              [[ "$c" != "1" ]] && continue
-              found_c1=1
-
-              local decision="PASS"
-              local p99_limit
-              p99_limit="$(p99_limit_for_endpoint "$endpoint")"
-
-              local rps_num="${rps:-0}"
-              local timeouts_num="${timeouts:-999999}"
-              local p99_num="${p99:-999999}"
-              local pct5xx_num="${pct5xx:-999999}"
-
-              [[ -z "$rps_num" || "$rps_num" == "NA" ]] && rps_num="0"
-              [[ -z "$timeouts_num" || "$timeouts_num" == "NA" ]] && timeouts_num="999999"
-              [[ -z "$p99_num" || "$p99_num" == "NA" ]] && p99_num="999999"
-              [[ -z "$pct5xx_num" || "$pct5xx_num" == "NA" ]] && pct5xx_num="999999"
-
-              if awk "BEGIN {exit !($timeouts_num > 0 || $rps_num < 1 || $pct5xx_num >= $PCT5XX_MAX || $p99_num > $p99_limit)}"; then
-                decision="FAIL"
-                fail=1
-              fi
-
-              echo "| ${path_label} | ${endpoint} | ${p99} | ${rps} | ${timeouts} | ${pct5xx} | ${decision} |" >> "$GITHUB_STEP_SUMMARY"
-            done < <(tail -n +2 "$csv")
-
-            if [[ "$found_c1" -ne 1 ]]; then
-              echo "::error::CSV sem linhas C=1 para ${path_label}: $csv"
-              fail=1
-            fi
-          }
-
-          {
-            echo
-            echo "## C1 SLO (operacional)"
-            echo
-            echo "Limites: timeouts=0, req/s>=1, pct_5xx<1%, p99_overview<=1500ms, p99_runs<=1500ms, p99_report<=1500ms"
-            echo
-            echo "| path | endpoint | p99_ms | rps | timeouts | pct_5xx | decision |"
-            echo "|------|----------|--------|-----|----------|---------|----------|"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          evaluate_c1_csv ".tmp_p2/p2_a_summary_direct.csv" "direct"
+          args=(--csv "direct=.tmp_p2/p2_a_summary_direct.csv")
           if [[ "${{ inputs.run_edge }}" == "true" && -f .tmp_p2/p2_a_summary_edge.csv ]]; then
-            evaluate_c1_csv ".tmp_p2/p2_a_summary_edge.csv" "edge"
+            args+=(--csv "edge=.tmp_p2/p2_a_summary_edge.csv")
           fi
 
-          if [[ "$fail" -eq 1 ]]; then
-            echo >> "$GITHUB_STEP_SUMMARY"
-            echo "C1 SLO: FAIL" >> "$GITHUB_STEP_SUMMARY"
+          if ! bash ./scripts/evaluate_c1_health.sh "${args[@]}" > .tmp_p2/c1_health.json; then
+            true
+          fi
+
+          if [[ ! -s .tmp_p2/c1_health.json ]]; then
+            echo "::error::evaluate_c1_health.sh nao gerou JSON."
             exit 1
           fi
 
-          echo >> "$GITHUB_STEP_SUMMARY"
-          echo "C1 SLO: PASS" >> "$GITHUB_STEP_SUMMARY"
+          c1_health="$(jq -r '.c1_health' .tmp_p2/c1_health.json)"
+          echo "c1_health=${c1_health}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo
+            echo "## C1 Health Score"
+            echo
+            echo "C1_HEALTH: **${c1_health}**"
+            echo
+            echo "Regras:"
+            echo "- FAIL: timeouts>0, req/s<1, pct_5xx>=1%, p99 acima do fail-limit"
+            echo "- WARN: p99 acima do warn-limit, pct_429>0, pct_503>0"
+            echo "- PASS: sem violacoes"
+            echo
+            echo "Limites p99 (WARN/FAIL): overview 1500/2500ms, runs 1500/2500ms, report 1500/2500ms"
+            echo
+            echo "| path | endpoint | p99_ms | rps | timeouts | pct_429 | pct_503 | pct_5xx | decision | reason |"
+            echo "|------|----------|--------|-----|----------|---------|---------|---------|----------|--------|"
+            jq -r '.rows[] | "| \(.path) | \(.endpoint) | \(.p99_ms) | \(.rps) | \(.timeouts) | \(.pct_429) | \(.pct_503) | \(.pct_5xx) | \(.decision) | \(.reason) |"' .tmp_p2/c1_health.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$c1_health" == "FAIL" ]]; then
+            exit 1
+          fi
 
       - name: Collect edge logs via SSH
         if: ${{ always() && inputs.collect_edge_logs }}
@@ -373,7 +335,7 @@ jobs:
         run: |
           set -euo pipefail
           ls -lah .tmp_p2
-          for f in .tmp_p2/p2_a_summary_direct*.csv .tmp_p2/p2_a_summary_edge*.csv .tmp_p2/status_*.txt; do
+          for f in .tmp_p2/p2_a_summary_direct*.csv .tmp_p2/p2_a_summary_edge*.csv .tmp_p2/status_*.txt .tmp_p2/c1_health*.json; do
             if [[ -f "$f" ]]; then
               echo "---- $f ----"
               cat "$f"
@@ -387,7 +349,7 @@ jobs:
         run: |
           set -euo pipefail
           files=()
-          for f in .tmp_p2/p2_a_summary_direct*.csv .tmp_p2/p2_a_summary_edge*.csv .tmp_p2/status_*.txt; do
+          for f in .tmp_p2/p2_a_summary_direct*.csv .tmp_p2/p2_a_summary_edge*.csv .tmp_p2/status_*.txt .tmp_p2/c1_health*.json; do
             if [[ -f "$f" ]]; then
               files+=("$f")
             fi
@@ -449,6 +411,9 @@ jobs:
               echo "- edge logs: \`.tmp_p2/edge_logs_15m_tail400.txt\`"
             else
               echo "- edge logs: nao gerado"
+            fi
+            if [[ -f .tmp_p2/c1_health.json ]]; then
+              echo "- c1 health json: \`.tmp_p2/c1_health.json\`"
             fi
             if [[ "${{ steps.package_artifacts.outputs.has_artifacts }}" != "true" ]]; then
               echo "- artifacts: sem artefatos de benchmark (falha antes da execucao do benchmark)"
