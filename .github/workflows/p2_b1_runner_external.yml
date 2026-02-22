@@ -40,10 +40,26 @@ on:
         required: true
         default: false
         type: boolean
+      duration_seconds:
+        description: "Duracao por repeticao em segundos"
+        required: false
+        default: "30"
+        type: string
+      reps:
+        description: "Repeticoes por ponto"
+        required: false
+        default: "1"
+        type: string
+      mode:
+        description: "diag (curto) | formal (longo)"
+        required: false
+        default: "diag"
+        type: string
 
 jobs:
   p2-b1:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -94,7 +110,17 @@ jobs:
           STATUS_TIMEOUT: "5"
         run: |
           set -euo pipefail
-          bash ./scripts/run_p2_matrix.sh "${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.direct_port }}"
+          mode="${{ inputs.mode }}"
+          duration="${{ inputs.duration_seconds }}"
+          reps="${{ inputs.reps }}"
+          if [[ "$mode" == "formal" ]]; then
+            [[ -z "$duration" || "$duration" == "30" ]] && duration="60"
+            [[ -z "$reps" || "$reps" == "1" ]] && reps="3"
+          else
+            [[ -z "$duration" ]] && duration="30"
+            [[ -z "$reps" ]] && reps="1"
+          fi
+          bash ./scripts/run_p2_matrix.sh "${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.direct_port }}" --duration "$duration" --reps "$reps"
           if [[ ! -s ".tmp_p2/p2_a_summary.csv" ]]; then
             echo "::error::CSV base nao foi gerado para o direct."
             exit 1
@@ -113,7 +139,17 @@ jobs:
           STATUS_TIMEOUT: "5"
         run: |
           set -euo pipefail
-          bash ./scripts/run_p2_matrix.sh "${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.edge_port }}"
+          mode="${{ inputs.mode }}"
+          duration="${{ inputs.duration_seconds }}"
+          reps="${{ inputs.reps }}"
+          if [[ "$mode" == "formal" ]]; then
+            [[ -z "$duration" || "$duration" == "30" ]] && duration="60"
+            [[ -z "$reps" || "$reps" == "1" ]] && reps="3"
+          else
+            [[ -z "$duration" ]] && duration="30"
+            [[ -z "$reps" ]] && reps="1"
+          fi
+          bash ./scripts/run_p2_matrix.sh "${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.edge_port }}" --duration "$duration" --reps "$reps"
           if [[ ! -s ".tmp_p2/p2_a_summary.csv" ]]; then
             echo "::error::CSV base nao foi gerado para o edge."
             exit 1

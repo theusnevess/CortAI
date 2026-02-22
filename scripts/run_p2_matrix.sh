@@ -1,13 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_URL="${1:-}"
+BASE_URL=""
+CLI_DURATION_SECONDS=""
+CLI_REPS=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --duration)
+      CLI_DURATION_SECONDS="${2:-}"
+      shift 2
+      ;;
+    --reps)
+      CLI_REPS="${2:-}"
+      shift 2
+      ;;
+    *)
+      if [[ -z "$BASE_URL" ]]; then
+        BASE_URL="$1"
+      else
+        echo "argumento inesperado: $1"
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
 if [[ -z "${BASE_URL}" ]]; then
-  echo "uso: $0 <base_url>"
+  echo "uso: $0 <base_url> [--duration <segundos>] [--reps <n>]"
   exit 1
 fi
 
 OUTDIR="${OUTDIR:-.tmp_p2}"
+# Mantem compatibilidade com env e permite override por flags.
 DURATION="${DURATION:-60s}"
 TIMEOUT="${TIMEOUT:-10s}"
 THREADS="${THREADS:-2}"
@@ -15,6 +41,13 @@ CONCURRENCY_LIST="${CONCURRENCY_LIST:-1 2 5}"
 REPS="${REPS:-3}"
 STATUS_REQUESTS="${STATUS_REQUESTS:-200}"
 STATUS_TIMEOUT="${STATUS_TIMEOUT:-20}"
+
+if [[ -n "$CLI_DURATION_SECONDS" ]]; then
+  DURATION="${CLI_DURATION_SECONDS}s"
+fi
+if [[ -n "$CLI_REPS" ]]; then
+  REPS="$CLI_REPS"
+fi
 
 ENDPOINTS=(
   "/api/v1/metrics/overview?days=7"
