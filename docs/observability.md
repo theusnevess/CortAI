@@ -1076,6 +1076,15 @@ Exemplo `202 Accepted` (overview/runs):
 {"snapshot_status":"queued","correlation_id":"a1b2c3d4","scope":"overview","retry_after_seconds":5}
 ```
 
+Exemplo `429 RateLimited` (cooldown anti-abuso de `force_live`):
+```json
+{"error_type":"RateLimited","scope":"overview_force_live","retry_after_seconds":5,"cooldown_seconds":10}
+```
+
+Headers:
+- `X-Envelope: C1`
+- `Retry-After: <mesmo valor de retry_after_seconds>`
+
 Nota operacional:
 - repita o `GET` (ou consulte `/api/v1/status`) ate `freshness_seconds ~ 0` ou ate a resposta virar `200`.
 
