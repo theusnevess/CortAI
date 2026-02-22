@@ -286,6 +286,28 @@ def _build_envelope_headers(*, degraded: bool, retry_after_seconds: int | None =
     return headers
 
 
+def _build_snapshot_accepted_response(
+    *,
+    scope: str,
+    correlation_id: str,
+    retry_after_seconds: int,
+) -> JSONResponse:
+    """
+    Resposta 202 canonica para snapshot-first (force_live), sem expor detalhes internos do job.
+    """
+    retry_after = max(1, int(retry_after_seconds))
+    return JSONResponse(
+        status_code=202,
+        content={
+            "snapshot_status": "queued",
+            "correlation_id": str(correlation_id),
+            "scope": str(scope),
+            "retry_after_seconds": retry_after,
+        },
+        headers=_build_envelope_headers(degraded=True, retry_after_seconds=retry_after),
+    )
+
+
 def _build_snapshot_etag(*, endpoint: str, query_key: str, refreshed_at: datetime | None) -> str:
     """
     Gera ETag fraco e deterministico baseado na versao do snapshot.
@@ -2037,19 +2059,10 @@ async def get_metrics_overview(
                 job_enqueued_flag = False
                 job_key_hash = existing_job_key[:8]
                 status_code = 202
-                return JSONResponse(
-                    status_code=202,
-                    content={
-                        "error_type": "Accepted",
-                        "scope": "overview_force_live",
-                        "job_key": existing_job_key,
-                        "job_enqueued": False,
-                        "snapshot_status": "queued",
-                        "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
-                    },
-                    headers=_build_envelope_headers(
-                        degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
-                    ),
+                return _build_snapshot_accepted_response(
+                    scope="overview",
+                    correlation_id=job_key_hash,
+                    retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
                 )
             pressure = await _get_read_refresh_pressure(db, db_stats)
             queue_wait_ms_sample = int(pressure.get("queue_wait_ms", 0))
@@ -2097,17 +2110,10 @@ async def get_metrics_overview(
             job_enqueued_flag = job_enqueued
             job_key_hash = job_key[:8]
             status_code = 202
-            return JSONResponse(
-                status_code=202,
-                content={
-                    "error_type": "Accepted",
-                    "scope": "overview_force_live",
-                    "job_key": job_key,
-                    "job_enqueued": job_enqueued,
-                    "snapshot_status": "queued",
-                    "retry_after_seconds": retry_after,
-                },
-                headers=_build_envelope_headers(degraded=True, retry_after_seconds=retry_after),
+            return _build_snapshot_accepted_response(
+                scope="overview",
+                correlation_id=job_key_hash,
+                retry_after_seconds=retry_after,
             )
 
         cache_hit_flag = False
@@ -2366,19 +2372,10 @@ async def get_runs(
                 job_enqueued_flag = False
                 job_key_hash = existing_job_key[:8]
                 status_code = 202
-                return JSONResponse(
-                    status_code=202,
-                    content={
-                        "error_type": "Accepted",
-                        "scope": "runs_force_live",
-                        "job_key": existing_job_key,
-                        "job_enqueued": False,
-                        "snapshot_status": "queued",
-                        "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
-                    },
-                    headers=_build_envelope_headers(
-                        degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
-                    ),
+                return _build_snapshot_accepted_response(
+                    scope="runs",
+                    correlation_id=job_key_hash,
+                    retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
                 )
             pressure = await _get_read_refresh_pressure(db, db_stats)
             queue_wait_ms_sample = int(pressure.get("queue_wait_ms", 0))
@@ -2426,17 +2423,10 @@ async def get_runs(
             job_enqueued_flag = job_enqueued
             job_key_hash = job_key[:8]
             status_code = 202
-            return JSONResponse(
-                status_code=202,
-                content={
-                    "error_type": "Accepted",
-                    "scope": "runs_force_live",
-                    "job_key": job_key,
-                    "job_enqueued": job_enqueued,
-                    "snapshot_status": "queued",
-                    "retry_after_seconds": retry_after,
-                },
-                headers=_build_envelope_headers(degraded=True, retry_after_seconds=retry_after),
+            return _build_snapshot_accepted_response(
+                scope="runs",
+                correlation_id=job_key_hash,
+                retry_after_seconds=retry_after,
             )
 
         read_payload, refreshed_at = await _get_runs_read_model_payload(
