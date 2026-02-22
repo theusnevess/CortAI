@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -68,7 +68,8 @@ def test_p2b1_synthetic_csv_shape_and_monotonic(tmp_path):
 
 
 def test_p2b1_synthetic_aggregation_alert_dedupe_and_endpoints():
-    metric_date = date(2026, 2, 9)
+    # Use recent synthetic data to keep report/status window assertions stable over time.
+    metric_date = date.today() - timedelta(days=1)
     _cleanup_metric_date(metric_date)
     try:
         with SessionLocal() as session:
@@ -114,7 +115,7 @@ def test_p2b1_synthetic_aggregation_alert_dedupe_and_endpoints():
         with TestClient(app) as client:
             report_response = client.get(
                 "/api/v1/observability/report",
-                params={"window_days": 1, "timing_minutes": 60},
+                params={"window_days": 7, "timing_minutes": 60},
             )
             assert report_response.status_code == 200
             report_payload = report_response.json()
@@ -124,8 +125,7 @@ def test_p2b1_synthetic_aggregation_alert_dedupe_and_endpoints():
             assert int(report_payload["timing"]["bad_duration"]) == 0
             assert int(report_payload["publish_receipts"]["path_leaks_30d"]) == 0
 
-            status_response = client.get("/api/v1/status", params={"window_days": 1})
+            status_response = client.get("/api/v1/status", params={"window_days": 7})
             assert status_response.status_code == 200
     finally:
         _cleanup_metric_date(metric_date)
-

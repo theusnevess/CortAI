@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 import json
@@ -305,7 +306,11 @@ async def test_overview_deterministico_mesma_request_mesmo_payload(client, seed_
     second = await client.get("/api/v1/metrics/overview", params=params)
     assert first.status_code == 200
     assert second.status_code == 200
-    assert first.json() == second.json()
+    payload_a = first.json()
+    payload_b = second.json()
+    payload_a.pop("freshness_seconds", None)
+    payload_b.pop("freshness_seconds", None)
+    assert payload_a == payload_b
 
 
 @pytest.mark.anyio
@@ -411,6 +416,78 @@ async def test_overview_force_live_dedupe_cria_um_job(client, seed_daily_metric,
     from app.db.models import MetricsReadRefreshJob
     rows = (await db_session.execute(select(MetricsReadRefreshJob).where(MetricsReadRefreshJob.endpoint == "/api/v1/metrics/overview"))).scalars().all()
     assert len(rows) == 1
+
+
+@pytest.mark.anyio
+async def test_overview_force_live_backpressure_fail_fast(client, seed_daily_metric, monkeypatch):
+    """
+    Sob sinal de saturacao, force_live deve falhar rapido com 429.
+    """
+    from app.api.v1.endpoints import metrics as metrics_endpoint
+
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=1,
+        completed_runs=1,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 1},
+    )
+
+    async def _fake_pressure(*args, **kwargs):
+        return {"queue_depth": 999, "workers_busy": 999, "queue_wait_ms": 5000}
+
+    monkeypatch.setattr(metrics_endpoint, "_get_read_refresh_pressure", _fake_pressure)
+
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10", "force_live": "true"},
+    )
+    assert response.status_code == 429
+    payload = response.json()
+    assert payload["error_type"] == "Backpressure"
+    assert payload["scope"] == "overview_force_live"
+    assert payload["snapshot_status"] == "queued"
+
+
+@pytest.mark.anyio
+async def test_overview_force_live_queue_timeout_controlado(client, seed_daily_metric, monkeypatch):
+    """
+    Timeout de enfileiramento deve retornar 503 controlado (sem hang).
+    """
+    from app.api.v1.endpoints import metrics as metrics_endpoint
+
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=1,
+        completed_runs=1,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 1},
+    )
+
+    async def _ok_pressure(*args, **kwargs):
+        return {"queue_depth": 0, "workers_busy": 0, "queue_wait_ms": 0}
+
+    async def _slow_enqueue(*args, **kwargs):
+        await asyncio.sleep(0.02)
+        return ("k" * 64, True, 5)
+
+    monkeypatch.setattr(metrics_endpoint, "_get_read_refresh_pressure", _ok_pressure)
+    monkeypatch.setattr(metrics_endpoint, "_read_refresh_max_queue_wait_ms", lambda: 1)
+    monkeypatch.setattr(metrics_endpoint, "_enqueue_read_refresh_job", _slow_enqueue)
+
+    response = await client.get(
+        "/api/v1/metrics/overview",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10", "force_live": "true"},
+    )
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["error_type"] == "QueueTimeout"
+    assert payload["scope"] == "overview_force_live"
+    assert payload["snapshot_status"] == "queued"
 
 
 @pytest.mark.anyio
@@ -1028,6 +1105,81 @@ async def test_runs_force_live_dedupe_cria_um_job(client, seed_observation, db_s
     from app.db.models import MetricsReadRefreshJob
     rows = (await db_session.execute(select(MetricsReadRefreshJob).where(MetricsReadRefreshJob.endpoint == "/api/v1/metrics/runs"))).scalars().all()
     assert len(rows) == 1
+
+
+@pytest.mark.anyio
+async def test_runs_force_live_backpressure_fail_fast(client, seed_observation, monkeypatch):
+    """
+    Sob saturacao, force_live de runs deve falhar rapido com 429.
+    """
+    from app.api.v1.endpoints import metrics as metrics_endpoint
+
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 12, 0, 0),
+        process_id="P_RUN_BP_1",
+        source_outcome_id="outcome-run-bp-1",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "completed",
+            "actions_executed": 1,
+        },
+    )
+
+    async def _fake_pressure(*args, **kwargs):
+        return {"queue_depth": 999, "workers_busy": 999, "queue_wait_ms": 5000}
+
+    monkeypatch.setattr(metrics_endpoint, "_get_read_refresh_pressure", _fake_pressure)
+    response = await client.get(
+        "/api/v1/metrics/runs",
+        params={"start_date": "2026-02-10", "end_date": "2026-02-10", "force_live": "true", "limit": 50, "offset": 0},
+    )
+    assert response.status_code == 429
+    payload = response.json()
+    assert payload["error_type"] == "Backpressure"
+    assert payload["scope"] == "runs_force_live"
+    assert payload["snapshot_status"] == "queued"
+
+
+@pytest.mark.anyio
+async def test_process_read_refresh_jobs_once_exec_timeout_marca_failed(db_session, monkeypatch):
+    """
+    Timeout interno de execucao deve marcar job como failed sem pendurar.
+    """
+    from app.api.v1.endpoints import metrics as metrics_endpoint
+    from app.db.models import MetricsReadRefreshJob
+
+    now = datetime.utcnow()
+    job = MetricsReadRefreshJob(
+        id=uuid.uuid4(),
+        job_key="job-timeout-test",
+        endpoint="/api/v1/metrics/overview",
+        query_key="start=2026-02-10|end=2026-02-10|include_reasons=0|include_baseline=0",
+        status="queued",
+        created_at=now,
+        expires_at=now + timedelta(seconds=60),
+        last_error=None,
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    async def _slow_job(*args, **kwargs):
+        await asyncio.sleep(0.02)
+
+    monkeypatch.setattr(metrics_endpoint, "_process_read_refresh_job_payload", _slow_job)
+    monkeypatch.setattr(metrics_endpoint, "_read_refresh_max_exec_ms", lambda: 1)
+
+    result = await metrics_endpoint.process_read_refresh_jobs_once(db=db_session, limit=10)
+    assert result["processed"] >= 1
+    assert result["failed"] >= 1
+
+    refreshed = (
+        await db_session.execute(
+            select(MetricsReadRefreshJob).where(MetricsReadRefreshJob.job_key == "job-timeout-test")
+        )
+    ).scalars().first()
+    assert refreshed is not None
+    assert refreshed.status == "failed"
+    assert refreshed.last_error == "exec_timeout"
 
 
 @pytest.mark.anyio
