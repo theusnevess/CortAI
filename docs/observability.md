@@ -1123,6 +1123,20 @@ Invariantes preservados:
 - `path_leaks_30d=0`
 - `db_pool_wait_us=0` no steady-state observado
 
+### Refresh jobs hardening (1 job/key + atomic claim)
+
+Garantias operacionais:
+- no maximo `1` job ativo por `job_key` (`queued` ou `running`);
+- burst de `force_live` para a mesma key nao duplica job ativo (dedupe por `job_key`);
+- runner faz claim atomico (`queued -> running`) antes de processar, evitando processamento duplicado quando dois runners executam em paralelo.
+
+Escopo:
+- hardening de confiabilidade do pipeline `metrics_read_refresh_jobs`;
+- sem mudanca de contrato publico dos endpoints.
+
+Evidencia:
+- testes de concorrencia cobrem dedupe de enqueue e claim atomico entre dois runners.
+
 ### P2-C2.3 (split leve do read-path)
 
 Objetivo:
