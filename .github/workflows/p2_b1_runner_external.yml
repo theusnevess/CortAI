@@ -106,8 +106,9 @@ jobs:
       - name: Run direct benchmark
         shell: bash
         env:
-          STATUS_REQUESTS: "20"
+          STATUS_REQUESTS: "10"
           STATUS_TIMEOUT: "5"
+          STATUS_PROBE_CONCURRENCY_LIST: "2"
         run: |
           set -euo pipefail
           mode="${{ inputs.mode }}"
@@ -135,8 +136,9 @@ jobs:
         if: ${{ inputs.run_edge }}
         shell: bash
         env:
-          STATUS_REQUESTS: "20"
+          STATUS_REQUESTS: "10"
           STATUS_TIMEOUT: "5"
+          STATUS_PROBE_CONCURRENCY_LIST: "2"
         run: |
           set -euo pipefail
           mode="${{ inputs.mode }}"

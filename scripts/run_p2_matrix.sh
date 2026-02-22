@@ -41,6 +41,7 @@ CONCURRENCY_LIST="${CONCURRENCY_LIST:-1 2 5}"
 REPS="${REPS:-3}"
 STATUS_REQUESTS="${STATUS_REQUESTS:-200}"
 STATUS_TIMEOUT="${STATUS_TIMEOUT:-20}"
+STATUS_PROBE_CONCURRENCY_LIST="${STATUS_PROBE_CONCURRENCY_LIST:-}"
 
 if [[ -n "$CLI_DURATION_SECONDS" ]]; then
   DURATION="${CLI_DURATION_SECONDS}s"
@@ -205,9 +206,24 @@ for ep in "${ENDPOINTS[@]}"; do
     p99_avg="$(mean_or_na "$p99_values")"
     rps_avg="$(mean_or_na "$rps_values")"
 
-    status_file="$OUTDIR/status_${name}_c${c}.txt"
-    run_status_probe "${BASE_URL}${ep}" "$c" "$status_file"
-    IFS=',' read -r pct429 pct503 pct5xx <<< "$(parse_hey_status "$status_file")"
+    pct429="NA"
+    pct503="NA"
+    pct5xx="NA"
+    should_probe="1"
+    if [[ -n "$STATUS_PROBE_CONCURRENCY_LIST" ]]; then
+      should_probe="0"
+      for probe_c in $STATUS_PROBE_CONCURRENCY_LIST; do
+        if [[ "$probe_c" == "$c" ]]; then
+          should_probe="1"
+          break
+        fi
+      done
+    fi
+    if [[ "$should_probe" == "1" ]]; then
+      status_file="$OUTDIR/status_${name}_c${c}.txt"
+      run_status_probe "${BASE_URL}${ep}" "$c" "$status_file"
+      IFS=',' read -r pct429 pct503 pct5xx <<< "$(parse_hey_status "$status_file")"
+    fi
 
     echo "${name},${c},${p90_avg},${p99_avg},${rps_avg},${timeout_sum},${pct429},${pct503},${pct5xx}" >> "$SUMMARY"
   done
