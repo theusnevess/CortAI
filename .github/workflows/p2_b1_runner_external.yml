@@ -89,6 +89,9 @@ jobs:
 
       - name: Run direct benchmark
         shell: bash
+        env:
+          STATUS_REQUESTS: "20"
+          STATUS_TIMEOUT: "5"
         run: |
           set -euo pipefail
           bash ./scripts/run_p2_matrix.sh "${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.direct_port }}"
@@ -105,6 +108,9 @@ jobs:
       - name: Run edge benchmark
         if: ${{ inputs.run_edge }}
         shell: bash
+        env:
+          STATUS_REQUESTS: "20"
+          STATUS_TIMEOUT: "5"
         run: |
           set -euo pipefail
           bash ./scripts/run_p2_matrix.sh "${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.edge_port }}"
