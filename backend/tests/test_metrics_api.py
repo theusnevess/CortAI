@@ -373,12 +373,12 @@ async def test_overview_force_live_enfileira_job_accepted(client, seed_daily_met
     assert accepted.headers.get("X-Reason") == "throughput_path"
     assert accepted.headers.get("Retry-After") is not None
     payload = accepted.json()
-    assert payload["error_type"] == "Accepted"
-    assert payload["scope"] == "overview_force_live"
+    assert set(payload.keys()) == {"snapshot_status", "correlation_id", "scope", "retry_after_seconds"}
+    assert payload["scope"] == "overview"
     assert payload["snapshot_status"] == "queued"
-    assert isinstance(payload["job_key"], str) and len(payload["job_key"]) == 64
-    assert isinstance(payload["job_enqueued"], bool)
+    assert isinstance(payload["correlation_id"], str) and len(payload["correlation_id"]) >= 8
     assert int(payload["retry_after_seconds"]) >= 1
+    assert accepted.headers.get("Retry-After") == str(int(payload["retry_after_seconds"]))
 
     stmt = (
         select(ObservationRecord)
@@ -1073,12 +1073,12 @@ async def test_runs_force_live_accepted_payload(client, seed_observation):
     assert response.headers.get("X-Reason") == "throughput_path"
     assert response.headers.get("Retry-After") is not None
     payload = response.json()
-    assert payload["error_type"] == "Accepted"
-    assert payload["scope"] == "runs_force_live"
+    assert set(payload.keys()) == {"snapshot_status", "correlation_id", "scope", "retry_after_seconds"}
+    assert payload["scope"] == "runs"
     assert payload["snapshot_status"] == "queued"
-    assert isinstance(payload["job_key"], str) and len(payload["job_key"]) == 64
-    assert isinstance(payload["job_enqueued"], bool)
+    assert isinstance(payload["correlation_id"], str) and len(payload["correlation_id"]) >= 8
     assert int(payload["retry_after_seconds"]) >= 1
+    assert response.headers.get("Retry-After") == str(int(payload["retry_after_seconds"]))
 
 
 @pytest.mark.anyio
