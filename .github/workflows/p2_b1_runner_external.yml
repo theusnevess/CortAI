@@ -160,6 +160,7 @@ jobs:
           path: |
             .tmp_p2/p2_a_summary_direct.csv
             .tmp_p2/p2_a_summary_edge.csv
+            .tmp_p2/status_*.txt
             .tmp_p2/edge_logs_15m_tail400.txt
           if-no-files-found: error
 
