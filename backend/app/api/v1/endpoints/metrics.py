@@ -105,6 +105,7 @@ METRICS_READ_REFRESH_MAX_RUNNING_JOBS_DEFAULT = 4
 METRICS_READ_REFRESH_MAX_QUEUE_WAIT_MS_DEFAULT = 60000
 METRICS_READ_REFRESH_MAX_EXEC_MS_DEFAULT = 60000
 METRICS_READ_REFRESH_STATUS_QUEUED = "queued"
+METRICS_READ_REFRESH_STATUS_RUNNING = "running"
 METRICS_READ_REFRESH_STATUS_DONE = "done"
 METRICS_READ_REFRESH_STATUS_FAILED = "failed"
 SAFE_ENVELOPE_LEVEL = "C1"
@@ -665,8 +666,23 @@ async def _enqueue_read_refresh_job(
     )
     insert_stmt = insert_stmt.on_conflict_do_nothing(index_elements=["job_key"])
     result = await _execute_with_db_stats(db, insert_stmt, db_stats)
+
+    # Fonte de verdade do estado ativo apos o INSERT ON CONFLICT:
+    # se houver linha queued/running vigente, retornamos a mesma correlation key sem duplicar.
+    active_job_stmt = (
+        select(MetricsReadRefreshJob.job_key)
+        .where(MetricsReadRefreshJob.job_key == job_key)
+        .where(MetricsReadRefreshJob.expires_at > now)
+        .where(
+            MetricsReadRefreshJob.status.in_(
+                [METRICS_READ_REFRESH_STATUS_QUEUED, METRICS_READ_REFRESH_STATUS_RUNNING]
+            )
+        )
+        .limit(1)
+    )
+    active_job_key = (await _execute_with_db_stats(db, active_job_stmt, db_stats)).scalar()
     await db.commit()
-    return job_key, bool(getattr(result, "rowcount", 0)), METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
+    return str(active_job_key or job_key), bool(getattr(result, "rowcount", 0)), METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
 
 
 async def _get_read_refresh_pressure(db: AsyncSession, db_stats: dict[str, int]) -> dict[str, int]:
@@ -683,7 +699,7 @@ async def _get_read_refresh_pressure(db: AsyncSession, db_stats: dict[str, int])
     running_stmt = (
         select(func.count())
         .select_from(MetricsReadRefreshJob)
-        .where(MetricsReadRefreshJob.status == "running")
+        .where(MetricsReadRefreshJob.status == METRICS_READ_REFRESH_STATUS_RUNNING)
         .where(MetricsReadRefreshJob.expires_at > now)
     )
     oldest_queued_stmt = (
@@ -725,7 +741,11 @@ async def _refresh_job_exists(db: AsyncSession, *, job_key: str, db_stats: dict[
         .select_from(MetricsReadRefreshJob)
         .where(MetricsReadRefreshJob.job_key == job_key)
         .where(MetricsReadRefreshJob.expires_at > now)
-        .where(MetricsReadRefreshJob.status.in_([METRICS_READ_REFRESH_STATUS_QUEUED, "running"]))
+        .where(
+            MetricsReadRefreshJob.status.in_(
+                [METRICS_READ_REFRESH_STATUS_QUEUED, METRICS_READ_REFRESH_STATUS_RUNNING]
+            )
+        )
     )
     return int((await _execute_with_db_stats(db, exists_stmt, db_stats)).scalar() or 0) > 0
 
@@ -1028,11 +1048,28 @@ async def process_read_refresh_jobs_once(*, db: AsyncSession, limit: int = 100) 
     """
     await _ensure_read_refresh_jobs_table(db)
     now = datetime.utcnow()
-    claimed = (
-        update(MetricsReadRefreshJob)
+    limit_value = max(0, int(limit))
+    if limit_value <= 0:
+        return {"processed": 0, "succeeded": 0, "failed": 0, "max_queue_wait_ms": 0, "max_exec_ms": 0}
+
+    claim_ids_stmt = (
+        select(MetricsReadRefreshJob.id)
         .where(MetricsReadRefreshJob.status == METRICS_READ_REFRESH_STATUS_QUEUED)
         .where(MetricsReadRefreshJob.expires_at > now)
-        .values(status="running")
+        .order_by(MetricsReadRefreshJob.created_at.asc(), MetricsReadRefreshJob.id.asc())
+        .limit(limit_value)
+        .with_for_update(skip_locked=True)
+    )
+    ids_to_claim = [row[0] for row in (await db.execute(claim_ids_stmt)).all()]
+    if not ids_to_claim:
+        await db.commit()
+        return {"processed": 0, "succeeded": 0, "failed": 0, "max_queue_wait_ms": 0, "max_exec_ms": 0}
+
+    claimed = (
+        update(MetricsReadRefreshJob)
+        .where(MetricsReadRefreshJob.id.in_(ids_to_claim))
+        .where(MetricsReadRefreshJob.status == METRICS_READ_REFRESH_STATUS_QUEUED)
+        .values(status=METRICS_READ_REFRESH_STATUS_RUNNING)
         .returning(
             MetricsReadRefreshJob.id,
             MetricsReadRefreshJob.job_key,
@@ -1043,7 +1080,7 @@ async def process_read_refresh_jobs_once(*, db: AsyncSession, limit: int = 100) 
     )
     rows = (await db.execute(claimed)).all()
     await db.commit()
-    picked = rows[: max(0, int(limit))]
+    picked = rows
 
     processed = 0
     succeeded = 0
