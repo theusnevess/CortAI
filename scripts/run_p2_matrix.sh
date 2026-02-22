@@ -39,15 +39,29 @@ TIMEOUT="${TIMEOUT:-10s}"
 THREADS="${THREADS:-2}"
 CONCURRENCY_LIST="${CONCURRENCY_LIST:-1 2 5}"
 REPS="${REPS:-3}"
-STATUS_REQUESTS="${STATUS_REQUESTS:-200}"
-STATUS_TIMEOUT="${STATUS_TIMEOUT:-20}"
+# Safe defaults: keep probes disabled unless explicitly requested.
+ENABLE_STATUS_PROBE="${ENABLE_STATUS_PROBE:-0}"
+STATUS_REQUESTS="${STATUS_REQUESTS:-0}"
+STATUS_TIMEOUT="${STATUS_TIMEOUT:-2}"
 STATUS_PROBE_CONCURRENCY_LIST="${STATUS_PROBE_CONCURRENCY_LIST:-}"
+CURL_ONLY="${CURL_ONLY:-0}"
 
 if [[ -n "$CLI_DURATION_SECONDS" ]]; then
   DURATION="${CLI_DURATION_SECONDS}s"
 fi
 if [[ -n "$CLI_REPS" ]]; then
   REPS="$CLI_REPS"
+fi
+
+# If not set, probe the same benchmark concurrencies.
+if [[ -z "$STATUS_PROBE_CONCURRENCY_LIST" ]]; then
+  STATUS_PROBE_CONCURRENCY_LIST="$CONCURRENCY_LIST"
+fi
+
+# Fail fast when wrk is unavailable, unless caller explicitly wants curl-only mode.
+if [[ "$CURL_ONLY" != "1" ]] && ! command -v wrk >/dev/null 2>&1; then
+  echo "ERROR: wrk not found. Install wrk or run with CURL_ONLY=1." >&2
+  exit 2
 fi
 
 ENDPOINTS=(
@@ -187,7 +201,12 @@ for ep in "${ENDPOINTS[@]}"; do
 
     for rep in $(seq 1 "$REPS"); do
       raw="$OUTDIR/wrk_${name}_c${c}_r${rep}.txt"
-      wrk -t"$THREADS" -c"$c" -d"$DURATION" --timeout "$TIMEOUT" --latency "${BASE_URL}${ep}" > "$raw" 2>&1 || true
+      if [[ "$CURL_ONLY" == "1" ]]; then
+        # Curl-only mode exists for debug/probe-only runs; benchmark latencies remain NA.
+        : > "$raw"
+      else
+        wrk -t"$THREADS" -c"$c" -d"$DURATION" --timeout "$TIMEOUT" --latency "${BASE_URL}${ep}" > "$raw" 2>&1 || true
+      fi
 
       p90="$(grep -E '^\s*90(\.000)?%' "$raw" | awk '{print $2}' | tail -n1 || true)"
       p99="$(grep -E '^\s*99(\.000)?%' "$raw" | awk '{print $2}' | tail -n1 || true)"
@@ -219,10 +238,12 @@ for ep in "${ENDPOINTS[@]}"; do
         fi
       done
     fi
-    if [[ "$should_probe" == "1" ]]; then
+    if [[ "$ENABLE_STATUS_PROBE" == "1" && "${STATUS_REQUESTS:-0}" -gt 0 && "$should_probe" == "1" ]]; then
       status_file="$OUTDIR/status_${name}_c${c}.txt"
       run_status_probe "${BASE_URL}${ep}" "$c" "$status_file"
       IFS=',' read -r pct429 pct503 pct5xx <<< "$(parse_hey_status "$status_file")"
+    else
+      echo "status probe skipped (ENABLE_STATUS_PROBE=$ENABLE_STATUS_PROBE STATUS_REQUESTS=$STATUS_REQUESTS C=$c)" >&2
     fi
 
     echo "${name},${c},${p90_avg},${p99_avg},${rps_avg},${timeout_sum},${pct429},${pct503},${pct5xx}" >> "$SUMMARY"

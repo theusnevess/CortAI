@@ -106,6 +106,7 @@ jobs:
       - name: Run direct benchmark
         shell: bash
         env:
+          ENABLE_STATUS_PROBE: "1"
           STATUS_REQUESTS: "10"
           STATUS_TIMEOUT: "5"
           STATUS_PROBE_CONCURRENCY_LIST: "2"
@@ -136,6 +137,7 @@ jobs:
         if: ${{ inputs.run_edge }}
         shell: bash
         env:
+          ENABLE_STATUS_PROBE: "1"
           STATUS_REQUESTS: "10"
           STATUS_TIMEOUT: "5"
           STATUS_PROBE_CONCURRENCY_LIST: "2"
