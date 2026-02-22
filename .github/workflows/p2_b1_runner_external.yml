@@ -109,7 +109,7 @@ jobs:
           ENABLE_STATUS_PROBE: "1"
           STATUS_REQUESTS: "10"
           STATUS_TIMEOUT: "5"
-          STATUS_PROBE_CONCURRENCY_LIST: "2"
+          STATUS_PROBE_CONCURRENCY_LIST: "1 2"
         run: |
           set -euo pipefail
           duration="${{ inputs.duration_seconds }}"
@@ -135,7 +135,7 @@ jobs:
           ENABLE_STATUS_PROBE: "1"
           STATUS_REQUESTS: "10"
           STATUS_TIMEOUT: "5"
-          STATUS_PROBE_CONCURRENCY_LIST: "2"
+          STATUS_PROBE_CONCURRENCY_LIST: "1 2"
         run: |
           set -euo pipefail
           duration="${{ inputs.duration_seconds }}"
@@ -223,7 +223,7 @@ jobs:
           ENABLE_STATUS_PROBE: "1"
           STATUS_REQUESTS: "10"
           STATUS_TIMEOUT: "5"
-          STATUS_PROBE_CONCURRENCY_LIST: "2"
+          STATUS_PROBE_CONCURRENCY_LIST: "1 2"
         run: |
           set -euo pipefail
           bash ./scripts/run_p2_matrix.sh "${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.direct_port }}" --duration "60" --reps "3"
@@ -237,12 +237,101 @@ jobs:
           ENABLE_STATUS_PROBE: "1"
           STATUS_REQUESTS: "10"
           STATUS_TIMEOUT: "5"
-          STATUS_PROBE_CONCURRENCY_LIST: "2"
+          STATUS_PROBE_CONCURRENCY_LIST: "1 2"
         run: |
           set -euo pipefail
           bash ./scripts/run_p2_matrix.sh "${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.edge_port }}" --duration "60" --reps "3"
           cp .tmp_p2/p2_a_summary.csv .tmp_p2/p2_a_summary_edge_formal.csv
           cp .tmp_p2/p2_a_summary.csv .tmp_p2/p2_a_summary_edge.csv
+
+      - name: Evaluate C1 SLO
+        id: c1_slo
+        if: ${{ steps.diag_gate.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          fail=0
+          P99_LIMIT_OVERVIEW_MS=1500
+          P99_LIMIT_RUNS_MS=1500
+          P99_LIMIT_REPORT_MS=1500
+          PCT5XX_MAX=1
+
+          p99_limit_for_endpoint() {
+            case "$1" in
+              overview) echo "$P99_LIMIT_OVERVIEW_MS" ;;
+              runs) echo "$P99_LIMIT_RUNS_MS" ;;
+              report) echo "$P99_LIMIT_REPORT_MS" ;;
+              *) echo "1500" ;;
+            esac
+          }
+
+          evaluate_c1_csv() {
+            local csv="$1"
+            local path_label="$2"
+            local found_c1=0
+            if [[ ! -s "$csv" ]]; then
+              echo "::error::CSV ausente para avaliacao C1 SLO: $csv"
+              fail=1
+              return
+            fi
+
+            while IFS=',' read -r endpoint c p90 p99 rps timeouts pct429 pct503 pct5xx; do
+              [[ -z "${endpoint:-}" ]] && continue
+              [[ "$c" != "1" ]] && continue
+              found_c1=1
+
+              local decision="PASS"
+              local p99_limit
+              p99_limit="$(p99_limit_for_endpoint "$endpoint")"
+
+              local rps_num="${rps:-0}"
+              local timeouts_num="${timeouts:-999999}"
+              local p99_num="${p99:-999999}"
+              local pct5xx_num="${pct5xx:-999999}"
+
+              [[ -z "$rps_num" || "$rps_num" == "NA" ]] && rps_num="0"
+              [[ -z "$timeouts_num" || "$timeouts_num" == "NA" ]] && timeouts_num="999999"
+              [[ -z "$p99_num" || "$p99_num" == "NA" ]] && p99_num="999999"
+              [[ -z "$pct5xx_num" || "$pct5xx_num" == "NA" ]] && pct5xx_num="999999"
+
+              if awk "BEGIN {exit !($timeouts_num > 0 || $rps_num < 1 || $pct5xx_num >= $PCT5XX_MAX || $p99_num > $p99_limit)}"; then
+                decision="FAIL"
+                fail=1
+              fi
+
+              echo "| ${path_label} | ${endpoint} | ${p99} | ${rps} | ${timeouts} | ${pct5xx} | ${decision} |" >> "$GITHUB_STEP_SUMMARY"
+            done < <(tail -n +2 "$csv")
+
+            if [[ "$found_c1" -ne 1 ]]; then
+              echo "::error::CSV sem linhas C=1 para ${path_label}: $csv"
+              fail=1
+            fi
+          }
+
+          {
+            echo
+            echo "## C1 SLO (operacional)"
+            echo
+            echo "Limites: timeouts=0, req/s>=1, pct_5xx<1%, p99_overview<=1500ms, p99_runs<=1500ms, p99_report<=1500ms"
+            echo
+            echo "| path | endpoint | p99_ms | rps | timeouts | pct_5xx | decision |"
+            echo "|------|----------|--------|-----|----------|---------|----------|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          evaluate_c1_csv ".tmp_p2/p2_a_summary_direct.csv" "direct"
+          if [[ "${{ inputs.run_edge }}" == "true" && -f .tmp_p2/p2_a_summary_edge.csv ]]; then
+            evaluate_c1_csv ".tmp_p2/p2_a_summary_edge.csv" "edge"
+          fi
+
+          if [[ "$fail" -eq 1 ]]; then
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo "C1 SLO: FAIL" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "C1 SLO: PASS" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collect edge logs via SSH
         if: ${{ always() && inputs.collect_edge_logs }}
