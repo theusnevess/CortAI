@@ -1035,12 +1035,17 @@ Erro deterministico sem snapshot:
 ```json
 {
   "detail": {
-    "error_type": "SnapshotMissing",
-    "scope": "overview_snapshot",
-    "retry_after_seconds": 5
+    "snapshot_status": "missing",
+    "scope": "overview",
+    "next_action": "force_live",
+    "estimated_ready_seconds": 5
   }
 }
 ```
+
+Notas:
+- `scope` canonico: `overview` ou `runs`.
+- `Retry-After` usa a mesma fonte de `estimated_ready_seconds`.
 
 Status/read-path:
 - `GET /api/v1/status` expoe:
