@@ -228,3 +228,33 @@ Quando isso ocorrer:
 - nao promover envelope;
 - nao continuar tuning de app/edge com base nessa rodada;
 - corrigir primeiro o ambiente/caminho de execucao (infra-path, tunel, rede, runner).
+
+## Fase: C1 Health Score + Reliability Hardening - Status Final
+
+Objetivo da fase:
+- consolidar `C1` como estado operacional continuo (classificacao automatica + hardening de confiabilidade), sem perseguir throughput adicional.
+
+Escopo entregue:
+- stop-the-line no runner externo (`diag gate`);
+- C1 Health Score engine + integracao no workflow;
+- docs + runbook do C1 Health Score;
+- hardening de refresh jobs (dedupe + atomic claim);
+- warm-up opcional no deploy (read-path).
+
+Garantias operacionais vigentes:
+- benchmark invalido nao avanca para `formal`;
+- classificacao automatica `PASS|WARN|FAIL` via `C1_HEALTH`;
+- no maximo `1` refresh job ativo por `job_key` sob burst;
+- runner seguro sob concorrencia (claim atomico, sem double-processing);
+- warm-up reduz `SnapshotMissing` pos-deploy.
+
+Pendencias conscientes:
+- evidencia final do step `Evaluate C1 SLO` em host estavel (sem tunel) permanece pendente por limitacao de ambiente;
+- `C2` permanece fora do escopo desta fase (continua `infra-bound` no ambiente atual).
+
+Status final:
+- `safe_envelope_v2.0` (estrutural): `C1`
+- Fase `C1 Premium`: `CLOSED`
+
+Proxima evolucao:
+- deliberada e separada desta fase (infra dedicada para reavaliar `C2`, ou metricas runtime embutidas).
