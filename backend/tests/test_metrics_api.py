@@ -851,10 +851,12 @@ async def test_overview_sem_snapshot_retorna_snapshot_missing(client):
     assert response.headers.get("X-Reason") == "throughput_path"
     assert response.headers.get("Retry-After") is not None
     detail = response.json()["detail"]
-    assert detail["error_type"] == "SnapshotMissing"
-    assert detail["scope"] == "overview_snapshot"
+    assert set(detail.keys()) == {"snapshot_status", "scope", "next_action", "estimated_ready_seconds"}
+    assert detail["scope"] == "overview"
     assert detail["snapshot_status"] == "missing"
-    assert int(detail["retry_after_seconds"]) >= 1
+    assert detail["next_action"] == "force_live"
+    assert int(detail["estimated_ready_seconds"]) >= 1
+    assert response.headers.get("Retry-After") == str(int(detail["estimated_ready_seconds"]))
 
 
 @pytest.mark.anyio
@@ -871,10 +873,12 @@ async def test_runs_sem_snapshot_retorna_snapshot_missing(client):
     assert response.headers.get("X-Reason") == "throughput_path"
     assert response.headers.get("Retry-After") is not None
     detail = response.json()["detail"]
-    assert detail["error_type"] == "SnapshotMissing"
-    assert detail["scope"] == "runs_snapshot"
+    assert set(detail.keys()) == {"snapshot_status", "scope", "next_action", "estimated_ready_seconds"}
+    assert detail["scope"] == "runs"
     assert detail["snapshot_status"] == "missing"
-    assert int(detail["retry_after_seconds"]) >= 1
+    assert detail["next_action"] == "force_live"
+    assert int(detail["estimated_ready_seconds"]) >= 1
+    assert response.headers.get("Retry-After") == str(int(detail["estimated_ready_seconds"]))
 
 
 @pytest.mark.anyio
