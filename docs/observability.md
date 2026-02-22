@@ -1227,3 +1227,62 @@ Aplicacao no workflow:
 - `p2_b1_runner_external.yml` avalia `C1` por endpoint (direct e edge, quando habilitado);
 - escreve tabela `endpoint | p99 | rps | timeouts | pct_5xx | PASS/FAIL` no Step Summary;
 - falha o job (`exit != 0`) quando qualquer limite de Nivel A ou Nivel B e violado.
+
+### C1 Health Score (PASS/WARN/FAIL)
+
+Objetivo:
+- transformar a leitura de `C1` em classificacao automatica, sem interpretacao manual de CSV.
+
+Fonte de verdade:
+- `scripts/evaluate_c1_health.sh` (engine) + `p2_b1_runner_external.yml` (orquestracao).
+
+Entradas:
+- CSV(s) do `run_p2_matrix.sh` (`direct` e opcionalmente `edge`);
+- apenas linhas `C=1` sao consideradas para o score.
+
+Regras por endpoint:
+- `FAIL` se qualquer condicao ocorrer:
+  - `timeouts > 0`
+  - `req/s < 1`
+  - `pct_5xx >= 1%`
+  - `p99 > fail_limit` do endpoint
+- `WARN` (se nao houver `FAIL`) quando:
+  - `p99 > warn_limit` do endpoint
+  - `pct_429 > 0`
+  - `pct_503 > 0`
+- `PASS` caso contrario.
+
+Thresholds atuais (`WARN` / `FAIL`):
+- `overview`: `1500ms / 2500ms`
+- `runs`: `1500ms / 2500ms`
+- `report`: `1500ms / 2500ms`
+
+Score final:
+- se qualquer endpoint = `FAIL` -> `C1_HEALTH=FAIL`
+- senao, se qualquer endpoint = `WARN` -> `C1_HEALTH=WARN`
+- senao -> `C1_HEALTH=PASS`
+
+Comportamento no workflow:
+- o Step Summary mostra `C1_HEALTH` + tabela por endpoint (`p99`, `rps`, `timeouts`, `%429/%503/%5xx`, `decision`, `reason`);
+- o job falha apenas quando `C1_HEALTH=FAIL`;
+- `c1_health.json` e preservado como artefato para auditoria.
+
+Exemplo (trecho de `c1_health.json`):
+```json
+{
+  "c1_health": "WARN",
+  "rows": [
+    {
+      "path": "direct",
+      "endpoint": "overview",
+      "decision": "WARN",
+      "reason": "pct_503>0"
+    }
+  ]
+}
+```
+
+Runbook curto:
+- `FAIL`: parar benchmark formal / promocao e corrigir ambiente (`rede`, `runner`, `tunel`, `infra-path`).
+- `WARN`: pode seguir, mas registrar `reason` no resultado e tratar como degradacao controlada.
+- `PASS`: rodada valida para leitura operacional de `C1`.

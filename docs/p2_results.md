@@ -215,6 +215,7 @@ Politica operacional:
 - nao promover `C2` neste ambiente.
 - `C2` so pode ser reavaliado com infraestrutura dedicada (ex.: VPS/host sem tunel) ou revisao explicita de SLO.
 - SLO operacional de `C1`: ver `docs/observability.md` na secao `SLO C1 (operacional)`.
+- C1 Health Score (`PASS|WARN|FAIL`) e regras de leitura do summary: ver `docs/observability.md` na secao `C1 Health Score (PASS/WARN/FAIL)`.
 - Warm-up pos-deploy do read-path: ver `docs/observability.md` na secao `Warm-up opcional no deploy (read-path)`.
 
 ## Regra de validade do benchmark externo (stop-the-line)
