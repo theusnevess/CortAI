@@ -1047,6 +1047,38 @@ Notas:
 - `scope` canonico: `overview` ou `runs`.
 - `Retry-After` usa a mesma fonte de `estimated_ready_seconds`.
 
+### Happy path (snapshot-first) - 503 -> 202 -> runner -> 200
+
+```bash
+# 1) GET normal (snapshot ausente -> 503)
+curl -sS "http://localhost:8000/api/v1/metrics/overview?days=7"
+curl -sS "http://localhost:8000/api/v1/metrics/runs?start_date=2026-02-13&end_date=2026-02-20&limit=50&offset=0"
+
+# 2) Enfileira refresh (202 queued + correlation_id)
+curl -sS "http://localhost:8000/api/v1/metrics/overview?days=7&force_live=true"
+curl -sS "http://localhost:8000/api/v1/metrics/runs?start_date=2026-02-13&end_date=2026-02-20&limit=50&offset=0&force_live=true"
+
+# 3) Processa fila de refresh (runner)
+python scripts/run_read_refresh_jobs.py --limit 100
+
+# 4) GET normal (200 com snapshot)
+curl -sS "http://localhost:8000/api/v1/metrics/overview?days=7"
+curl -sS "http://localhost:8000/api/v1/metrics/runs?start_date=2026-02-13&end_date=2026-02-20&limit=50&offset=0"
+```
+
+Exemplo `503 SnapshotMissing` (overview/runs):
+```json
+{"detail":{"snapshot_status":"missing","scope":"overview","next_action":"force_live","estimated_ready_seconds":5}}
+```
+
+Exemplo `202 Accepted` (overview/runs):
+```json
+{"snapshot_status":"queued","correlation_id":"a1b2c3d4","scope":"overview","retry_after_seconds":5}
+```
+
+Nota operacional:
+- repita o `GET` (ou consulte `/api/v1/status`) ate `freshness_seconds ~ 0` ou ate a resposta virar `200`.
+
 Status/read-path:
 - `GET /api/v1/status` expoe:
   - `read_path.overview_snapshot_status`

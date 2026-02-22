@@ -87,6 +87,7 @@ Validacao:
   - `503 SnapshotMissing` sem snapshot;
   - leitura `200` apos processamento do runner;
   - telemetria com `snapshot_status`, `job_enqueued`, `job_key_hash`.
+- Happy path operacional (`503 -> 202 -> runner -> 200`): ver `docs/observability.md`, secao `Happy path (snapshot-first) - 503 -> 202 -> runner -> 200`.
 
 Decisao:
 - C2.2 conclui a mudanca arquitetural de request path (snapshot-first).
