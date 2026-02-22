@@ -7,6 +7,11 @@ on:
         description: "SUT host/IP sem protocolo (ex: my-sut.example.com)"
         required: true
         type: string
+      sut_scheme:
+        description: "Protocolo do SUT (http ou https)"
+        required: true
+        default: "http"
+        type: string
       direct_port:
         description: "Porta do direct path"
         required: true
@@ -68,12 +73,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          direct_base="http://${{ inputs.sut_host }}:${{ inputs.direct_port }}"
+          direct_base="${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.direct_port }}"
           curl -fsS --max-time 10 "${direct_base}/health" >/dev/null
           curl -fsS --max-time 10 "${direct_base}/api/v1/status?window_days=1" >/dev/null
 
           if [[ "${{ inputs.run_edge }}" == "true" ]]; then
-            edge_base="http://${{ inputs.sut_host }}:${{ inputs.edge_port }}"
+            edge_base="${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.edge_port }}"
             curl -fsS --max-time 10 "${edge_base}/health" >/dev/null
           fi
 
@@ -81,7 +86,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash ./scripts/run_p2_matrix.sh "http://${{ inputs.sut_host }}:${{ inputs.direct_port }}"
+          bash ./scripts/run_p2_matrix.sh "${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.direct_port }}"
           if [[ ! -s ".tmp_p2/p2_a_summary.csv" ]]; then
             echo "::error::CSV base nao foi gerado para o direct."
             exit 1
@@ -97,7 +102,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash ./scripts/run_p2_matrix.sh "http://${{ inputs.sut_host }}:${{ inputs.edge_port }}"
+          bash ./scripts/run_p2_matrix.sh "${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.edge_port }}"
           if [[ ! -s ".tmp_p2/p2_a_summary.csv" ]]; then
             echo "::error::CSV base nao foi gerado para o edge."
             exit 1
