@@ -203,6 +203,18 @@ jobs:
           ls -lah .tmp_p2
 
       - name: Upload artifacts
+        if: ${{ !inputs.collect_edge_logs }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-b1-artifacts
+          path: |
+            .tmp_p2/p2_a_summary_direct.csv
+            .tmp_p2/p2_a_summary_edge.csv
+            .tmp_p2/status_*.txt
+          if-no-files-found: error
+
+      - name: Upload artifacts (with edge logs)
+        if: ${{ inputs.collect_edge_logs }}
         uses: actions/upload-artifact@v4
         with:
           name: p2-b1-artifacts
