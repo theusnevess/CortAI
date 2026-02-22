@@ -258,3 +258,29 @@ Status final:
 
 Proxima evolucao:
 - deliberada e separada desta fase (infra dedicada para reavaliar `C2`, ou metricas runtime embutidas).
+
+## Recheck Final - GO
+
+Referencia de fix do bloqueante:
+- `832100d` (`docs/perf` na trilha do fix de guardrail `429 RateLimited` deterministico; runtime validado apos rebuild local)
+
+Resumo (10 linhas):
+1. Recheck final executado localmente com evidencias em `OUT/RECHECK_REPORT.md`.
+2. Suite completa no container: `75 passed`.
+3. `force_live` retorna `202` padronizado em `overview` e `runs`.
+4. Segunda chamada `force_live` no cooldown retorna `429 RateLimited` deterministico (`overview` e `runs`).
+5. Runner de refresh processa fila e `GET` sem `force_live` retorna `200` para `overview` e `runs`.
+6. `ETag` + `304 Not Modified` validados em `overview` e `runs`.
+7. `nginx -t` OK e logs do edge com `rt/uct/uht` confirmados.
+8. Hardening de refresh jobs validado por testes de concorrencia (`dedupe` + `atomic claim`).
+9. Workflow/tooling/scripts/docs sanity: PASS (`diag gate`, `best-effort artifacts`, `C1 Health Score`, stop-the-line, happy path).
+10. GO/NO-GO final: `GO`.
+
+Decisao final:
+- `GO`
+- `safe_envelope_v2.0` (estrutural) = `C1`
+- fase `C1 Premium + Health Score + Hardening`: encerrada
+
+Nota (nao bloqueante):
+- working tree local permaneceu suja por artefatos/experimentos (`.tmp_*`, `OUT/`, `docker-compose.netem.yml`, `infra/nginx/default.conf`);
+- classificado como higiene local, sem evidencia de bug/regressao do sistema, e nao deve ser mergeado sem ticket explicito.
