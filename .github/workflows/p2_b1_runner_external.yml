@@ -292,6 +292,7 @@ jobs:
           done
 
       - name: Package artifacts
+        id: package_artifacts
         if: ${{ always() }}
         shell: bash
         run: |
@@ -306,13 +307,15 @@ jobs:
             files+=(.tmp_p2/edge_logs_15m_tail400.txt)
           fi
           if [[ ${#files[@]} -eq 0 ]]; then
-            echo "::error::Nenhum artefato para empacotar."
-            exit 1
+            echo "Nenhum artefato de benchmark para empacotar (falha antes do benchmark?)."
+            echo "has_artifacts=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           tar -czf .tmp_p2/p2-b1-artifacts.tar.gz "${files[@]}"
+          echo "has_artifacts=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifacts
-        if: ${{ always() && !inputs.collect_edge_logs }}
+        if: ${{ always() && !inputs.collect_edge_logs && steps.package_artifacts.outputs.has_artifacts == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: p2-b1-artifacts
@@ -320,7 +323,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload artifacts (with edge logs)
-        if: ${{ always() && inputs.collect_edge_logs }}
+        if: ${{ always() && inputs.collect_edge_logs && steps.package_artifacts.outputs.has_artifacts == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: p2-b1-artifacts
@@ -357,6 +360,9 @@ jobs:
               echo "- edge logs: \`.tmp_p2/edge_logs_15m_tail400.txt\`"
             else
               echo "- edge logs: nao gerado"
+            fi
+            if [[ "${{ steps.package_artifacts.outputs.has_artifacts }}" != "true" ]]; then
+              echo "- artifacts: sem artefatos de benchmark (falha antes da execucao do benchmark)"
             fi
             echo
             echo "### direct (head -n 5)"
