@@ -999,13 +999,16 @@ Fila de refresh:
 Payload esperado para `force_live=true`:
 ```json
 {
-  "error_type": "Accepted",
-  "scope": "overview_force_live",
-  "job_key": "<sha256>",
-  "job_enqueued": true,
+  "snapshot_status": "queued",
+  "correlation_id": "<job_key_hash>",
+  "scope": "overview",
   "retry_after_seconds": 5
 }
 ```
+
+Notas:
+- `correlation_id` = hash seguro do job (`job_key_hash`), sem expor `query_key`.
+- `scope` canonico: `overview` ou `runs`.
 
 Headers canonicos de envelope/degradacao:
 - `X-Envelope: C1`
