@@ -73,13 +73,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          check_url() {
+            local url="$1"
+            curl -fsS --retry 2 --retry-all-errors --retry-delay 1 --max-time 30 "$url" >/dev/null
+          }
+
           direct_base="${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.direct_port }}"
-          curl -fsS --max-time 10 "${direct_base}/health" >/dev/null
-          curl -fsS --max-time 10 "${direct_base}/api/v1/status?window_days=1" >/dev/null
+          check_url "${direct_base}/health"
+          check_url "${direct_base}/api/v1/status?window_days=1"
 
           if [[ "${{ inputs.run_edge }}" == "true" ]]; then
             edge_base="${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.edge_port }}"
-            curl -fsS --max-time 10 "${edge_base}/health" >/dev/null
+            check_url "${edge_base}/health"
           fi
 
       - name: Run direct benchmark
