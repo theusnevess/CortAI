@@ -55,14 +55,22 @@ async def test_read_api_overview_snapshot_first_flow(read_client, db_session, se
         params={"start_date": "2026-02-10", "end_date": "2026-02-10"},
     )
     assert missing.status_code == 503
-    assert missing.json()["detail"]["error_type"] == "SnapshotMissing"
+    missing_detail = missing.json()["detail"]
+    assert missing_detail["snapshot_status"] == "missing"
+    assert missing_detail["scope"] == "overview"
+    assert missing_detail["next_action"] == "force_live"
+    assert int(missing_detail["estimated_ready_seconds"]) >= 1
 
     accepted = await read_client.get(
         "/api/v1/metrics/overview",
         params={"start_date": "2026-02-10", "end_date": "2026-02-10", "force_live": "true"},
     )
     assert accepted.status_code == 202
-    assert accepted.json()["error_type"] == "Accepted"
+    accepted_payload = accepted.json()
+    assert accepted_payload["snapshot_status"] == "queued"
+    assert accepted_payload["scope"] == "overview"
+    assert isinstance(accepted_payload["correlation_id"], str) and accepted_payload["correlation_id"]
+    assert int(accepted_payload["retry_after_seconds"]) >= 1
 
     await process_read_refresh_jobs_once(db=db_session, limit=20)
 

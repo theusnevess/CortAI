@@ -396,9 +396,39 @@ async def test_overview_force_live_enfileira_job_accepted(client, seed_daily_met
 
 
 @pytest.mark.anyio
-async def test_overview_force_live_dedupe_cria_um_job(client, seed_daily_metric, db_session):
+async def test_overview_force_live_dedupe_cria_um_job(client, seed_daily_metric, db_session, monkeypatch):
     """
     Duas chamadas force_live para mesma key devem deduplicar o job.
+    """
+    await seed_daily_metric(
+        metric_date=date(2026, 2, 10),
+        total_runs=2,
+        completed_runs=2,
+        failed_runs=0,
+        blocked_runs=0,
+        avg_actions_executed=1.0,
+        last_action_type_distribution={"write_artifact": 2},
+    )
+    from app.api.v1.endpoints import metrics as metrics_endpoint
+
+    # Bypass do cooldown para validar especificamente dedupe (202 com mesma key ativa).
+    monkeypatch.setattr(metrics_endpoint, "_active_job_cooldown_remaining_seconds", lambda **kwargs: 0)
+
+    params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "force_live": "true"}
+    first = await client.get("/api/v1/metrics/overview", params=params)
+    second = await client.get("/api/v1/metrics/overview", params=params)
+    assert first.status_code == 202
+    assert second.status_code == 202
+
+    from app.db.models import MetricsReadRefreshJob
+    rows = (await db_session.execute(select(MetricsReadRefreshJob).where(MetricsReadRefreshJob.endpoint == "/api/v1/metrics/overview"))).scalars().all()
+    assert len(rows) == 1
+
+
+@pytest.mark.anyio
+async def test_overview_force_live_rate_limited_no_cooldown(client, seed_daily_metric):
+    """
+    Segunda chamada force_live dentro do cooldown deve retornar 429 RateLimited.
     """
     await seed_daily_metric(
         metric_date=date(2026, 2, 10),
@@ -413,11 +443,14 @@ async def test_overview_force_live_dedupe_cria_um_job(client, seed_daily_metric,
     first = await client.get("/api/v1/metrics/overview", params=params)
     second = await client.get("/api/v1/metrics/overview", params=params)
     assert first.status_code == 202
-    assert second.status_code == 202
-
-    from app.db.models import MetricsReadRefreshJob
-    rows = (await db_session.execute(select(MetricsReadRefreshJob).where(MetricsReadRefreshJob.endpoint == "/api/v1/metrics/overview"))).scalars().all()
-    assert len(rows) == 1
+    assert second.status_code == 429
+    payload = second.json()
+    assert payload["error_type"] == "RateLimited"
+    assert payload["scope"] == "overview_force_live"
+    assert int(payload["retry_after_seconds"]) >= 1
+    assert int(payload["cooldown_seconds"]) >= int(payload["retry_after_seconds"])
+    assert second.headers.get("X-Envelope") == "C1"
+    assert second.headers.get("Retry-After") == str(int(payload["retry_after_seconds"]))
 
 
 @pytest.mark.anyio
@@ -1088,7 +1121,7 @@ async def test_runs_force_live_accepted_payload(client, seed_observation):
 
 
 @pytest.mark.anyio
-async def test_runs_force_live_dedupe_cria_um_job(client, seed_observation, db_session):
+async def test_runs_force_live_dedupe_cria_um_job(client, seed_observation, db_session, monkeypatch):
     """
     Duas chamadas force_live para runs devem deduplicar o job.
     """
@@ -1102,6 +1135,11 @@ async def test_runs_force_live_dedupe_cria_um_job(client, seed_observation, db_s
             "actions_executed": 1,
         },
     )
+    from app.api.v1.endpoints import metrics as metrics_endpoint
+
+    # Bypass do cooldown para validar especificamente dedupe (202 com mesma key ativa).
+    monkeypatch.setattr(metrics_endpoint, "_active_job_cooldown_remaining_seconds", lambda **kwargs: 0)
+
     params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "limit": 50, "offset": 0, "force_live": "true"}
     first = await client.get("/api/v1/metrics/runs", params=params)
     second = await client.get("/api/v1/metrics/runs", params=params)
@@ -1111,6 +1149,35 @@ async def test_runs_force_live_dedupe_cria_um_job(client, seed_observation, db_s
     from app.db.models import MetricsReadRefreshJob
     rows = (await db_session.execute(select(MetricsReadRefreshJob).where(MetricsReadRefreshJob.endpoint == "/api/v1/metrics/runs"))).scalars().all()
     assert len(rows) == 1
+
+
+@pytest.mark.anyio
+async def test_runs_force_live_rate_limited_no_cooldown(client, seed_observation):
+    """
+    Segunda chamada force_live (runs) dentro do cooldown deve retornar 429 RateLimited.
+    """
+    await seed_observation(
+        timestamp=datetime(2026, 2, 10, 12, 0, 0),
+        process_id="P_RUN_FORCE_LIVE_RATE_LIMIT_1",
+        source_outcome_id="outcome-run-force-live-rate-limit-1",
+        facts={
+            "event_type": "cognitive_loop_finished",
+            "pipeline_status": "completed",
+            "actions_executed": 1,
+        },
+    )
+    params = {"start_date": "2026-02-10", "end_date": "2026-02-10", "limit": 50, "offset": 0, "force_live": "true"}
+    first = await client.get("/api/v1/metrics/runs", params=params)
+    second = await client.get("/api/v1/metrics/runs", params=params)
+    assert first.status_code == 202
+    assert second.status_code == 429
+    payload = second.json()
+    assert payload["error_type"] == "RateLimited"
+    assert payload["scope"] == "runs_force_live"
+    assert int(payload["retry_after_seconds"]) >= 1
+    assert int(payload["cooldown_seconds"]) >= int(payload["retry_after_seconds"])
+    assert second.headers.get("X-Envelope") == "C1"
+    assert second.headers.get("Retry-After") == str(int(payload["retry_after_seconds"]))
 
 
 @pytest.mark.anyio
