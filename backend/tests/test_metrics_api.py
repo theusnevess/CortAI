@@ -6,10 +6,12 @@ import json
 
 import pytest
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.api.v1.endpoints import metrics as metrics_endpoint
 from app.api.v1.endpoints.metrics import PROHIBITED_FACT_KEYS, process_read_refresh_jobs_once
 from app.cognitive_metrics import aggregate_daily_metrics_for_date
-from app.db.models import CognitiveMetricsDaily, MetricsEndpointDaily, ObservationRecord
+from app.db.models import CognitiveMetricsDaily, MetricsEndpointDaily, MetricsReadRefreshJob, ObservationRecord
 
 
 async def _materialize_overview_snapshot(client, db_session, *, start_date: str, end_date: str, include_reasons: bool = False, include_baseline: bool = False) -> None:
@@ -1184,6 +1186,96 @@ async def test_process_read_refresh_jobs_once_exec_timeout_marca_failed(db_sessi
     assert refreshed is not None
     assert refreshed.status == "failed"
     assert refreshed.last_error == "exec_timeout"
+
+
+@pytest.mark.anyio
+async def test_refresh_job_enqueue_dedupe_mesma_key_em_burst(async_engine):
+    """
+    Burst de enqueue para a mesma key deve manter no maximo 1 job ativo (queued/running).
+    """
+    session_factory = async_sessionmaker(bind=async_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
+    endpoint = "/api/v1/metrics/overview"
+    query_key = "start=2026-02-10|end=2026-02-10|include_reasons=0|include_baseline=0"
+
+    async def _enqueue_once():
+        async with session_factory() as session:
+            db_stats = metrics_endpoint._new_db_stats()
+            return await metrics_endpoint._enqueue_read_refresh_job(
+                session,
+                endpoint=endpoint,
+                query_key=query_key,
+                db_stats=db_stats,
+            )
+
+    results = await asyncio.gather(*[_enqueue_once() for _ in range(8)])
+    job_keys = {row[0] for row in results}
+    assert len(job_keys) == 1
+    assert sum(1 for _, enqueued, _ in results if enqueued) <= 1
+
+    now = datetime.utcnow()
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                select(MetricsReadRefreshJob).where(
+                    MetricsReadRefreshJob.job_key == next(iter(job_keys))
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+        active_rows = [
+            row
+            for row in rows
+            if row.expires_at > now and row.status in {"queued", "running"}
+        ]
+        assert len(active_rows) == 1
+
+
+@pytest.mark.anyio
+async def test_process_read_refresh_jobs_once_claim_atomico_entre_dois_runners(async_engine, monkeypatch):
+    """
+    Dois runners em paralelo nao devem processar o mesmo job duas vezes.
+    """
+    session_factory = async_sessionmaker(bind=async_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
+    now = datetime.utcnow()
+    job_key = "job-concurrent-claim-test"
+
+    async with session_factory() as session:
+        session.add(
+            MetricsReadRefreshJob(
+                id=uuid.uuid4(),
+                job_key=job_key,
+                endpoint="/api/v1/metrics/overview",
+                query_key="start=2026-02-10|end=2026-02-10|include_reasons=0|include_baseline=0",
+                status="queued",
+                created_at=now,
+                expires_at=now + timedelta(seconds=60),
+                last_error=None,
+            )
+        )
+        await session.commit()
+
+    call_count = {"n": 0}
+
+    async def _fake_process(*, db, endpoint, query_key):
+        call_count["n"] += 1
+        await asyncio.sleep(0.02)
+
+    monkeypatch.setattr(metrics_endpoint, "_process_read_refresh_job_payload", _fake_process)
+
+    async def _run_once():
+        async with session_factory() as session:
+            return await metrics_endpoint.process_read_refresh_jobs_once(db=session, limit=1)
+
+    result_a, result_b = await asyncio.gather(_run_once(), _run_once())
+    assert (result_a["processed"] + result_b["processed"]) == 1
+    assert call_count["n"] == 1
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(select(MetricsReadRefreshJob).where(MetricsReadRefreshJob.job_key == job_key))
+        ).scalars().first()
+        assert row is not None
+        assert row.status == "done"
 
 
 @pytest.mark.anyio
