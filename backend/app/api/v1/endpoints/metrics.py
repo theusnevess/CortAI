@@ -308,6 +308,27 @@ def _build_snapshot_accepted_response(
     )
 
 
+def _build_snapshot_missing_http_exception(
+    *,
+    scope: str,
+    retry_after_seconds: int,
+) -> HTTPException:
+    """
+    Erro 503 canonico para snapshot-first quando snapshot ainda nao existe.
+    """
+    retry_after = max(1, int(retry_after_seconds))
+    return HTTPException(
+        status_code=503,
+        detail={
+            "snapshot_status": "missing",
+            "scope": str(scope),
+            "next_action": "force_live",
+            "estimated_ready_seconds": retry_after,
+        },
+        headers=_build_envelope_headers(degraded=True, retry_after_seconds=retry_after),
+    )
+
+
 def _build_snapshot_etag(*, endpoint: str, query_key: str, refreshed_at: datetime | None) -> str:
     """
     Gera ETag fraco e deterministico baseado na versao do snapshot.
@@ -2149,17 +2170,9 @@ async def get_metrics_overview(
         )
         if read_payload is None:
             snapshot_status = "missing"
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "error_type": "SnapshotMissing",
-                    "scope": "overview_snapshot",
-                    "snapshot_status": "missing",
-                    "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
-                },
-                headers=_build_envelope_headers(
-                    degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
-                ),
+            raise _build_snapshot_missing_http_exception(
+                scope="overview",
+                retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
             )
 
         overview_source = "read_model"
@@ -2439,17 +2452,9 @@ async def get_runs(
         )
         if read_payload is None:
             snapshot_status = "missing"
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "error_type": "SnapshotMissing",
-                    "scope": "runs_snapshot",
-                    "snapshot_status": "missing",
-                    "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
-                },
-                headers=_build_envelope_headers(
-                    degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
-                ),
+            raise _build_snapshot_missing_http_exception(
+                scope="runs",
+                retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
             )
 
         runs_source = "read_model"
