@@ -1095,3 +1095,29 @@ Em janelas longas, pode aparecer `db_us` alto em `metrics_endpoint_timing` sem r
 Regra operacional:
 - nao tratar `db_us` alto isolado como `SQL slow` sem repetibilidade em rodada curta + `EXPLAIN`.
 - priorizar correlacao com `rt/uct/uht` no edge para diagnostico de TTFB/infra-path.
+
+### P2-D Branch B (fail-fast/backpressure)
+
+Objetivo:
+- eliminar request pendurado ate timeout de cliente sob saturacao de fila/worker.
+
+Flags de controle:
+- `METRICS_READ_REFRESH_MAX_QUEUE_DEPTH` (default `20`)
+- `METRICS_READ_REFRESH_MAX_RUNNING_JOBS` (default `4`)
+- `METRICS_READ_REFRESH_MAX_QUEUE_WAIT_MS` (default `1500`)
+- `METRICS_READ_REFRESH_MAX_EXEC_MS` (default `5000`)
+
+Comportamento:
+- `force_live=true` em `overview/runs`:
+  - `429 Backpressure` quando fila/worker passam do limite.
+  - `503 QueueTimeout` quando enfileiramento excede `max_queue_wait_ms`.
+- worker de refresh:
+  - marca `failed` com `queue_wait_timeout` quando job envelhece na fila.
+  - marca `failed` com `exec_timeout` quando execucao excede `max_exec_ms`.
+
+Telemetria:
+- `metrics_endpoint_timing` inclui `queue_wait_ms` e `exec_ms` no caminho de `force_live`.
+
+Seguranca:
+- resposta de erro continua minima/deterministica.
+- sem vazamento de paths internos.

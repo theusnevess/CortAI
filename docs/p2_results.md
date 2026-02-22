@@ -168,3 +168,31 @@ Endpoint limitante:
 
 Observacao:
 - o caminho `edge` reduziu parte da cauda vs `direct` em alguns cenarios, mas nao o suficiente para promover `C2`.
+
+## P2-D Branch B (fail-fast/backpressure)
+
+Ramo seguido:
+- **B (local/externo com saturacao)**, pois a causa predominante permaneceu em contensao de runtime/path com penduramento ate timeout.
+
+O que mudou:
+- fail-fast em `force_live` (`429 Backpressure` / `503 QueueTimeout`).
+- timeout interno por etapa:
+  - `max_queue_wait_ms` no enfileiramento.
+  - `max_exec_ms` no worker de refresh.
+- status de job padronizado em timeout:
+  - `queue_wait_timeout`
+  - `exec_timeout`
+
+Antes (exemplo de rodada estrutural sob saturacao, C=2):
+- `direct` com timeouts > 0 e cauda em segundos.
+
+Depois (comportamento esperado/validado em testes):
+- saturacao retorna `429/503` rapidamente (sem hang silencioso).
+- contratos deterministas mantidos (`error_type`, `scope`, `snapshot_status`, `retry_after_seconds`).
+- telemetria com amostra de `queue_wait_ms` vs `exec_ms`.
+
+Flags/configs adicionadas:
+- `METRICS_READ_REFRESH_MAX_QUEUE_DEPTH`
+- `METRICS_READ_REFRESH_MAX_RUNNING_JOBS`
+- `METRICS_READ_REFRESH_MAX_QUEUE_WAIT_MS`
+- `METRICS_READ_REFRESH_MAX_EXEC_MS`
