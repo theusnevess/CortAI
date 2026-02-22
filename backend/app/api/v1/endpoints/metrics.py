@@ -309,6 +309,29 @@ def _build_snapshot_accepted_response(
     )
 
 
+def _build_force_live_rate_limited_response(
+    *,
+    scope: str,
+    retry_after_seconds: int,
+    cooldown_seconds: int,
+) -> JSONResponse:
+    """
+    Resposta 429 canonica para cooldown anti-abuso de force_live.
+    """
+    retry_after = max(1, int(retry_after_seconds))
+    cooldown = max(1, int(cooldown_seconds))
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error_type": "RateLimited",
+            "scope": str(scope),
+            "retry_after_seconds": retry_after,
+            "cooldown_seconds": cooldown,
+        },
+        headers=_build_envelope_headers(degraded=True, retry_after_seconds=retry_after),
+    )
+
+
 def _build_snapshot_missing_http_exception(
     *,
     scope: str,
@@ -748,6 +771,47 @@ async def _refresh_job_exists(db: AsyncSession, *, job_key: str, db_stats: dict[
         )
     )
     return int((await _execute_with_db_stats(db, exists_stmt, db_stats)).scalar() or 0) > 0
+
+
+async def _get_active_refresh_job(
+    db: AsyncSession,
+    *,
+    job_key: str,
+    db_stats: dict[str, int],
+) -> tuple[str, datetime] | None:
+    """
+    Retorna (job_key, created_at) de job ativo para a mesma key, se existir.
+    Fonte de verdade em DB para cooldown/dedupe deterministico.
+    """
+    now = datetime.utcnow()
+    stmt = (
+        select(MetricsReadRefreshJob.job_key, MetricsReadRefreshJob.created_at)
+        .where(MetricsReadRefreshJob.job_key == job_key)
+        .where(MetricsReadRefreshJob.expires_at > now)
+        .where(
+            MetricsReadRefreshJob.status.in_(
+                [METRICS_READ_REFRESH_STATUS_QUEUED, METRICS_READ_REFRESH_STATUS_RUNNING]
+            )
+        )
+        .order_by(MetricsReadRefreshJob.created_at.desc())
+        .limit(1)
+    )
+    row = (await _execute_with_db_stats(db, stmt, db_stats)).first()
+    if not row:
+        return None
+    return str(row[0]), row[1]
+
+
+def _active_job_cooldown_remaining_seconds(*, created_at: datetime | None, cooldown_seconds: int) -> int:
+    """
+    Calcula cooldown restante com base no created_at do job ativo (fonte DB).
+    """
+    if not isinstance(created_at, datetime):
+        return 0
+    cooldown = max(1, int(cooldown_seconds))
+    elapsed = max(0.0, (datetime.utcnow() - created_at).total_seconds())
+    remaining = int(math.ceil(cooldown - elapsed))
+    return max(0, remaining)
 
 
 async def _build_overview_live_payload(
@@ -2113,9 +2177,22 @@ async def get_metrics_overview(
 
         if force_live:
             existing_job_key = _build_refresh_job_key(endpoint="/api/v1/metrics/overview", query_key=query_key)
-            if await _refresh_job_exists(db, job_key=existing_job_key, db_stats=db_stats):
+            active_job = await _get_active_refresh_job(db, job_key=existing_job_key, db_stats=db_stats)
+            if active_job is not None:
+                active_job_key, active_created_at = active_job
+                cooldown_remaining = _active_job_cooldown_remaining_seconds(
+                    created_at=active_created_at,
+                    cooldown_seconds=METRICS_OVERVIEW_FORCE_LIVE_COOLDOWN_SECONDS,
+                )
+                if cooldown_remaining > 0:
+                    status_code = 429
+                    return _build_force_live_rate_limited_response(
+                        scope="overview_force_live",
+                        retry_after_seconds=cooldown_remaining,
+                        cooldown_seconds=METRICS_OVERVIEW_FORCE_LIVE_COOLDOWN_SECONDS,
+                    )
                 job_enqueued_flag = False
-                job_key_hash = existing_job_key[:8]
+                job_key_hash = active_job_key[:8]
                 status_code = 202
                 return _build_snapshot_accepted_response(
                     scope="overview",
@@ -2418,9 +2495,22 @@ async def get_runs(
 
         if force_live:
             existing_job_key = _build_refresh_job_key(endpoint="/api/v1/metrics/runs", query_key=query_key)
-            if await _refresh_job_exists(db, job_key=existing_job_key, db_stats=db_stats):
+            active_job = await _get_active_refresh_job(db, job_key=existing_job_key, db_stats=db_stats)
+            if active_job is not None:
+                active_job_key, active_created_at = active_job
+                cooldown_remaining = _active_job_cooldown_remaining_seconds(
+                    created_at=active_created_at,
+                    cooldown_seconds=METRICS_RUNS_FORCE_LIVE_COOLDOWN_SECONDS,
+                )
+                if cooldown_remaining > 0:
+                    status_code = 429
+                    return _build_force_live_rate_limited_response(
+                        scope="runs_force_live",
+                        retry_after_seconds=cooldown_remaining,
+                        cooldown_seconds=METRICS_RUNS_FORCE_LIVE_COOLDOWN_SECONDS,
+                    )
                 job_enqueued_flag = False
-                job_key_hash = existing_job_key[:8]
+                job_key_hash = active_job_key[:8]
                 status_code = 202
                 return _build_snapshot_accepted_response(
                     scope="runs",
