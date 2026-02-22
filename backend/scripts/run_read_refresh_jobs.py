@@ -22,7 +22,15 @@ async def _run(limit: int) -> None:
     async with AsyncSessionLocal() as db:
         result = await process_read_refresh_jobs_once(db=db, limit=limit)
         print(
-            f"processed={result['processed']} succeeded={result['succeeded']} failed={result['failed']}"
+            " ".join(
+                [
+                    f"processed={result['processed']}",
+                    f"succeeded={result['succeeded']}",
+                    f"failed={result['failed']}",
+                    f"max_queue_wait_ms={result.get('max_queue_wait_ms', 0)}",
+                    f"max_exec_ms={result.get('max_exec_ms', 0)}",
+                ]
+            )
         )
 
 

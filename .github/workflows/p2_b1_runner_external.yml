@@ -64,6 +64,19 @@ jobs:
           ls -lah scripts/run_p2_matrix.sh
           head -n 5 scripts/run_p2_matrix.sh
 
+      - name: smoke_stop_the_line
+        shell: bash
+        run: |
+          set -euo pipefail
+          direct_base="http://${{ inputs.sut_host }}:${{ inputs.direct_port }}"
+          curl -fsS --max-time 10 "${direct_base}/health" >/dev/null
+          curl -fsS --max-time 10 "${direct_base}/api/v1/status?window_days=1" >/dev/null
+
+          if [[ "${{ inputs.run_edge }}" == "true" ]]; then
+            edge_base="http://${{ inputs.sut_host }}:${{ inputs.edge_port }}"
+            curl -fsS --max-time 10 "${edge_base}/health" >/dev/null
+          fi
+
       - name: Run direct benchmark
         shell: bash
         run: |

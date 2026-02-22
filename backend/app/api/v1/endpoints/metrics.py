@@ -3,6 +3,7 @@ import json
 import os
 import uuid
 import hashlib
+import asyncio
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -99,6 +100,10 @@ METRICS_RUNS_READ_MODEL_ENABLED = True
 METRICS_RUNS_FORCE_LIVE_COOLDOWN_SECONDS = 10
 METRICS_READ_REFRESH_JOB_TTL_SECONDS = 60
 METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS = 5
+METRICS_READ_REFRESH_MAX_QUEUE_DEPTH_DEFAULT = 20
+METRICS_READ_REFRESH_MAX_RUNNING_JOBS_DEFAULT = 4
+METRICS_READ_REFRESH_MAX_QUEUE_WAIT_MS_DEFAULT = 60000
+METRICS_READ_REFRESH_MAX_EXEC_MS_DEFAULT = 60000
 METRICS_READ_REFRESH_STATUS_QUEUED = "queued"
 METRICS_READ_REFRESH_STATUS_DONE = "done"
 METRICS_READ_REFRESH_STATUS_FAILED = "failed"
@@ -153,6 +158,34 @@ def _parse_date(value: str | None, label: str) -> date | None:
         return datetime.strptime(value, "%Y-%m-%d").date()
     except Exception:
         raise HTTPException(status_code=400, detail=f"{label} must be YYYY-MM-DD")
+
+
+def _read_refresh_max_queue_depth() -> int:
+    """
+    Limite de fila para aplicar falha rapida sob saturacao.
+    """
+    return max(1, _get_int_env("METRICS_READ_REFRESH_MAX_QUEUE_DEPTH", METRICS_READ_REFRESH_MAX_QUEUE_DEPTH_DEFAULT))
+
+
+def _read_refresh_max_running_jobs() -> int:
+    """
+    Limite de jobs em execucao para aplicar falha rapida.
+    """
+    return max(1, _get_int_env("METRICS_READ_REFRESH_MAX_RUNNING_JOBS", METRICS_READ_REFRESH_MAX_RUNNING_JOBS_DEFAULT))
+
+
+def _read_refresh_max_queue_wait_ms() -> int:
+    """
+    Tempo maximo de espera em fila antes de tratar como timeout interno.
+    """
+    return max(1, _get_int_env("METRICS_READ_REFRESH_MAX_QUEUE_WAIT_MS", METRICS_READ_REFRESH_MAX_QUEUE_WAIT_MS_DEFAULT))
+
+
+def _read_refresh_max_exec_ms() -> int:
+    """
+    Tempo maximo de execucao por job de refresh.
+    """
+    return max(1, _get_int_env("METRICS_READ_REFRESH_MAX_EXEC_MS", METRICS_READ_REFRESH_MAX_EXEC_MS_DEFAULT))
 
 
 def _overview_cache_enabled() -> bool:
@@ -267,13 +300,22 @@ def _if_none_match_matches(request: Request, etag: str) -> bool:
     """
     Verifica match de If-None-Match para suporte a 304.
     """
+    def _normalize_etag(value: str) -> str:
+        token = value.strip()
+        if token.startswith("W/") or token.startswith("w/"):
+            token = token[2:].strip()
+        if len(token) >= 2 and token[0] == '"' and token[-1] == '"':
+            token = token[1:-1]
+        return token
+
     raw = request.headers.get("if-none-match", "").strip()
     if not raw:
         return False
     if raw == "*":
         return True
-    tokens = [token.strip() for token in raw.split(",") if token.strip()]
-    return etag in tokens
+    target = _normalize_etag(etag)
+    tokens = [_normalize_etag(token) for token in raw.split(",") if token.strip()]
+    return target in tokens
 
 
 def _build_snapshot_headers(
@@ -584,6 +626,67 @@ async def _enqueue_read_refresh_job(
     return job_key, bool(getattr(result, "rowcount", 0)), METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
 
 
+async def _get_read_refresh_pressure(db: AsyncSession, db_stats: dict[str, int]) -> dict[str, int]:
+    """
+    Retorna sinais simples de saturacao da fila para falha rapida.
+    """
+    now = datetime.utcnow()
+    queued_stmt = (
+        select(func.count())
+        .select_from(MetricsReadRefreshJob)
+        .where(MetricsReadRefreshJob.status == METRICS_READ_REFRESH_STATUS_QUEUED)
+        .where(MetricsReadRefreshJob.expires_at > now)
+    )
+    running_stmt = (
+        select(func.count())
+        .select_from(MetricsReadRefreshJob)
+        .where(MetricsReadRefreshJob.status == "running")
+        .where(MetricsReadRefreshJob.expires_at > now)
+    )
+    oldest_queued_stmt = (
+        select(func.min(MetricsReadRefreshJob.created_at))
+        .where(MetricsReadRefreshJob.status == METRICS_READ_REFRESH_STATUS_QUEUED)
+        .where(MetricsReadRefreshJob.expires_at > now)
+    )
+    queued_count = int((await _execute_with_db_stats(db, queued_stmt, db_stats)).scalar() or 0)
+    running_count = int((await _execute_with_db_stats(db, running_stmt, db_stats)).scalar() or 0)
+    oldest_queued = (await _execute_with_db_stats(db, oldest_queued_stmt, db_stats)).scalar()
+    queue_wait_ms = 0
+    if isinstance(oldest_queued, datetime):
+        queue_wait_ms = max(0, int((datetime.utcnow() - oldest_queued).total_seconds() * 1000))
+    return {
+        "queue_depth": max(0, queued_count),
+        "workers_busy": max(0, running_count),
+        "queue_wait_ms": max(0, queue_wait_ms),
+    }
+
+
+def _is_read_refresh_backpressured(pressure: dict[str, int]) -> bool:
+    """
+    Define se a fila deve responder falha rapida para evitar pendurar requests.
+    """
+    return bool(
+        int(pressure.get("queue_depth", 0)) >= _read_refresh_max_queue_depth()
+        or int(pressure.get("workers_busy", 0)) >= _read_refresh_max_running_jobs()
+        or int(pressure.get("queue_wait_ms", 0)) > _read_refresh_max_queue_wait_ms()
+    )
+
+
+async def _refresh_job_exists(db: AsyncSession, *, job_key: str, db_stats: dict[str, int]) -> bool:
+    """
+    Verifica se ja existe job ativo para a mesma chave idempotente.
+    """
+    now = datetime.utcnow()
+    exists_stmt = (
+        select(func.count())
+        .select_from(MetricsReadRefreshJob)
+        .where(MetricsReadRefreshJob.job_key == job_key)
+        .where(MetricsReadRefreshJob.expires_at > now)
+        .where(MetricsReadRefreshJob.status.in_([METRICS_READ_REFRESH_STATUS_QUEUED, "running"]))
+    )
+    return int((await _execute_with_db_stats(db, exists_stmt, db_stats)).scalar() or 0) > 0
+
+
 async def _build_overview_live_payload(
     db: AsyncSession,
     *,
@@ -823,6 +926,59 @@ def _parse_query_key(query_key: str) -> dict[str, str]:
     return parsed
 
 
+async def _process_read_refresh_job_payload(*, db: AsyncSession, endpoint: str, query_key: str) -> None:
+    """
+    Executa refresh de snapshot para um job ja validado.
+    """
+    parts = _parse_query_key(query_key)
+    if endpoint == "/api/v1/metrics/overview":
+        start = date.fromisoformat(parts["start"])
+        end = date.fromisoformat(parts["end"])
+        include_reasons = bool(int(parts.get("include_reasons", "0")))
+        include_baseline = bool(int(parts.get("include_baseline", "0")))
+        payload = await _build_overview_live_payload(
+            db,
+            start=start,
+            end=end,
+            include_reasons=include_reasons,
+            include_baseline=include_baseline,
+        )
+        await _upsert_overview_read_model_payload(
+            db,
+            start=start,
+            end=end,
+            include_reasons=include_reasons,
+            include_baseline=include_baseline,
+            payload=payload,
+        )
+        return
+
+    if endpoint == "/api/v1/metrics/runs":
+        start = date.fromisoformat(parts["start"])
+        end = date.fromisoformat(parts["end"])
+        limit_value = int(parts["limit"])
+        offset = int(parts["offset"])
+        payload = await _build_runs_live_payload(
+            db,
+            start=start,
+            end=end,
+            limit=limit_value,
+            offset=offset,
+        )
+        await _upsert_runs_read_model_payload(
+            db,
+            start=start,
+            end=end,
+            limit=limit_value,
+            offset=offset,
+            payload=payload,
+            db_stats=_new_db_stats(),
+        )
+        return
+
+    raise ValueError(f"unknown_endpoint:{endpoint}")
+
+
 async def process_read_refresh_jobs_once(*, db: AsyncSession, limit: int = 100) -> dict[str, int]:
     """
     Executa lote de jobs queued e atualiza snapshots materializados.
@@ -839,6 +995,7 @@ async def process_read_refresh_jobs_once(*, db: AsyncSession, limit: int = 100) 
             MetricsReadRefreshJob.job_key,
             MetricsReadRefreshJob.endpoint,
             MetricsReadRefreshJob.query_key,
+            MetricsReadRefreshJob.created_at,
         )
     )
     rows = (await db.execute(claimed)).all()
@@ -848,54 +1005,39 @@ async def process_read_refresh_jobs_once(*, db: AsyncSession, limit: int = 100) 
     processed = 0
     succeeded = 0
     failed = 0
+    max_queue_wait_ms_seen = 0
+    max_exec_ms_seen = 0
     for row in picked:
         processed += 1
-        job_id, _, endpoint, query_key = row
+        job_id, _, endpoint, query_key, created_at = row
+        queue_wait_ms = 0
+        if isinstance(created_at, datetime):
+            queue_wait_ms = max(0, int((datetime.utcnow() - created_at).total_seconds() * 1000))
+        max_queue_wait_ms_seen = max(max_queue_wait_ms_seen, queue_wait_ms)
+
+        if queue_wait_ms > _read_refresh_max_queue_wait_ms():
+            fail_stmt = (
+                update(MetricsReadRefreshJob)
+                .where(MetricsReadRefreshJob.id == job_id)
+                .values(status=METRICS_READ_REFRESH_STATUS_FAILED, last_error="queue_wait_timeout")
+            )
+            await db.execute(fail_stmt)
+            await db.commit()
+            failed += 1
+            continue
+
+        exec_started_ns = perf_counter_ns()
         try:
-            parts = _parse_query_key(query_key)
-            if endpoint == "/api/v1/metrics/overview":
-                start = date.fromisoformat(parts["start"])
-                end = date.fromisoformat(parts["end"])
-                include_reasons = bool(int(parts.get("include_reasons", "0")))
-                include_baseline = bool(int(parts.get("include_baseline", "0")))
-                payload = await _build_overview_live_payload(
-                    db,
-                    start=start,
-                    end=end,
-                    include_reasons=include_reasons,
-                    include_baseline=include_baseline,
-                )
-                await _upsert_overview_read_model_payload(
-                    db,
-                    start=start,
-                    end=end,
-                    include_reasons=include_reasons,
-                    include_baseline=include_baseline,
-                    payload=payload,
-                )
-            elif endpoint == "/api/v1/metrics/runs":
-                start = date.fromisoformat(parts["start"])
-                end = date.fromisoformat(parts["end"])
-                limit_value = int(parts["limit"])
-                offset = int(parts["offset"])
-                payload = await _build_runs_live_payload(
-                    db,
-                    start=start,
-                    end=end,
-                    limit=limit_value,
-                    offset=offset,
-                )
-                await _upsert_runs_read_model_payload(
-                    db,
-                    start=start,
-                    end=end,
-                    limit=limit_value,
-                    offset=offset,
-                    payload=payload,
-                    db_stats=_new_db_stats(),
-                )
-            else:
-                raise ValueError(f"unknown_endpoint:{endpoint}")
+            await asyncio.wait_for(
+                _process_read_refresh_job_payload(
+                    db=db,
+                    endpoint=endpoint,
+                    query_key=query_key,
+                ),
+                timeout=max(0.001, _read_refresh_max_exec_ms() / 1000.0),
+            )
+            exec_ms = max(0, (perf_counter_ns() - exec_started_ns) // 1_000_000)
+            max_exec_ms_seen = max(max_exec_ms_seen, int(exec_ms))
 
             done_stmt = (
                 update(MetricsReadRefreshJob)
@@ -905,6 +1047,15 @@ async def process_read_refresh_jobs_once(*, db: AsyncSession, limit: int = 100) 
             await db.execute(done_stmt)
             await db.commit()
             succeeded += 1
+        except asyncio.TimeoutError:
+            fail_stmt = (
+                update(MetricsReadRefreshJob)
+                .where(MetricsReadRefreshJob.id == job_id)
+                .values(status=METRICS_READ_REFRESH_STATUS_FAILED, last_error="exec_timeout")
+            )
+            await db.execute(fail_stmt)
+            await db.commit()
+            failed += 1
         except Exception as exc:
             fail_stmt = (
                 update(MetricsReadRefreshJob)
@@ -914,7 +1065,13 @@ async def process_read_refresh_jobs_once(*, db: AsyncSession, limit: int = 100) 
             await db.execute(fail_stmt)
             await db.commit()
             failed += 1
-    return {"processed": processed, "succeeded": succeeded, "failed": failed}
+    return {
+        "processed": processed,
+        "succeeded": succeeded,
+        "failed": failed,
+        "max_queue_wait_ms": int(max_queue_wait_ms_seen),
+        "max_exec_ms": int(max_exec_ms_seen),
+    }
 
 
 def _filter_facts(facts: dict) -> dict:
@@ -1078,6 +1235,8 @@ def _emit_metrics_endpoint_timing(
     db_us: int = 0,
     db_queries: int = 0,
     db_pool_wait_us: int = 0,
+    queue_wait_ms: int | None = None,
+    exec_ms: int | None = None,
 ) -> None:
     """
     Emite telemetria append-only por request dos endpoints de metricas.
@@ -1142,6 +1301,10 @@ def _emit_metrics_endpoint_timing(
             facts["job_enqueued"] = bool(job_enqueued)
         if job_key_hash:
             facts["job_key_hash"] = str(job_key_hash)
+        if queue_wait_ms is not None:
+            facts["queue_wait_ms"] = int(max(0, queue_wait_ms))
+        if exec_ms is not None:
+            facts["exec_ms"] = int(max(0, exec_ms))
         observation = Observation(
             observation_id=str(uuid.uuid4()),
             timestamp=event_ts,
@@ -1830,6 +1993,8 @@ async def get_metrics_overview(
     snapshot_status = "missing"
     job_enqueued_flag: bool | None = None
     job_key_hash: str | None = None
+    queue_wait_ms_sample: int | None = None
+    exec_ms_sample: int | None = None
     db_stats = _new_db_stats()
     query_fingerprint = (
         f"days={days}&start_date={start_date or ''}&end_date={end_date or ''}"
@@ -1867,12 +2032,68 @@ async def get_metrics_overview(
         )
 
         if force_live:
-            job_key, job_enqueued, retry_after = await _enqueue_read_refresh_job(
-                db,
-                endpoint="/api/v1/metrics/overview",
-                query_key=query_key,
-                db_stats=db_stats,
-            )
+            existing_job_key = _build_refresh_job_key(endpoint="/api/v1/metrics/overview", query_key=query_key)
+            if await _refresh_job_exists(db, job_key=existing_job_key, db_stats=db_stats):
+                job_enqueued_flag = False
+                job_key_hash = existing_job_key[:8]
+                status_code = 202
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "error_type": "Accepted",
+                        "scope": "overview_force_live",
+                        "job_key": existing_job_key,
+                        "job_enqueued": False,
+                        "snapshot_status": "queued",
+                        "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
+                    },
+                    headers=_build_envelope_headers(
+                        degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
+                    ),
+                )
+            pressure = await _get_read_refresh_pressure(db, db_stats)
+            queue_wait_ms_sample = int(pressure.get("queue_wait_ms", 0))
+            if _is_read_refresh_backpressured(pressure):
+                status_code = 429
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error_type": "Backpressure",
+                        "scope": "overview_force_live",
+                        "snapshot_status": "queued",
+                        "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
+                    },
+                    headers=_build_envelope_headers(
+                        degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
+                    ),
+                )
+            enqueue_started_ns = perf_counter_ns()
+            try:
+                job_key, job_enqueued, retry_after = await asyncio.wait_for(
+                    _enqueue_read_refresh_job(
+                        db,
+                        endpoint="/api/v1/metrics/overview",
+                        query_key=query_key,
+                        db_stats=db_stats,
+                    ),
+                    timeout=max(0.001, _read_refresh_max_queue_wait_ms() / 1000.0),
+                )
+            except asyncio.TimeoutError:
+                await db.rollback()
+                status_code = 503
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error_type": "QueueTimeout",
+                        "scope": "overview_force_live",
+                        "snapshot_status": "queued",
+                        "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
+                    },
+                    headers=_build_envelope_headers(
+                        degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
+                    ),
+                )
+            exec_ms_sample = int(max(0, (perf_counter_ns() - enqueue_started_ns) // 1_000_000))
             job_enqueued_flag = job_enqueued
             job_key_hash = job_key[:8]
             status_code = 202
@@ -2000,6 +2221,8 @@ async def get_metrics_overview(
             db_us=db_stats["db_us"],
             db_queries=db_stats["db_queries"],
             db_pool_wait_us=db_stats["db_pool_wait_us"],
+            queue_wait_ms=queue_wait_ms_sample,
+            exec_ms=exec_ms_sample,
         )
 
 
@@ -2097,6 +2320,8 @@ async def get_runs(
     snapshot_status = "missing"
     job_enqueued_flag: bool | None = None
     job_key_hash: str | None = None
+    queue_wait_ms_sample: int | None = None
+    exec_ms_sample: int | None = None
     db_stats = _new_db_stats()
     try:
         start_d = _parse_date(start_date, "start_date")
@@ -2136,12 +2361,68 @@ async def get_runs(
         await _ensure_runs_read_model_table(db)
 
         if force_live:
-            job_key, job_enqueued, retry_after = await _enqueue_read_refresh_job(
-                db,
-                endpoint="/api/v1/metrics/runs",
-                query_key=query_key,
-                db_stats=db_stats,
-            )
+            existing_job_key = _build_refresh_job_key(endpoint="/api/v1/metrics/runs", query_key=query_key)
+            if await _refresh_job_exists(db, job_key=existing_job_key, db_stats=db_stats):
+                job_enqueued_flag = False
+                job_key_hash = existing_job_key[:8]
+                status_code = 202
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "error_type": "Accepted",
+                        "scope": "runs_force_live",
+                        "job_key": existing_job_key,
+                        "job_enqueued": False,
+                        "snapshot_status": "queued",
+                        "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
+                    },
+                    headers=_build_envelope_headers(
+                        degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
+                    ),
+                )
+            pressure = await _get_read_refresh_pressure(db, db_stats)
+            queue_wait_ms_sample = int(pressure.get("queue_wait_ms", 0))
+            if _is_read_refresh_backpressured(pressure):
+                status_code = 429
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error_type": "Backpressure",
+                        "scope": "runs_force_live",
+                        "snapshot_status": "queued",
+                        "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
+                    },
+                    headers=_build_envelope_headers(
+                        degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
+                    ),
+                )
+            enqueue_started_ns = perf_counter_ns()
+            try:
+                job_key, job_enqueued, retry_after = await asyncio.wait_for(
+                    _enqueue_read_refresh_job(
+                        db,
+                        endpoint="/api/v1/metrics/runs",
+                        query_key=query_key,
+                        db_stats=db_stats,
+                    ),
+                    timeout=max(0.001, _read_refresh_max_queue_wait_ms() / 1000.0),
+                )
+            except asyncio.TimeoutError:
+                await db.rollback()
+                status_code = 503
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error_type": "QueueTimeout",
+                        "scope": "runs_force_live",
+                        "snapshot_status": "queued",
+                        "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
+                    },
+                    headers=_build_envelope_headers(
+                        degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
+                    ),
+                )
+            exec_ms_sample = int(max(0, (perf_counter_ns() - enqueue_started_ns) // 1_000_000))
             job_enqueued_flag = job_enqueued
             job_key_hash = job_key[:8]
             status_code = 202
@@ -2240,6 +2521,8 @@ async def get_runs(
             db_us=db_stats["db_us"],
             db_queries=db_stats["db_queries"],
             db_pool_wait_us=db_stats["db_pool_wait_us"],
+            queue_wait_ms=queue_wait_ms_sample,
+            exec_ms=exec_ms_sample,
         )
 
 
