@@ -196,3 +196,31 @@ Flags/configs adicionadas:
 - `METRICS_READ_REFRESH_MAX_RUNNING_JOBS`
 - `METRICS_READ_REFRESH_MAX_QUEUE_WAIT_MS`
 - `METRICS_READ_REFRESH_MAX_EXEC_MS`
+
+## Declaracao final de envelope v2.0 (estrutural)
+
+Fonte de verdade:
+- `P2-B1` com runner externo (GitHub Actions) e artefatos de benchmark.
+
+Decisao oficial:
+- `safe_envelope_v2.0` (estrutural) = `C1`.
+- `C2` = `FAIL` no SLO atual e classificado como `infra-bound` no ambiente avaliado.
+
+Interpretacao consolidada:
+- gargalo nao e `DB`, `pool`, `SQL`, `handler` ou `read-model`;
+- a degradacao dominante aparece no infra-path/latencia externa (runner -> edge/direct -> SUT).
+
+Politica operacional:
+- nao promover `C2` neste ambiente.
+- `C2` so pode ser reavaliado com infraestrutura dedicada (ex.: VPS/host sem tunel) ou revisao explicita de SLO.
+
+## Regra de validade do benchmark externo (stop-the-line)
+
+Uma rodada externa e invalida para promocao de envelope quando qualquer endpoint apresentar:
+- `timeouts > 0`; ou
+- `req/s < 1`.
+
+Quando isso ocorrer:
+- nao promover envelope;
+- nao continuar tuning de app/edge com base nessa rodada;
+- corrigir primeiro o ambiente/caminho de execucao (infra-path, tunel, rede, runner).

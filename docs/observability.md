@@ -1121,3 +1121,27 @@ Telemetria:
 Seguranca:
 - resposta de erro continua minima/deterministica.
 - sem vazamento de paths internos.
+
+### Envelope v2.0 (declaracao estrutural final)
+
+Fonte de verdade:
+- `P2-B1` com runner externo (GitHub Actions), fora do host do SUT.
+
+Decisao:
+- `safe_envelope_v2.0` (estrutural) = `C1`.
+- `C2` falha no SLO atual e fica classificado como `infra-bound` no ambiente atual.
+
+Leitura consolidada:
+- nao ha evidencia de gargalo dominante em `DB`, `pool`, `SQL` ou `handler`;
+- o limitante observado esta no infra-path/latencia externa (runner/rede/tunel/camada de entrega).
+
+### Regra de validade de benchmark (stop-the-line)
+
+Uma rodada externa nao pode ser usada para promover envelope quando qualquer endpoint apresentar:
+- `timeouts > 0`; ou
+- `req/s < 1`.
+
+Nesses casos:
+- tratar a rodada como invalida para promocao;
+- nao continuar tuning de app/edge com base nela;
+- corrigir primeiro o ambiente de execucao (runner/rede/tunel/infra-path).
