@@ -214,6 +214,7 @@ Interpretacao consolidada:
 Politica operacional:
 - nao promover `C2` neste ambiente.
 - `C2` so pode ser reavaliado com infraestrutura dedicada (ex.: VPS/host sem tunel) ou revisao explicita de SLO.
+- SLO operacional de `C1`: ver `docs/observability.md` na secao `SLO C1 (operacional)`.
 
 ## Regra de validade do benchmark externo (stop-the-line)
 

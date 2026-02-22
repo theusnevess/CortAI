@@ -1185,3 +1185,23 @@ Nesses casos:
 - tratar a rodada como invalida para promocao;
 - nao continuar tuning de app/edge com base nela;
 - corrigir primeiro o ambiente de execucao (runner/rede/tunel/infra-path).
+
+### SLO C1 (operacional)
+
+Escopo:
+- usado para classificacao operacional de rodadas validas em `C1` (runner externo/workflow).
+
+Nivel A (confiabilidade / stop-the-line):
+- `timeouts == 0`
+- `req/s >= 1`
+- `pct_5xx < 1%`
+
+Nivel B (latencia operacional C1):
+- `p99_overview <= 1500ms`
+- `p99_runs <= 1500ms`
+- `p99_report <= 1500ms`
+
+Aplicacao no workflow:
+- `p2_b1_runner_external.yml` avalia `C1` por endpoint (direct e edge, quando habilitado);
+- escreve tabela `endpoint | p99 | rps | timeouts | pct_5xx | PASS/FAIL` no Step Summary;
+- falha o job (`exit != 0`) quando qualquer limite de Nivel A ou Nivel B e violado.
