@@ -201,16 +201,29 @@ jobs:
         run: |
           set -euo pipefail
           ls -lah .tmp_p2
+          for f in .tmp_p2/p2_a_summary_direct.csv .tmp_p2/p2_a_summary_edge.csv .tmp_p2/status_*.txt; do
+            if [[ -f "$f" ]]; then
+              echo "---- $f ----"
+              cat "$f"
+            fi
+          done
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(.tmp_p2/p2_a_summary_direct.csv .tmp_p2/p2_a_summary_edge.csv .tmp_p2/status_*.txt)
+          if [[ "${{ inputs.collect_edge_logs }}" == "true" && -f .tmp_p2/edge_logs_15m_tail400.txt ]]; then
+            files+=(.tmp_p2/edge_logs_15m_tail400.txt)
+          fi
+          tar -czf .tmp_p2/p2-b1-artifacts.tar.gz "${files[@]}"
 
       - name: Upload artifacts
         if: ${{ !inputs.collect_edge_logs }}
         uses: actions/upload-artifact@v4
         with:
           name: p2-b1-artifacts
-          path: |
-            .tmp_p2/p2_a_summary_direct.csv
-            .tmp_p2/p2_a_summary_edge.csv
-            .tmp_p2/status_*.txt
+          path: .tmp_p2/p2-b1-artifacts.tar.gz
           if-no-files-found: error
 
       - name: Upload artifacts (with edge logs)
@@ -218,11 +231,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: p2-b1-artifacts
-          path: |
-            .tmp_p2/p2_a_summary_direct.csv
-            .tmp_p2/p2_a_summary_edge.csv
-            .tmp_p2/status_*.txt
-            .tmp_p2/edge_logs_15m_tail400.txt
+          path: .tmp_p2/p2-b1-artifacts.tar.gz
           if-no-files-found: error
 
       - name: Write summary
