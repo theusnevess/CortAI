@@ -1,6 +1,7 @@
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 import uuid
+import asyncio
 
 import pytest
 from sqlalchemy import delete
@@ -300,3 +301,180 @@ def test_c1_health_classification_pass_warn_fail():
     )
     assert row_fail["decision"] == "FAIL"
     assert "p99>fail_limit" in row_fail["reasons"]
+
+
+@pytest.mark.anyio
+async def test_status_c1_health_cache_hit_reduces_compute_calls(client, monkeypatch):
+    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+    monkeypatch.setenv("C1_HEALTH_CACHE_TTL_SECONDS", "10")
+    status_endpoint._clear_runtime_c1_health_cache()
+    calls = {"n": 0}
+
+    async def _fake_compute(**kwargs):
+        calls["n"] += 1
+        rows = [
+            {
+                "endpoint": "overview",
+                "path": "direct",
+                "p99_ms": 100.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "PASS",
+                "reasons": [],
+            },
+            {
+                "endpoint": "runs",
+                "path": "direct",
+                "p99_ms": 100.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "PASS",
+                "reasons": [],
+            },
+            {
+                "endpoint": "report",
+                "path": "direct",
+                "p99_ms": 100.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "PASS",
+                "reasons": [],
+            },
+        ]
+        return status_endpoint._build_c1_health_payload(rows, as_of=datetime.utcnow(), window_minutes=15)
+
+    monkeypatch.setattr(status_endpoint, "_compute_runtime_c1_health", _fake_compute)
+
+    resp1 = await client.get("/api/v1/status", params={"window_days": 7}, headers={"X-Internal-Status": "1"})
+    resp2 = await client.get("/api/v1/status", params={"window_days": 7}, headers={"X-Internal-Status": "1"})
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    assert calls["n"] == 1
+    assert resp1.json()["c1_health"]["meta"]["cached"] is False
+    assert resp2.json()["c1_health"]["meta"]["cached"] is True
+
+
+@pytest.mark.anyio
+async def test_status_c1_health_cache_expires(client, monkeypatch):
+    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+    monkeypatch.setenv("C1_HEALTH_CACHE_TTL_SECONDS", "1")
+    status_endpoint._clear_runtime_c1_health_cache()
+    calls = {"n": 0}
+
+    async def _fake_compute(**kwargs):
+        calls["n"] += 1
+        rows = [
+            {
+                "endpoint": "overview",
+                "path": "direct",
+                "p99_ms": 100.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "PASS",
+                "reasons": [],
+            },
+            {
+                "endpoint": "runs",
+                "path": "direct",
+                "p99_ms": 100.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "PASS",
+                "reasons": [],
+            },
+            {
+                "endpoint": "report",
+                "path": "direct",
+                "p99_ms": 100.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "PASS",
+                "reasons": [],
+            },
+        ]
+        return status_endpoint._build_c1_health_payload(rows, as_of=datetime.utcnow(), window_minutes=15)
+
+    monkeypatch.setattr(status_endpoint, "_compute_runtime_c1_health", _fake_compute)
+
+    resp1 = await client.get("/api/v1/status", params={"window_days": 7}, headers={"X-Internal-Status": "1"})
+    await asyncio.sleep(1.2)
+    resp2 = await client.get("/api/v1/status", params={"window_days": 7}, headers={"X-Internal-Status": "1"})
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    assert calls["n"] == 2
+    assert resp2.json()["c1_health"]["meta"]["cached"] is False
+
+
+@pytest.mark.anyio
+async def test_status_c1_health_reasons_present(client, monkeypatch):
+    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+    monkeypatch.setenv("C1_HEALTH_CACHE_TTL_SECONDS", "10")
+    status_endpoint._clear_runtime_c1_health_cache()
+
+    async def _fake_compute(**kwargs):
+        rows = [
+            {
+                "endpoint": "overview",
+                "path": "direct",
+                "p99_ms": 1200.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "PASS",
+                "reasons": [],
+            },
+            {
+                "endpoint": "runs",
+                "path": "direct",
+                "p99_ms": 1800.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "WARN",
+                "reasons": ["p99>warn_limit"],
+            },
+            {
+                "endpoint": "report",
+                "path": "direct",
+                "p99_ms": None,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 10.0,
+                "pct_5xx": 0.0,
+                "decision": "WARN",
+                "reasons": ["p99_missing"],
+            },
+        ]
+        return status_endpoint._build_c1_health_payload(rows, as_of=datetime.utcnow(), window_minutes=15)
+
+    monkeypatch.setattr(status_endpoint, "_compute_runtime_c1_health", _fake_compute)
+    response = await client.get("/api/v1/status", params={"window_days": 7}, headers={"X-Internal-Status": "1"})
+    assert response.status_code == 200
+    c1 = response.json()["c1_health"]
+    assert c1["meta"]["cached"] is False
+    assert "reasons" in c1
+    assert "runs:p99>warn_limit" in c1["reasons"]
+    assert "report:p99_missing" in c1["reasons"]
