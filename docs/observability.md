@@ -1320,6 +1320,11 @@ Gate de exposicao (MVP):
 - header `X-Internal-Status: 1`
 - sem gate autorizado, `/status` continua igual (sem campo `c1_health`).
 
+Cache (v1.1):
+- cache em memoria por processo com TTL curto (`C1_HEALTH_CACHE_TTL_SECONDS`, default `10s`);
+- chave fixa (janela fixa de `15m`);
+- best effort (nao compartilha estado entre workers/processos).
+
 Fonte / janela:
 - `metrics_endpoint_timing` (runtime local)
 - janela fixa de `15` minutos (`inputs.window_minutes=15`)
@@ -1327,6 +1332,8 @@ Fonte / janela:
 
 Regras:
 - mesmas regras/thresholds do `C1 Health Score` (workflow), com `timeouts=0` no runtime por limitacao da fonte (`metrics_endpoint_timing` nao observa timeout do cliente).
+- `reasons` consolidados no topo (`endpoint:reason`) para leitura rapida de operador.
+- `meta` informa se a resposta veio de cache e o custo do ultimo calculo (`compute_ms`).
 
 Exemplo (trecho):
 ```json
@@ -1345,7 +1352,14 @@ Exemplo (trecho):
         "decision": "WARN",
         "reasons": ["pct_503>0"]
       }
-    ]
+    ],
+    "reasons": ["overview:pct_503>0"],
+    "meta": {
+      "cached": true,
+      "cache_age_seconds": 3,
+      "compute_ms": 8,
+      "stale": false
+    }
   }
 }
 ```
