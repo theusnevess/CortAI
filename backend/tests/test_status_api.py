@@ -7,6 +7,7 @@ from sqlalchemy import delete
 
 from app.db.models import MetricsEndpointDaily
 from app.api.v1.endpoints.metrics import process_read_refresh_jobs_once
+from app.api.v1.endpoints import status as status_endpoint
 
 
 async def _ensure_metrics_endpoint_daily_table(db_session) -> None:
@@ -196,3 +197,106 @@ async def test_status_expoe_runs_freshness_e_key_count(client, seed_observation,
     assert "jobs_queued_count" in payload["read_path"]
     assert payload["read_path"]["runs_freshness_seconds"] is None or payload["read_path"]["runs_freshness_seconds"] >= 0
     assert isinstance(payload["read_path"]["runs_key_count"], int)
+
+
+@pytest.mark.anyio
+async def test_status_nao_expoe_c1_health_por_padrao(client, monkeypatch):
+    monkeypatch.delenv("EXPOSE_C1_HEALTH_STATUS", raising=False)
+    response = await client.get("/api/v1/status", params={"window_days": 7})
+    assert response.status_code == 200
+    payload = response.json()
+    assert "c1_health" not in payload
+
+
+@pytest.mark.anyio
+async def test_status_expoe_c1_health_com_env_e_header(client, seed_observation, monkeypatch):
+    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+    now = datetime.utcnow()
+    for idx in range(4):
+        await seed_observation(
+            timestamp=now - timedelta(minutes=1),
+            process_id=f"P_STATUS_C1_OV_{idx}",
+            source_outcome_id=f"outcome-status-c1-ov-{idx}",
+            facts={
+                "event_type": "metrics_endpoint_timing",
+                "endpoint": "/api/v1/metrics/overview",
+                "status_code": 200,
+                "duration_ms": 100,
+            },
+        )
+        await seed_observation(
+            timestamp=now - timedelta(minutes=1),
+            process_id=f"P_STATUS_C1_RUN_{idx}",
+            source_outcome_id=f"outcome-status-c1-run-{idx}",
+            facts={
+                "event_type": "metrics_endpoint_timing",
+                "endpoint": "/api/v1/metrics/runs",
+                "status_code": 200,
+                "duration_ms": 120,
+            },
+        )
+        await seed_observation(
+            timestamp=now - timedelta(minutes=1),
+            process_id=f"P_STATUS_C1_REP_{idx}",
+            source_outcome_id=f"outcome-status-c1-rep-{idx}",
+            facts={
+                "event_type": "metrics_endpoint_timing",
+                "endpoint": "/api/v1/observability/report",
+                "status_code": 200,
+                "duration_ms": 130,
+            },
+        )
+
+    response = await client.get(
+        "/api/v1/status",
+        params={"window_days": 7},
+        headers={"X-Internal-Status": "1"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert "c1_health" in payload
+    c1 = payload["c1_health"]
+    assert c1["enabled"] is True
+    assert c1["inputs"]["source"] == "metrics_endpoint_timing"
+    assert c1["inputs"]["window_minutes"] == 15
+    assert isinstance(c1["rows"], list)
+    assert {row["endpoint"] for row in c1["rows"]} == {"overview", "runs", "report"}
+    assert all(row["path"] == "direct" for row in c1["rows"])
+
+
+def test_c1_health_classification_pass_warn_fail():
+    row_pass = status_endpoint._classify_c1_health_row(
+        endpoint="overview",
+        p99_ms=500.0,
+        rps=2.0,
+        timeouts=0,
+        pct_429=0.0,
+        pct_503=0.0,
+        pct_5xx=0.0,
+    )
+    assert row_pass["decision"] == "PASS"
+    assert row_pass["reasons"] == []
+
+    row_warn = status_endpoint._classify_c1_health_row(
+        endpoint="runs",
+        p99_ms=1700.0,
+        rps=2.0,
+        timeouts=0,
+        pct_429=0.0,
+        pct_503=0.0,
+        pct_5xx=0.0,
+    )
+    assert row_warn["decision"] == "WARN"
+    assert "p99>warn_limit" in row_warn["reasons"]
+
+    row_fail = status_endpoint._classify_c1_health_row(
+        endpoint="report",
+        p99_ms=3000.0,
+        rps=2.0,
+        timeouts=0,
+        pct_429=0.0,
+        pct_503=0.0,
+        pct_5xx=0.0,
+    )
+    assert row_fail["decision"] == "FAIL"
+    assert "p99>fail_limit" in row_fail["reasons"]
