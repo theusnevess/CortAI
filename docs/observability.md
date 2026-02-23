@@ -1309,3 +1309,43 @@ Runbook curto:
 - `FAIL`: parar benchmark formal / promocao e corrigir ambiente (`rede`, `runner`, `tunel`, `infra-path`).
 - `WARN`: pode seguir, mas registrar `reason` no resultado e tratar como degradacao controlada.
 - `PASS`: rodada valida para leitura operacional de `C1`.
+
+### Runtime C1 Health Score (restricted)
+
+Objetivo:
+- expor uma leitura operacional de `C1` em `/api/v1/status` sem depender do workflow, com gate restrito.
+
+Gate de exposicao (MVP):
+- `EXPOSE_C1_HEALTH_STATUS=1` (env; default `0`)
+- header `X-Internal-Status: 1`
+- sem gate autorizado, `/status` continua igual (sem campo `c1_health`).
+
+Fonte / janela:
+- `metrics_endpoint_timing` (runtime local)
+- janela fixa de `15` minutos (`inputs.window_minutes=15`)
+- `path` reportado como `direct` no MVP (sem inferencia de edge no request path)
+
+Regras:
+- mesmas regras/thresholds do `C1 Health Score` (workflow), com `timeouts=0` no runtime por limitacao da fonte (`metrics_endpoint_timing` nao observa timeout do cliente).
+
+Exemplo (trecho):
+```json
+{
+  "c1_health": {
+    "enabled": true,
+    "score": "WARN",
+    "inputs": {
+      "window_minutes": 15,
+      "source": "metrics_endpoint_timing"
+    },
+    "rows": [
+      {
+        "endpoint": "overview",
+        "path": "direct",
+        "decision": "WARN",
+        "reasons": ["pct_503>0"]
+      }
+    ]
+  }
+}
+```
