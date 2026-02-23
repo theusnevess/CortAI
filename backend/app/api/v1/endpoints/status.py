@@ -1,6 +1,7 @@
 from datetime import datetime
 from time import perf_counter_ns
 import os
+from copy import deepcopy
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -30,6 +31,13 @@ _C1_HEALTH_THRESHOLDS = {
     "report": {"warn_p99_ms": 1500, "fail_p99_ms": 2500},
 }
 _C1_HEALTH_PCT5XX_FAIL = 1.0
+_C1_HEALTH_RUNTIME_VERSION = "v1.1"
+_C1_HEALTH_RUNTIME_CACHE: dict[str, Any] = {
+    "payload": None,
+    "computed_at": None,
+    "compute_ms": None,
+    "window_minutes": _C1_HEALTH_STATUS_WINDOW_MINUTES,
+}
 
 
 def _new_db_stats() -> dict[str, int]:
@@ -42,6 +50,20 @@ def _new_db_stats() -> dict[str, int]:
 def _env_flag_enabled(name: str, default: str = "0") -> bool:
     raw = str(os.getenv(name, default)).strip().lower()
     return raw in {"1", "true", "yes", "on"}
+
+
+def _get_c1_health_cache_ttl_seconds() -> int:
+    try:
+        return max(0, int(os.getenv("C1_HEALTH_CACHE_TTL_SECONDS", "10")))
+    except Exception:
+        return 10
+
+
+def _clear_runtime_c1_health_cache() -> None:
+    _C1_HEALTH_RUNTIME_CACHE["payload"] = None
+    _C1_HEALTH_RUNTIME_CACHE["computed_at"] = None
+    _C1_HEALTH_RUNTIME_CACHE["compute_ms"] = None
+    _C1_HEALTH_RUNTIME_CACHE["window_minutes"] = _C1_HEALTH_STATUS_WINDOW_MINUTES
 
 
 def _should_include_c1_health(request: Request) -> bool:
@@ -98,13 +120,31 @@ def _build_c1_health_payload(rows: list[dict[str, Any]], *, as_of: datetime, win
         score = "FAIL"
     elif any(row["decision"] == "WARN" for row in rows):
         score = "WARN"
+    consolidated_reasons: list[str] = []
+    for row in rows:
+        endpoint = str(row.get("endpoint", "unknown"))
+        for reason in row.get("reasons", []) or []:
+            consolidated_reasons.append(f"{endpoint}:{reason}")
     return {
         "enabled": True,
+        "version": _C1_HEALTH_RUNTIME_VERSION,
         "score": score,
         "as_of": as_of.replace(microsecond=0).isoformat() + "Z",
         "inputs": {"window_minutes": int(window_minutes), "source": "metrics_endpoint_timing"},
+        "reasons": consolidated_reasons,
         "rows": rows,
     }
+
+
+def _with_c1_health_meta(payload: dict[str, Any], *, cached: bool, cache_age_seconds: int, compute_ms: int) -> dict[str, Any]:
+    result = deepcopy(payload)
+    result["meta"] = {
+        "cached": bool(cached),
+        "cache_age_seconds": max(0, int(cache_age_seconds)),
+        "compute_ms": max(0, int(compute_ms)),
+        "stale": False,
+    }
+    return result
 
 
 async def _compute_runtime_c1_health(
@@ -190,6 +230,45 @@ async def _compute_runtime_c1_health(
         )
 
     return _build_c1_health_payload(runtime_rows, as_of=as_of, window_minutes=window_minutes)
+
+
+async def _get_runtime_c1_health_cached(
+    *,
+    db: AsyncSession,
+    db_stats: dict[str, int],
+    window_minutes: int = _C1_HEALTH_STATUS_WINDOW_MINUTES,
+) -> dict[str, Any]:
+    ttl_seconds = _get_c1_health_cache_ttl_seconds()
+    now = datetime.utcnow()
+    cached_payload = _C1_HEALTH_RUNTIME_CACHE.get("payload")
+    cached_at = _C1_HEALTH_RUNTIME_CACHE.get("computed_at")
+    cached_compute_ms = int(_C1_HEALTH_RUNTIME_CACHE.get("compute_ms") or 0)
+    cached_window_minutes = int(_C1_HEALTH_RUNTIME_CACHE.get("window_minutes") or window_minutes)
+    if (
+        ttl_seconds > 0
+        and cached_payload is not None
+        and isinstance(cached_at, datetime)
+        and cached_window_minutes == int(window_minutes)
+    ):
+        age_seconds_float = max(0.0, (now - cached_at).total_seconds())
+        age_seconds = int(age_seconds_float)
+        if age_seconds_float <= float(ttl_seconds):
+            return _with_c1_health_meta(
+                cached_payload,
+                cached=True,
+                cache_age_seconds=age_seconds,
+                compute_ms=cached_compute_ms,
+            )
+
+    compute_started = perf_counter_ns()
+    payload = await _compute_runtime_c1_health(db=db, db_stats=db_stats, window_minutes=window_minutes)
+    compute_ms = int(max(0, (perf_counter_ns() - compute_started) // 1_000_000))
+    computed_at = datetime.utcnow()
+    _C1_HEALTH_RUNTIME_CACHE["payload"] = deepcopy(payload)
+    _C1_HEALTH_RUNTIME_CACHE["computed_at"] = computed_at
+    _C1_HEALTH_RUNTIME_CACHE["compute_ms"] = compute_ms
+    _C1_HEALTH_RUNTIME_CACHE["window_minutes"] = int(window_minutes)
+    return _with_c1_health_meta(payload, cached=False, cache_age_seconds=0, compute_ms=compute_ms)
 
 
 async def _execute_with_db_stats(
@@ -565,9 +644,9 @@ async def get_status(
             response["read_path"]["jobs_queued_count"] = 0
         if _should_include_c1_health(request):
             try:
-                response["c1_health"] = await _compute_runtime_c1_health(db=db, db_stats=db_stats)
+                response["c1_health"] = await _get_runtime_c1_health_cached(db=db, db_stats=db_stats)
             except Exception:
-                response["c1_health"] = _build_c1_health_payload(
+                fallback = _build_c1_health_payload(
                     [
                         {
                             "endpoint": ep,
@@ -585,6 +664,12 @@ async def get_status(
                     ],
                     as_of=datetime.utcnow(),
                     window_minutes=_C1_HEALTH_STATUS_WINDOW_MINUTES,
+                )
+                response["c1_health"] = _with_c1_health_meta(
+                    fallback,
+                    cached=False,
+                    cache_age_seconds=0,
+                    compute_ms=0,
                 )
         status_code = 200
         return response
