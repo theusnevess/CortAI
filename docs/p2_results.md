@@ -284,3 +284,52 @@ Decisao final:
 Nota (nao bloqueante):
 - working tree local permaneceu suja por artefatos/experimentos (`.tmp_*`, `OUT/`, `docker-compose.netem.yml`, `infra/nginx/default.conf`);
 - classificado como higiene local, sem evidencia de bug/regressao do sistema, e nao deve ser mergeado sem ticket explicito.
+
+## Recheck rapido pos-fix - GO (Runtime Visibility validada)
+
+Data:
+- `2026-02-24`
+
+Contexto:
+- pos-fix de governanca de versao (`DEFAULT_APP_VERSION`), rebootstrap sequencial e validacao controlada de `c1_health` no `/status` (gate restrito).
+
+Resultado:
+- `GO`
+
+Checks executados (stop-the-line):
+1. Edge / nginx config
+   - `nginx -t` (`cortai_edge`): `PASS`
+2. Read-path warm-up
+   - `scripts/warmup_read_path.sh` (`cortai_api`): `PASS`
+   - `overview_get_http=200`
+   - `runs_get_http=200`
+   - `jobs_queued_count=0`
+3. Guardrail anti-burst (`force_live`)
+   - `PASS` (key nova no edge)
+   - `overview?days=6`: `202 -> 429 RateLimited`
+   - `runs?...end_date=2026-02-19...`: `202 -> 429 RateLimited`
+4. ETag / `304`
+   - `PASS` (edge)
+   - `200` com `ETag`
+   - `304 Not Modified` com `If-None-Match`
+5. Runtime C1 Health Score (`/status`, gate ON)
+   - `PASS`
+   - `enabled=true`, `version=v1.1`
+   - `score`, `rows[]`, `reasons[]`, `meta` presentes
+
+Nota (cache TTL):
+- com `api_workers=2`, o cache e por processo; `2` chamadas seguidas podem nao mostrar `cached=true`;
+- loop curto confirmou cache hit (`cached=false -> cached=true`).
+
+Governanca / versao (pos-fix):
+- drift encerrado: `/health` em `:8000` e `:8001` retorna `api_version=1.9.9`
+- commit aplicado: `1bb5beb` (`chore(version): bump DEFAULT_APP_VERSION to 1.9.9`)
+
+Observacao operacional (runbook):
+- ordem sequencial de rebootstrap evita `502` no edge:
+  1. `api/read_api` primeiro
+  2. `edge` por ultimo
+
+Nota de ambiente (nao versionada):
+- `EXPOSE_C1_HEALTH_STATUS=1` foi habilitado localmente no `docker-compose.yml` apenas para validacao;
+- nao commitado (config de ambiente).
