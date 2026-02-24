@@ -2,11 +2,12 @@ import os
 from datetime import datetime
 from time import monotonic, perf_counter_ns
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.metrics import CES_DEFAULT_VERSION, _emit_metrics_endpoint_timing
+from app.api.v1.endpoints.status import _get_runtime_c1_health_cached, _should_include_c1_health
 from app.db.session import get_db
 from app.version import get_app_version
 
@@ -170,6 +171,99 @@ def _build_slo_daily_summary(items: list[dict]) -> list[dict]:
     return summary
 
 
+def _map_panel_decision_from_score(score: str) -> str:
+    normalized = str(score or "").upper()
+    if normalized == "FAIL":
+        return "action_required"
+    if normalized == "WARN":
+        return "degraded"
+    return "healthy"
+
+
+async def _get_read_path_compact(
+    db: AsyncSession,
+    db_stats: dict[str, int],
+) -> dict:
+    """
+    Retorna bloco enxuto de read_path em 1 query (subqueries) para manter custo previsivel.
+    """
+    defaults = {
+        "overview_freshness_seconds": None,
+        "overview_snapshot_status": "missing",
+        "overview_last_refreshed_at": None,
+        "runs_freshness_seconds": None,
+        "runs_snapshot_status": "missing",
+        "runs_last_refreshed_at": None,
+        "runs_key_count": 0,
+        "jobs_queued_count": 0,
+    }
+    try:
+        row = (
+            await _execute_with_db_stats(
+                db,
+                text(
+                    """
+                    WITH overview AS (
+                      SELECT
+                        EXTRACT(EPOCH FROM (NOW() - MAX(refreshed_at)))::int AS freshness_seconds,
+                        MAX(refreshed_at) AS last_refreshed_at
+                      FROM metrics_overview_read_model
+                    ),
+                    runs AS (
+                      SELECT
+                        EXTRACT(EPOCH FROM (NOW() - MAX(refreshed_at)))::int AS freshness_seconds,
+                        MAX(refreshed_at) AS last_refreshed_at,
+                        COUNT(*)::int AS key_count
+                      FROM metrics_runs_read_model
+                    ),
+                    jobs AS (
+                      SELECT COUNT(*)::int AS queued_count
+                      FROM metrics_read_refresh_jobs
+                      WHERE status = 'queued' AND expires_at > NOW()
+                    )
+                    SELECT
+                      overview.freshness_seconds AS overview_freshness_seconds,
+                      overview.last_refreshed_at AS overview_last_refreshed_at,
+                      runs.freshness_seconds AS runs_freshness_seconds,
+                      runs.last_refreshed_at AS runs_last_refreshed_at,
+                      runs.key_count AS runs_key_count,
+                      jobs.queued_count AS jobs_queued_count
+                    FROM overview
+                    CROSS JOIN runs
+                    CROSS JOIN jobs
+                    """
+                ),
+                db_stats,
+            )
+        ).mappings().first()
+        if row is None:
+            return defaults
+        overview_freshness = row.get("overview_freshness_seconds")
+        runs_freshness = row.get("runs_freshness_seconds")
+        overview_last = row.get("overview_last_refreshed_at")
+        runs_last = row.get("runs_last_refreshed_at")
+        runs_key_count = int(row.get("runs_key_count") or 0)
+        jobs_queued_count = int(row.get("jobs_queued_count") or 0)
+        return {
+            "overview_freshness_seconds": None if overview_freshness is None else max(0, int(overview_freshness)),
+            "overview_snapshot_status": (
+                "missing"
+                if overview_last is None
+                else ("fresh" if int(overview_freshness or 0) <= 60 else "stale")
+            ),
+            "overview_last_refreshed_at": overview_last.isoformat() if overview_last else None,
+            "runs_freshness_seconds": None if runs_freshness is None else max(0, int(runs_freshness)),
+            "runs_snapshot_status": (
+                "missing" if runs_last is None else ("fresh" if int(runs_freshness or 0) <= 60 else "stale")
+            ),
+            "runs_last_refreshed_at": runs_last.isoformat() if runs_last else None,
+            "runs_key_count": max(0, runs_key_count),
+            "jobs_queued_count": max(0, jobs_queued_count),
+        }
+    except Exception:
+        return defaults
+
+
 def _validate_report_params(
     *,
     window_days: int,
@@ -242,6 +336,62 @@ def _status_from_checks(checks: list[dict], runs_worst_empty: bool) -> str:
     if runs_worst_empty:
         return "WARN"
     return "PASS"
+
+
+@router.get("/overview")
+async def get_observability_overview(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Painel operacional enxuto (MVP) para consumo interno: c1_health + read_path + overall.
+    Gate restrito por env + header. Nao substitui o /report.
+    """
+    started_at = datetime.utcnow()
+    status_code = 500
+    query_fingerprint = "panel_version=v1&window=15m"
+    db_stats = _new_db_stats()
+    try:
+        if not _should_include_c1_health(request):
+            status_code = 404
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        c1_health = await _get_runtime_c1_health_cached(db=db, db_stats=db_stats)
+        read_path = await _get_read_path_compact(db=db, db_stats=db_stats)
+
+        score = str(c1_health.get("score", "FAIL"))
+        response = {
+            "as_of": c1_health.get("as_of") or (datetime.utcnow().replace(microsecond=0).isoformat() + "Z"),
+            "panel_version": "v1",
+            "source": {
+                "c1_health": "runtime_status",
+                "guardrails": "pending_mvp_ticket_2",
+                "window_minutes": int((c1_health.get("inputs") or {}).get("window_minutes") or 15),
+            },
+            "overall": {
+                "score": score,
+                "decision": _map_panel_decision_from_score(score),
+                "reasons": list(c1_health.get("reasons") or []),
+            },
+            "c1_health": c1_health,
+            "read_path": read_path,
+        }
+        status_code = 200
+        return response
+    except HTTPException:
+        raise
+    finally:
+        duration_ms = int((datetime.utcnow() - started_at).total_seconds() * 1000)
+        _emit_metrics_endpoint_timing(
+            endpoint="/api/v1/observability/overview",
+            method="GET",
+            status_code=status_code,
+            duration_ms=duration_ms,
+            query_fingerprint=query_fingerprint,
+            db_us=db_stats["db_us"],
+            db_queries=db_stats["db_queries"],
+            db_pool_wait_us=db_stats["db_pool_wait_us"],
+        )
 
 
 @router.get("/report")
