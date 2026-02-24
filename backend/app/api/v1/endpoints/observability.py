@@ -181,6 +181,101 @@ def _map_panel_decision_from_score(score: str) -> str:
     return "healthy"
 
 
+async def _get_guardrails_summary(
+    db: AsyncSession,
+    db_stats: dict[str, int],
+    *,
+    window_minutes: int = 15,
+    last_events_limit: int = 5,
+) -> dict:
+    """
+    Resume guardrails recentes (202/429/503) a partir de metrics_endpoint_timing.
+    Mantem custo previsivel em 2 queries leves: agregacao + ultimos eventos.
+    """
+    endpoint_paths = [
+        "/api/v1/metrics/overview",
+        "/api/v1/metrics/runs",
+        "/api/v1/observability/report",
+    ]
+    counts_row = (
+        await _execute_with_db_stats(
+            db,
+            text(
+                """
+                SELECT
+                  SUM(CASE WHEN (facts->>'status_code')::int = 202 THEN 1 ELSE 0 END)::int AS accepted_202,
+                  SUM(CASE WHEN (facts->>'status_code')::int = 429 THEN 1 ELSE 0 END)::int AS rate_limited_429,
+                  SUM(CASE WHEN (facts->>'status_code')::int = 503 THEN 1 ELSE 0 END)::int AS snapshot_missing_503
+                FROM observations
+                WHERE facts->>'event_type' = 'metrics_endpoint_timing'
+                  AND timestamp >= NOW() - make_interval(mins => :window_minutes)
+                  AND facts->>'endpoint' IN (:endpoint_overview, :endpoint_runs, :endpoint_report)
+                  AND (facts->>'status_code') IN ('202', '429', '503')
+                """
+            ),
+            db_stats,
+            {
+                "window_minutes": int(window_minutes),
+                "endpoint_overview": endpoint_paths[0],
+                "endpoint_runs": endpoint_paths[1],
+                "endpoint_report": endpoint_paths[2],
+            },
+        )
+    ).mappings().first()
+
+    last_rows = (
+        await _execute_with_db_stats(
+            db,
+            text(
+                """
+                SELECT
+                  timestamp,
+                  facts->>'endpoint' AS endpoint,
+                  (facts->>'status_code')::int AS status_code,
+                  COALESCE(NULLIF(facts->>'scope', ''), NULL) AS scope,
+                  COALESCE(NULLIF(facts->>'snapshot_status', ''), NULL) AS snapshot_status
+                FROM observations
+                WHERE facts->>'event_type' = 'metrics_endpoint_timing'
+                  AND timestamp >= NOW() - make_interval(mins => :window_minutes)
+                  AND facts->>'endpoint' IN (:endpoint_overview, :endpoint_runs, :endpoint_report)
+                  AND (facts->>'status_code') IN ('202', '429', '503')
+                ORDER BY timestamp DESC
+                LIMIT :limit_rows
+                """
+            ),
+            db_stats,
+            {
+                "window_minutes": int(window_minutes),
+                "limit_rows": int(last_events_limit),
+                "endpoint_overview": endpoint_paths[0],
+                "endpoint_runs": endpoint_paths[1],
+                "endpoint_report": endpoint_paths[2],
+            },
+        )
+    ).mappings().all()
+
+    events = {
+        "accepted_202": int((counts_row or {}).get("accepted_202") or 0),
+        "rate_limited_429": int((counts_row or {}).get("rate_limited_429") or 0),
+        "snapshot_missing_503": int((counts_row or {}).get("snapshot_missing_503") or 0),
+    }
+    last_events = [
+        {
+            "ts": r["timestamp"].isoformat() if r.get("timestamp") else None,
+            "endpoint": r.get("endpoint"),
+            "status_code": int(r["status_code"]) if r.get("status_code") is not None else None,
+            "scope": r.get("scope"),
+            "snapshot_status": r.get("snapshot_status"),
+        }
+        for r in last_rows
+    ]
+    return {
+        "window_minutes": int(window_minutes),
+        "events": events,
+        "last_events": last_events,
+    }
+
+
 async def _get_read_path_compact(
     db: AsyncSession,
     db_stats: dict[str, int],
@@ -359,6 +454,7 @@ async def get_observability_overview(
 
         c1_health = await get_runtime_c1_health_cached(db=db, db_stats=db_stats)
         read_path = await _get_read_path_compact(db=db, db_stats=db_stats)
+        guardrails = await _get_guardrails_summary(db=db, db_stats=db_stats, window_minutes=15, last_events_limit=5)
 
         score = str(c1_health.get("score", "FAIL"))
         response = {
@@ -366,7 +462,7 @@ async def get_observability_overview(
             "panel_version": "v1",
             "source": {
                 "c1_health": "runtime_status",
-                "guardrails": "pending_mvp_ticket_2",
+                "guardrails": "metrics_endpoint_timing",
                 "window_minutes": int((c1_health.get("inputs") or {}).get("window_minutes") or 15),
             },
             "overall": {
@@ -376,6 +472,7 @@ async def get_observability_overview(
             },
             "c1_health": c1_health,
             "read_path": read_path,
+            "guardrails": guardrails,
         }
         status_code = 200
         return response
