@@ -181,6 +181,80 @@ def _map_panel_decision_from_score(score: str) -> str:
     return "healthy"
 
 
+def _derive_trust_banner(
+    *,
+    overall: dict,
+    read_path: dict,
+    guardrails: dict,
+) -> dict:
+    """
+    Deriva um sinal de confianca de produto (MVP) sem consultas extras.
+
+    Regras:
+    - RED se houver falha operacional clara (health FAIL, snapshot missing, 503 recente).
+    - YELLOW se houver degradacao controlada (health WARN, snapshot stale, excesso de 429).
+    - GREEN quando health PASS + read-path fresh + guardrails criticos zerados.
+    """
+    overall_score = str(overall.get("score", "FAIL")).upper()
+    overview_snapshot_status = str(read_path.get("overview_snapshot_status") or "missing").lower()
+    guardrail_events = dict(guardrails.get("events") or {})
+    snapshot_missing_503 = int(guardrail_events.get("snapshot_missing_503") or 0)
+    rate_limited_429 = int(guardrail_events.get("rate_limited_429") or 0)
+
+    derived_from: list[str] = []
+
+    # RED: operador deve agir; prioriza sinais de indisponibilidade/erro de snapshot.
+    if overall_score == "FAIL":
+        return {
+            "state": "red",
+            "decision": "action_required",
+            "message": "Operational health failed",
+            "derived_from": ["c1_health"],
+        }
+    if overview_snapshot_status == "missing":
+        return {
+            "state": "red",
+            "decision": "action_required",
+            "message": "Overview snapshot missing",
+            "derived_from": ["read_path"],
+        }
+    if snapshot_missing_503 > 0:
+        return {
+            "state": "red",
+            "decision": "action_required",
+            "message": "Snapshot missing events observed",
+            "derived_from": ["guardrails"],
+        }
+
+    # YELLOW: sistema responde, mas ha sinal de degradacao que merece atencao.
+    if overall_score == "WARN":
+        derived_from.append("c1_health")
+    if overview_snapshot_status == "stale":
+        derived_from.append("read_path")
+    if rate_limited_429 >= 3:
+        derived_from.append("guardrails")
+    if derived_from:
+        message = "System degraded"
+        if "read_path" in derived_from and overall_score == "PASS":
+            message = "Read-path stale but system responsive"
+        elif "guardrails" in derived_from and overall_score == "PASS":
+            message = "Rate limiting observed under burst"
+        return {
+            "state": "yellow",
+            "decision": "degraded",
+            "message": message,
+            "derived_from": derived_from,
+        }
+
+    # GREEN: health PASS, overview fresh e sem guardrails criticos recentes.
+    return {
+        "state": "green",
+        "decision": "healthy",
+        "message": "All systems healthy",
+        "derived_from": ["c1_health", "read_path", "guardrails"],
+    }
+
+
 async def _get_guardrails_summary(
     db: AsyncSession,
     db_stats: dict[str, int],
@@ -474,6 +548,12 @@ async def get_observability_overview(
             "read_path": read_path,
             "guardrails": guardrails,
         }
+        # Trust Banner e derivado do payload ja montado (O(1), sem consultas extras).
+        response["trust"] = _derive_trust_banner(
+            overall=response["overall"],
+            read_path=response["read_path"],
+            guardrails=response["guardrails"],
+        )
         status_code = 200
         return response
     except HTTPException:
