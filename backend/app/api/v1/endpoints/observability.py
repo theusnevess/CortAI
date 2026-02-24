@@ -4,11 +4,12 @@ from time import monotonic, perf_counter_ns
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.metrics import CES_DEFAULT_VERSION, _emit_metrics_endpoint_timing
-from app.api.v1.endpoints.status import _get_runtime_c1_health_cached, _should_include_c1_health
 from app.db.session import get_db
+from app.observability.runtime_health import get_runtime_c1_health_cached, should_include_internal_status
 from app.version import get_app_version
 
 router = APIRouter()
@@ -260,7 +261,7 @@ async def _get_read_path_compact(
             "runs_key_count": max(0, runs_key_count),
             "jobs_queued_count": max(0, jobs_queued_count),
         }
-    except Exception:
+    except DBAPIError:
         return defaults
 
 
@@ -352,11 +353,11 @@ async def get_observability_overview(
     query_fingerprint = "panel_version=v1&window=15m"
     db_stats = _new_db_stats()
     try:
-        if not _should_include_c1_health(request):
+        if not should_include_internal_status(request):
             status_code = 404
             raise HTTPException(status_code=404, detail="Not Found")
 
-        c1_health = await _get_runtime_c1_health_cached(db=db, db_stats=db_stats)
+        c1_health = await get_runtime_c1_health_cached(db=db, db_stats=db_stats)
         read_path = await _get_read_path_compact(db=db, db_stats=db_stats)
 
         score = str(c1_health.get("score", "FAIL"))

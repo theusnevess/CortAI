@@ -9,6 +9,7 @@ from sqlalchemy import delete
 from app.db.models import MetricsEndpointDaily
 from app.api.v1.endpoints.metrics import process_read_refresh_jobs_once
 from app.api.v1.endpoints import status as status_endpoint
+from app.observability import runtime_health
 
 
 async def _ensure_metrics_endpoint_daily_table(db_session) -> None:
@@ -352,7 +353,7 @@ async def test_status_c1_health_cache_hit_reduces_compute_calls(client, monkeypa
         ]
         return status_endpoint._build_c1_health_payload(rows, as_of=datetime.utcnow(), window_minutes=15)
 
-    monkeypatch.setattr(status_endpoint, "_compute_runtime_c1_health", _fake_compute)
+    monkeypatch.setattr(runtime_health, "_compute_runtime_c1_health", _fake_compute)
 
     resp1 = await client.get("/api/v1/status", params={"window_days": 7}, headers={"X-Internal-Status": "1"})
     resp2 = await client.get("/api/v1/status", params={"window_days": 7}, headers={"X-Internal-Status": "1"})
@@ -412,7 +413,7 @@ async def test_status_c1_health_cache_expires(client, monkeypatch):
         ]
         return status_endpoint._build_c1_health_payload(rows, as_of=datetime.utcnow(), window_minutes=15)
 
-    monkeypatch.setattr(status_endpoint, "_compute_runtime_c1_health", _fake_compute)
+    monkeypatch.setattr(runtime_health, "_compute_runtime_c1_health", _fake_compute)
 
     resp1 = await client.get("/api/v1/status", params={"window_days": 7}, headers={"X-Internal-Status": "1"})
     await asyncio.sleep(1.2)
@@ -470,7 +471,7 @@ async def test_status_c1_health_reasons_present(client, monkeypatch):
         ]
         return status_endpoint._build_c1_health_payload(rows, as_of=datetime.utcnow(), window_minutes=15)
 
-    monkeypatch.setattr(status_endpoint, "_compute_runtime_c1_health", _fake_compute)
+    monkeypatch.setattr(runtime_health, "_compute_runtime_c1_health", _fake_compute)
     response = await client.get("/api/v1/status", params={"window_days": 7}, headers={"X-Internal-Status": "1"})
     assert response.status_code == 200
     c1 = response.json()["c1_health"]
