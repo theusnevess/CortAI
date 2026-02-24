@@ -1363,3 +1363,52 @@ Exemplo (trecho):
   }
 }
 ```
+
+### Operational Insights Panel (MVP)
+
+Endpoint:
+- `GET /api/v1/observability/overview`
+
+Gate (restrito):
+- requer `EXPOSE_C1_HEALTH_STATUS=1` no processo;
+- requer header `X-Internal-Status: 1`;
+- sem gate autorizado: `404`.
+
+Entrega (MVP):
+- `overall` (`score`, `decision`, `reasons`);
+- `c1_health` (mesma logica do runtime C1 Health Score);
+- `read_path` (freshness/status + `jobs_queued_count`);
+- `guardrails` (counts `202/429/503` + ultimos `5` eventos).
+
+Nao e:
+- historico de health;
+- exporter/Prometheus;
+- substituto do `/api/v1/observability/report`;
+- UI.
+
+Exemplos:
+```bash
+# Sem gate (esperado: 404)
+curl -i http://localhost:8000/api/v1/observability/overview
+
+# Com gate (esperado: 200)
+curl -sS -H "X-Internal-Status: 1" http://localhost:8000/api/v1/observability/overview
+```
+
+Exemplo (trecho):
+```json
+{
+  "panel_version": "v1",
+  "overall": { "score": "WARN", "decision": "degraded", "reasons": ["overview:pct_503>0"] },
+  "guardrails": {
+    "window_minutes": 15,
+    "events": { "accepted_202": 1, "rate_limited_429": 1, "snapshot_missing_503": 0 },
+    "last_events": [{ "endpoint": "/api/v1/metrics/overview", "status_code": 429 }]
+  }
+}
+```
+
+Notas de performance:
+- janela fixa de `15m`;
+- `last_events` limitado a `5`;
+- objetivo: endpoint leve e previsivel (nao virar mini-report).

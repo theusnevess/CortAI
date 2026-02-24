@@ -333,3 +333,20 @@ Observacao operacional (runbook):
 Nota de ambiente (nao versionada):
 - `EXPOSE_C1_HEALTH_STATUS=1` foi habilitado localmente no `docker-compose.yml` apenas para validacao;
 - nao commitado (config de ambiente).
+
+## Feature entregue: Operational Insights Panel (MVP)
+
+Resumo:
+- novo endpoint interno `GET /api/v1/observability/overview` (MVP) para leitura operacional consolidada;
+- gate restrito (`EXPOSE_C1_HEALTH_STATUS=1` + `X-Internal-Status: 1`), retornando `404` sem autorizacao;
+- payload inclui `overall`, `c1_health`, `read_path` e `guardrails` (counts `202/429/503` + ultimos `5` eventos).
+
+Motivacao:
+- oferecer visibilidade operacional rapida e vendavel sem acoplar com CI/workflow;
+- manter custo previsivel e escopo congelado (nao substitui `/observability/report`).
+
+Commits (MVP slice):
+- `e25f65d` feat base (`/api/v1/observability/overview`)
+- `8ebbd01` refactor (runtime health compartilhado)
+- `fdbd45c` guardrails summary + `last_events`
+- `4a605d0` testes (gate/shape/guardrails)
