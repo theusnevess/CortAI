@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 
 
-DEFAULT_APP_VERSION = "1.9.8"
+DEFAULT_APP_VERSION = "1.9.9"
 
 
 def get_app_version() -> str:
