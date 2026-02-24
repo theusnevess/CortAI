@@ -255,6 +255,120 @@ def _derive_trust_banner(
     }
 
 
+_ALLOWED_RECOMMENDATION_ACTIONS = {
+    "run_warmup",
+    "monitor",
+    "investigate_read_path",
+    "reduce_force_live_burst",
+    "inspect_upstream_path",
+    "open_report",
+    "none",
+}
+
+
+def _derive_action_recommendation(
+    *,
+    trust: dict,
+    read_path: dict,
+    guardrails: dict,
+    c1_health: dict,
+) -> dict:
+    """
+    Deriva recomendacao de acao (MVP) a partir do payload do painel, sem queries extras.
+
+    Precedencia (early-return, auditavel):
+    1. snapshot missing (read_path)
+    2. jobs queued (read_path)
+    3. snapshot_missing_503 recente (guardrails)
+    4. rate_limited_429 recente (guardrails)
+    5. trust red por health FAIL/rps<1 (c1_health/trust)
+    6. fallback de diagnostico (open_report)
+    7. none (green)
+    """
+    trust_state = str(trust.get("state") or "red").lower()
+    trust_decision = str(trust.get("decision") or "action_required").lower()
+    trust_reasons = [str(r) for r in (trust.get("derived_from") or [])]
+    overall_reasons = [str(r) for r in (c1_health.get("reasons") or [])]
+
+    overview_snapshot_status = str(read_path.get("overview_snapshot_status") or "missing").lower()
+    jobs_queued_count = int(read_path.get("jobs_queued_count") or 0)
+
+    guardrail_events = dict(guardrails.get("events") or {})
+    snapshot_missing_503 = int(guardrail_events.get("snapshot_missing_503") or 0)
+    rate_limited_429 = int(guardrail_events.get("rate_limited_429") or 0)
+
+    # 1) Snapshot ausente: acao imediata e deterministica de recuperacao.
+    if overview_snapshot_status == "missing":
+        recommendation = {
+            "action": "run_warmup",
+            "priority": "high",
+            "message": "Snapshots ausentes - execute warm-up do read-path.",
+            "derived_from": ["read_path"],
+        }
+    # 2) Jobs em fila: sistema ja reagiu; operador deve monitorar conclusao.
+    elif jobs_queued_count > 0:
+        recommendation = {
+            "action": "monitor",
+            "priority": "medium",
+            "message": "Refresh em andamento - monitore a fila e a freshness.",
+            "derived_from": ["read_path"],
+        }
+    # 3) Eventos 503 recentes: indica churn de snapshot e exige acao no read-path.
+    elif snapshot_missing_503 > 0:
+        recommendation = {
+            "action": "run_warmup",
+            "priority": "high",
+            "message": "Eventos de snapshot missing observados - execute warm-up do read-path.",
+            "derived_from": ["guardrails"],
+        }
+    # 4) Eventos 429 recentes: reduzir burst de force_live e manter degradacao controlada.
+    elif rate_limited_429 > 0:
+        recommendation = {
+            "action": "reduce_force_live_burst",
+            "priority": "medium",
+            "message": "Rate limiting recente - reduza burst de force_live.",
+            "derived_from": ["guardrails"],
+        }
+    # 5) Trust red por falha operacional (tipicamente rps<1) sem sinais de snapshot/fila.
+    elif trust_state == "red" and trust_decision == "action_required":
+        recommendation = {
+            "action": "inspect_upstream_path",
+            "priority": "high",
+            "message": "Saude operacional falhou - verifique upstream e infra path.",
+            "derived_from": ["trust", "c1_health"],
+        }
+    # 6) Fallback para casos degradados nao classificados (ex.: WARN por p99).
+    elif trust_state == "yellow":
+        recommendation = {
+            "action": "open_report",
+            "priority": "medium",
+            "message": "Degradacao detectada - abra o observability report para diagnostico.",
+            "derived_from": ["trust", "c1_health"],
+        }
+    # 7) Estado saudavel: sem acao necessaria.
+    else:
+        recommendation = {
+            "action": "none",
+            "priority": "low",
+            "message": "Nenhuma acao necessaria.",
+            "derived_from": ["trust"],
+        }
+
+    # Normaliza derived_from e valida enum para evitar drift silencioso.
+    recommendation["derived_from"] = [str(x) for x in recommendation.get("derived_from", []) if str(x)]
+    if not recommendation["derived_from"]:
+        recommendation["derived_from"] = ["trust"]
+    if str(recommendation.get("action")) not in _ALLOWED_RECOMMENDATION_ACTIONS:
+        recommendation["action"] = "open_report"
+        recommendation["priority"] = "medium"
+        recommendation["message"] = "Recomendacao invalida - abra o observability report para diagnostico."
+        recommendation["derived_from"] = ["trust"]
+    # Mantem hook para futuras regras sem mudar o contrato atual.
+    if overall_reasons and recommendation["action"] == "none":
+        recommendation["derived_from"] = ["trust"]
+    return recommendation
+
+
 async def _get_guardrails_summary(
     db: AsyncSession,
     db_stats: dict[str, int],
@@ -553,6 +667,13 @@ async def get_observability_overview(
             overall=response["overall"],
             read_path=response["read_path"],
             guardrails=response["guardrails"],
+        )
+        # Recommendation e derivada de trust/read_path/guardrails/c1_health (tambem O(1)).
+        response["recommendation"] = _derive_action_recommendation(
+            trust=response["trust"],
+            read_path=response["read_path"],
+            guardrails=response["guardrails"],
+            c1_health=response["c1_health"],
         )
         status_code = 200
         return response
