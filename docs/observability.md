@@ -1442,3 +1442,58 @@ Notas:
 - nao substitui monitoramento / historico;
 - derivado de `c1_health` + `read_path` + `guardrails`;
 - custo `O(1)` no request path (sem queries adicionais).
+
+### Action Recommendation (MVP)
+
+Objetivo:
+- transformar sinal operacional (`trust`) em acao recomendada, de forma deterministica e sem query adicional.
+
+Contrato (campo `recommendation` no painel):
+```json
+{
+  "recommendation": {
+    "action": "run_warmup | monitor | investigate_read_path | reduce_force_live_burst | inspect_upstream_path | open_report | none",
+    "priority": "low | medium | high",
+    "message": "string curta e deterministica",
+    "derived_from": ["trust" | "read_path" | "guardrails" | "c1_health"]
+  }
+}
+```
+
+Regras + precedencia (MVP):
+1. `overview_snapshot_status=missing` -> `run_warmup` (`high`)
+2. `jobs_queued_count>0` -> `monitor` (`medium`)
+3. `guardrails.snapshot_missing_503>0` -> `run_warmup` (`high`)
+4. `guardrails.rate_limited_429>0` -> `reduce_force_live_burst` (`medium`)
+5. `trust=red` -> `inspect_upstream_path` (`high`)
+6. `trust=yellow` -> `open_report` (`medium`)
+7. caso saudavel -> `none` (`low`)
+
+Exemplo (snapshot missing -> warm-up):
+```json
+{
+  "recommendation": {
+    "action": "run_warmup",
+    "priority": "high",
+    "message": "Snapshots ausentes - execute warm-up do read-path.",
+    "derived_from": ["read_path"]
+  }
+}
+```
+
+Exemplo (healthy -> none):
+```json
+{
+  "recommendation": {
+    "action": "none",
+    "priority": "low",
+    "message": "Nenhuma acao necessaria.",
+    "derived_from": ["trust"]
+  }
+}
+```
+
+Notas:
+- derivado de `trust` + `read_path` + `guardrails` + `c1_health`;
+- precedencia e deterministica (early-return) e coberta por testes;
+- custo `O(1)` no request path (sem queries adicionais).

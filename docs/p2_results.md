@@ -352,3 +352,10 @@ Commits (MVP slice):
 - `4a605d0` testes (gate/shape/guardrails)
 - `4906f56` Trust Banner (sinal `red|yellow|green` no payload)
 - `1fbd92b` testes de derivacao do Trust Banner (inclui precedencia `red > yellow`)
+- `c9f8fb3` Action Recommendation (acao/priority/message/derived_from no payload)
+- `085b6dd` testes de mapeamento + precedencia da recommendation
+- `3315c45` docs do Trust Banner (contrato + regras)
+
+Extensao de produto (sobre o painel MVP):
+- `Trust Banner` (`red|yellow|green`) integrado ao payload, com derivacao deterministica e precedencia testada;
+- `Action Recommendation` (MVP) integrada ao payload, com acao recomendada deterministica (`run_warmup`, `monitor`, `reduce_force_live_burst`, `inspect_upstream_path`, `open_report`, `none`) e precedencia testada via endpoint real.
