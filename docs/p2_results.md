@@ -350,3 +350,5 @@ Commits (MVP slice):
 - `8ebbd01` refactor (runtime health compartilhado)
 - `fdbd45c` guardrails summary + `last_events`
 - `4a605d0` testes (gate/shape/guardrails)
+- `4906f56` Trust Banner (sinal `red|yellow|green` no payload)
+- `1fbd92b` testes de derivacao do Trust Banner (inclui precedencia `red > yellow`)

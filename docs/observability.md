@@ -1412,3 +1412,33 @@ Notas de performance:
 - janela fixa de `15m`;
 - `last_events` limitado a `5`;
 - objetivo: endpoint leve e previsivel (nao virar mini-report).
+
+### Trust Banner (Product Signal)
+
+Objetivo:
+- expor um sinal de primeira linha ("posso confiar agora?") para UI/automacao, derivado do payload ja calculado do Insights Panel.
+
+Regras (MVP):
+- `red` / `action_required`: `c1_health=FAIL` ou `read_path.overview_snapshot_status=missing` ou `guardrails.snapshot_missing_503>0`;
+- `yellow` / `degraded`: `c1_health=WARN` ou `read_path.overview_snapshot_status=stale` ou `guardrails.rate_limited_429>=3`;
+- `green` / `healthy`: demais casos.
+
+Precedencia:
+- `red > yellow > green` (ex.: `WARN` + `snapshot missing` => `red`).
+
+Exemplo (trecho):
+```json
+{
+  "trust": {
+    "state": "yellow",
+    "decision": "degraded",
+    "message": "Read-path stale but system responsive",
+    "derived_from": ["read_path"]
+  }
+}
+```
+
+Notas:
+- nao substitui monitoramento / historico;
+- derivado de `c1_health` + `read_path` + `guardrails`;
+- custo `O(1)` no request path (sem queries adicionais).
