@@ -60,8 +60,8 @@ jobs:
           REDIS_URL=redis://redis:6379/0
           
           # MinIO (Storage)
-          MINIO_ROOT_USER=minioadmin
-          MINIO_ROOT_PASSWORD=minioadmin123
+          MINIO_ROOT_USER=ci_minio_user
+          MINIO_ROOT_PASSWORD=ci_minio_pass_123
           MINIO_ENDPOINT=http://minio:9000
           MINIO_BUCKET_VIDEOS=videos-raw
           MINIO_BUCKET_CLIPS=clips-final
@@ -84,6 +84,14 @@ jobs:
       - name: Run Alembic migrations
         run: |
           docker compose run --rm api alembic upgrade head
+
+      - name: Security audit (pip-audit)
+        run: |
+          # Temporary exception:
+          # GHSA-wj6h-64fc-37mp / CVE-2024-23342 (python-ecdsa)
+          # Upstream status: no fix planned.
+          # Documented in SECURITY_ACCEPTED_RISKS.md
+          docker compose run --rm api sh -lc "python -m pip install -q 'wheel>=0.46.2' pip-audit && pip-audit --ignore-vuln GHSA-wj6h-64fc-37mp"
       
       - name: Run pytest
         run: |
