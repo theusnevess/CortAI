@@ -29,10 +29,61 @@
     .d-FAIL { color: rgb(252,165,165); }
     code { background: rgba(148,163,184,0.12); padding: 2px 6px; border-radius: 6px; }
     .small { font-size: 12px; }
+    .ov-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 12px 0 16px 0;
+    }
+    .ov-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      user-select: none;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      font-size: 12px;
+      opacity: 0.92;
+    }
+    .ov-toggle input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      accent-color: #2ecc71;
+      cursor: pointer;
+    }
+    .ov-pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(255,255,255,0.06);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      white-space: nowrap;
+    }
+    .ov-pill.is-on {
+      border-color: rgba(46, 204, 113, 0.35);
+      background: rgba(46, 204, 113, 0.12);
+    }
+    .ov-pill.is-off {
+      border-color: rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.05);
+      opacity: 0.85;
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
+    <div class="ov-toolbar">
+      <label class="ov-toggle" for="ov-auto-refresh">
+        <input id="ov-auto-refresh" type="checkbox" />
+        <span>Auto-refresh</span>
+      </label>
+      <span id="ov-auto-refresh-indicator" class="ov-pill is-off">Auto-refresh OFF</span>
+    </div>
+
+    <div id="ov-panel-root">
     {% set trust = panel.get("trust", {}) %}
     {% set rec = panel.get("recommendation", {}) %}
     {% set overall = panel.get("overall", {}) %}
@@ -203,6 +254,96 @@
     <div class="mut" style="margin-top:12px;">
       Internal UI (MVP). Gate required. No history. No external auth.
     </div>
+    </div>
   </div>
+  <script>
+  ;(() => {
+    const TOGGLE_ID = "ov-auto-refresh";
+    const INDICATOR_ID = "ov-auto-refresh-indicator";
+    const PANEL_ROOT_ID = "ov-panel-root";
+    const INTERVAL_MS = 10000;
+
+    let timer = null;
+    let inFlight = false;
+
+    const toggle = document.getElementById(TOGGLE_ID);
+    const indicator = document.getElementById(INDICATOR_ID);
+    let panelRoot = document.getElementById(PANEL_ROOT_ID);
+
+    if (!toggle || !panelRoot) return;
+
+    function setIndicator(isOn) {
+      if (!indicator) return;
+      if (isOn) {
+        indicator.textContent = "Auto-refresh ON (10s)";
+        indicator.classList.remove("is-off");
+        indicator.classList.add("is-on");
+      } else {
+        indicator.textContent = "Auto-refresh OFF";
+        indicator.classList.remove("is-on");
+        indicator.classList.add("is-off");
+      }
+    }
+
+    async function refreshOnce() {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const res = await fetch(window.location.href, {
+          method: "GET",
+          cache: "no-store",
+          headers: {
+            "X-Requested-With": "ov-auto-refresh",
+            "X-Internal-Status": "1",
+          },
+        });
+        if (!res.ok) return;
+
+        const html = await res.text();
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const nextRoot = doc.getElementById(PANEL_ROOT_ID);
+        if (!nextRoot) return;
+
+        panelRoot.replaceWith(nextRoot);
+        panelRoot = document.getElementById(PANEL_ROOT_ID);
+        if (!panelRoot) return;
+      } catch (_) {
+        // Silent fallback by design for the UI-only refresh helper.
+      } finally {
+        inFlight = false;
+      }
+    }
+
+    function startTimer() {
+      if (timer) return;
+      timer = window.setInterval(refreshOnce, INTERVAL_MS);
+      refreshOnce();
+    }
+
+    function stopTimer() {
+      if (!timer) return;
+      window.clearInterval(timer);
+      timer = null;
+    }
+
+    toggle.checked = false;
+    setIndicator(false);
+
+    toggle.addEventListener("change", () => {
+      const on = Boolean(toggle.checked);
+      setIndicator(on);
+      if (on) startTimer();
+      else stopTimer();
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (!toggle.checked) return;
+      if (document.hidden) stopTimer();
+      else startTimer();
+    });
+
+    window.addEventListener("beforeunload", stopTimer);
+  })();
+  </script>
 </body>
 </html>

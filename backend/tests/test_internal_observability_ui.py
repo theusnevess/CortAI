@@ -109,3 +109,47 @@ async def test_internal_observability_ui_renders_with_minimal_payload(client, mo
     assert "Operational Insights" in response.text
     assert "TRUST:" in response.text
 
+
+@pytest.mark.anyio
+async def test_internal_observability_ui_auto_refresh_controls_present(client, monkeypatch):
+    """
+    UI-only slice: auto-refresh controls must be present without coupling
+    the test to JS implementation details.
+    """
+    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+
+    async def _fake_builder(**kwargs):
+        return {
+            "panel_version": "v1",
+            "trust": {
+                "state": "green",
+                "decision": "healthy",
+                "message": "ok",
+                "derived_from": ["c1_health"],
+            },
+            "recommendation": {
+                "action": "none",
+                "priority": "low",
+                "message": "ok",
+                "derived_from": ["trust"],
+            },
+            "c1_health": {"score": "PASS", "rows": []},
+            "read_path": {
+                "overview_snapshot_status": "fresh",
+                "runs_snapshot_status": "fresh",
+                "jobs_queued_count": 0,
+            },
+            "guardrails": {"events": {}, "last_events": []},
+        }
+
+    monkeypatch.setattr(internal_ui, "_build_observability_overview_payload", _fake_builder)
+
+    response = await client.get("/internal/observability", headers=_internal_headers())
+    assert response.status_code == 200
+    assert "text/html" in response.headers.get("content-type", "").lower()
+
+    html = response.text
+    assert 'id="ov-auto-refresh"' in html
+    assert 'id="ov-auto-refresh-indicator"' in html
+    assert 'id="ov-panel-root"' in html
+    assert "Auto-refresh OFF" in html
