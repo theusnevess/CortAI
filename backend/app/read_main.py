@@ -4,7 +4,7 @@ from time import perf_counter_ns
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1.endpoints import metrics, observability, status
+from app.api.v1.endpoints import metrics, observability, status, internal_observability_ui
 from app.version import get_app_version
 
 # App dedicado ao read-path para isolar throughput de leitura.
@@ -41,6 +41,7 @@ async def capture_asgi_entry_time(request: Request, call_next):
 app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])
 app.include_router(observability.router, prefix="/api/v1/observability", tags=["observability"])
 app.include_router(status.router, prefix="/api/v1", tags=["status"])
+app.include_router(internal_observability_ui.router)
 
 
 @app.get("/")

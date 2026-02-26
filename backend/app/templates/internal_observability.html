@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Operational Insights</title>
+  <style>
+    :root { --bg:#0b0f14; --fg:#e8eef7; --mut:#9fb0c3; --card:#121924; --line:#223044; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); color:var(--fg); }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 20px; }
+    .row { display:flex; gap: 12px; flex-wrap: wrap; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius: 12px; padding: 14px; }
+    .h1 { font-size: 18px; margin:0 0 10px 0; }
+    .mut { color:var(--mut); font-size: 12px; }
+    .kv { display:flex; gap:12px; flex-wrap:wrap; }
+    .kv > div { min-width: 160px; }
+    .banner { border-radius: 14px; padding: 14px; border:1px solid var(--line); }
+    .b-green { background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.35); }
+    .b-yellow { background: rgba(234,179,8,0.12); border-color: rgba(234,179,8,0.35); }
+    .b-red { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.35); }
+    .pill { display:inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; border:1px solid var(--line); margin-right: 8px; }
+    .pill-green { border-color: rgba(34,197,94,0.5); }
+    .pill-yellow { border-color: rgba(234,179,8,0.5); }
+    .pill-red { border-color: rgba(239,68,68,0.5); }
+    table { width:100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; }
+    .d-PASS { color: rgb(134,239,172); }
+    .d-WARN { color: rgb(253,224,71); }
+    .d-FAIL { color: rgb(252,165,165); }
+    code { background: rgba(148,163,184,0.12); padding: 2px 6px; border-radius: 6px; }
+    .small { font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    {% set trust = panel.get("trust", {}) %}
+    {% set rec = panel.get("recommendation", {}) %}
+    {% set overall = panel.get("overall", {}) %}
+    {% set c1 = panel.get("c1_health", {}) %}
+    {% set read_path = panel.get("read_path", {}) %}
+    {% set guardrails = panel.get("guardrails", {}) %}
+    {% set trust_state = trust.get("state", "yellow") %}
+
+    <div class="banner {% if trust_state == 'green' %}b-green{% elif trust_state == 'red' %}b-red{% else %}b-yellow{% endif %}">
+      <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+        <div>
+          <span class="pill {% if trust_state == 'green' %}pill-green{% elif trust_state == 'red' %}pill-red{% else %}pill-yellow{% endif %}">
+            TRUST: {{ trust.get("state","?")|upper }}
+          </span>
+          <span class="pill">
+            DECISION: {{ trust.get("decision","?") }}
+          </span>
+          <div class="h1" style="margin-top:10px;">
+            {{ trust.get("message","(no message)") }}
+          </div>
+          <div class="mut">
+            derived_from: {{ (trust.get("derived_from", [])|join(", ")) if trust.get("derived_from") else "—" }}
+          </div>
+        </div>
+        <div class="card" style="min-width: 320px;">
+          <div class="mut">Recommendation</div>
+          <div style="margin-top:6px;">
+            <strong>{{ rec.get("action","none") }}</strong>
+            <span class="mut">({{ rec.get("priority","low") }})</span>
+          </div>
+          <div class="small" style="margin-top:8px;">
+            {{ rec.get("message","—") }}
+          </div>
+          <div class="mut" style="margin-top:8px;">
+            derived_from: {{ (rec.get("derived_from", [])|join(", ")) if rec.get("derived_from") else "—" }}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:12px;">
+      <div class="card" style="flex: 1 1 420px;">
+        <div class="h1">System Snapshot</div>
+        <div class="kv">
+          <div>
+            <div class="mut">as_of</div>
+            <div><code>{{ panel.get("as_of","—") }}</code></div>
+          </div>
+          <div>
+            <div class="mut">panel_version</div>
+            <div><code>{{ panel.get("panel_version","v1") }}</code></div>
+          </div>
+          <div>
+            <div class="mut">overall.score</div>
+            <div><strong>{{ overall.get("score","?") }}</strong></div>
+          </div>
+          <div>
+            <div class="mut">overall.decision</div>
+            <div><strong>{{ overall.get("decision","?") }}</strong></div>
+          </div>
+        </div>
+        <div class="mut" style="margin-top:10px;">
+          overall.reasons: {{ (overall.get("reasons", [])|join(", ")) if overall.get("reasons") else "—" }}
+        </div>
+      </div>
+
+      <div class="card" style="flex: 1 1 420px;">
+        <div class="h1">Read Path</div>
+        <div class="kv">
+          <div>
+            <div class="mut">overview</div>
+            <div>
+              <strong>{{ read_path.get("overview_snapshot_status","?") }}</strong>
+              <span class="mut">({{ read_path.get("overview_freshness_seconds","—") }}s)</span>
+            </div>
+          </div>
+          <div>
+            <div class="mut">runs</div>
+            <div>
+              <strong>{{ read_path.get("runs_snapshot_status","?") }}</strong>
+              <span class="mut">({{ read_path.get("runs_freshness_seconds","—") }}s)</span>
+            </div>
+          </div>
+          <div>
+            <div class="mut">runs_key_count</div>
+            <div><strong>{{ read_path.get("runs_key_count","—") }}</strong></div>
+          </div>
+          <div>
+            <div class="mut">jobs_queued_count</div>
+            <div><strong>{{ read_path.get("jobs_queued_count","—") }}</strong></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px;">
+      <div class="h1">C1 Health</div>
+      <div class="mut">
+        score: <strong>{{ c1.get("score","?") }}</strong>
+        · version: <code>{{ c1.get("version","—") }}</code>
+        {% if c1.get("meta") %}
+          · cached: <code>{{ c1.get("meta",{}).get("cached","—") }}</code>
+          · age: <code>{{ c1.get("meta",{}).get("cache_age_seconds","—") }}s</code>
+          · compute: <code>{{ c1.get("meta",{}).get("compute_ms","—") }}ms</code>
+        {% endif %}
+      </div>
+
+      <table style="margin-top:10px;">
+        <thead>
+          <tr>
+            <th>path</th>
+            <th>endpoint</th>
+            <th>decision</th>
+            <th>p99_ms</th>
+            <th>rps</th>
+            <th>reasons</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for row in c1.get("rows", []) %}
+          <tr>
+            <td>{{ row.get("path","—") }}</td>
+            <td>{{ row.get("endpoint","—") }}</td>
+            {% set d = row.get("decision","—") %}
+            <td class="d-{{ d }}">{{ d }}</td>
+            <td>{{ row.get("p99_ms","—") }}</td>
+            <td>{{ row.get("rps","—") }}</td>
+            <td class="mut">{{ (row.get("reasons", [])|join(", ")) if row.get("reasons") else "—" }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-top:12px;">
+      <div class="h1">Guardrails (last {{ guardrails.get("window_minutes",15) }} min)</div>
+      <div class="kv">
+        <div>
+          <div class="mut">202 accepted</div>
+          <div><strong>{{ guardrails.get("events",{}).get("accepted_202",0) }}</strong></div>
+        </div>
+        <div>
+          <div class="mut">429 rate_limited</div>
+          <div><strong>{{ guardrails.get("events",{}).get("rate_limited_429",0) }}</strong></div>
+        </div>
+        <div>
+          <div class="mut">503 snapshot_missing</div>
+          <div><strong>{{ guardrails.get("events",{}).get("snapshot_missing_503",0) }}</strong></div>
+        </div>
+      </div>
+
+      <div class="mut" style="margin-top:10px;">last_events (max 5)</div>
+      <ul class="small">
+        {% for ev in guardrails.get("last_events", []) %}
+          <li>
+            <code>{{ ev.get("ts","—") }}</code>
+            · <strong>{{ ev.get("endpoint","—") }}</strong>
+            → <strong>{{ ev.get("status_code","—") }}</strong>
+            {% if ev.get("scope") %} · scope=<code>{{ ev.get("scope") }}</code>{% endif %}
+            {% if ev.get("snapshot_status") %} · snapshot_status=<code>{{ ev.get("snapshot_status") }}</code>{% endif %}
+          </li>
+        {% else %}
+          <li class="mut">—</li>
+        {% endfor %}
+      </ul>
+    </div>
+
+    <div class="mut" style="margin-top:12px;">
+      Internal UI (MVP). Gate required. No history. No external auth.
+    </div>
+  </div>
+</body>
+</html>

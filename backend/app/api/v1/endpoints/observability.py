@@ -622,6 +622,58 @@ def _status_from_checks(checks: list[dict], runs_worst_empty: bool) -> str:
     return "PASS"
 
 
+async def _build_observability_overview_payload(
+    *,
+    db: AsyncSession,
+    db_stats: dict[str, int],
+) -> dict:
+    """
+    Monta o payload do Operational Insights Panel (MVP).
+
+    Esta funcao centraliza o builder para reuso por:
+    - endpoint JSON (`/api/v1/observability/overview`)
+    - UI interna (`/internal/observability`)
+
+    Nao faz checagem de gate. O chamador decide a exposicao.
+    """
+    c1_health = await get_runtime_c1_health_cached(db=db, db_stats=db_stats)
+    read_path = await _get_read_path_compact(db=db, db_stats=db_stats)
+    guardrails = await _get_guardrails_summary(db=db, db_stats=db_stats, window_minutes=15, last_events_limit=5)
+
+    score = str(c1_health.get("score", "FAIL"))
+    response = {
+        "as_of": c1_health.get("as_of") or (datetime.utcnow().replace(microsecond=0).isoformat() + "Z"),
+        "panel_version": "v1",
+        "source": {
+            "c1_health": "runtime_status",
+            "guardrails": "metrics_endpoint_timing",
+            "window_minutes": int((c1_health.get("inputs") or {}).get("window_minutes") or 15),
+        },
+        "overall": {
+            "score": score,
+            "decision": _map_panel_decision_from_score(score),
+            "reasons": list(c1_health.get("reasons") or []),
+        },
+        "c1_health": c1_health,
+        "read_path": read_path,
+        "guardrails": guardrails,
+    }
+    # Trust Banner e derivado do payload ja montado (O(1), sem consultas extras).
+    response["trust"] = _derive_trust_banner(
+        overall=response["overall"],
+        read_path=response["read_path"],
+        guardrails=response["guardrails"],
+    )
+    # Recommendation e derivada de trust/read_path/guardrails/c1_health (tambem O(1)).
+    response["recommendation"] = _derive_action_recommendation(
+        trust=response["trust"],
+        read_path=response["read_path"],
+        guardrails=response["guardrails"],
+        c1_health=response["c1_health"],
+    )
+    return response
+
+
 @router.get("/overview")
 async def get_observability_overview(
     request: Request,
@@ -640,41 +692,7 @@ async def get_observability_overview(
             status_code = 404
             raise HTTPException(status_code=404, detail="Not Found")
 
-        c1_health = await get_runtime_c1_health_cached(db=db, db_stats=db_stats)
-        read_path = await _get_read_path_compact(db=db, db_stats=db_stats)
-        guardrails = await _get_guardrails_summary(db=db, db_stats=db_stats, window_minutes=15, last_events_limit=5)
-
-        score = str(c1_health.get("score", "FAIL"))
-        response = {
-            "as_of": c1_health.get("as_of") or (datetime.utcnow().replace(microsecond=0).isoformat() + "Z"),
-            "panel_version": "v1",
-            "source": {
-                "c1_health": "runtime_status",
-                "guardrails": "metrics_endpoint_timing",
-                "window_minutes": int((c1_health.get("inputs") or {}).get("window_minutes") or 15),
-            },
-            "overall": {
-                "score": score,
-                "decision": _map_panel_decision_from_score(score),
-                "reasons": list(c1_health.get("reasons") or []),
-            },
-            "c1_health": c1_health,
-            "read_path": read_path,
-            "guardrails": guardrails,
-        }
-        # Trust Banner e derivado do payload ja montado (O(1), sem consultas extras).
-        response["trust"] = _derive_trust_banner(
-            overall=response["overall"],
-            read_path=response["read_path"],
-            guardrails=response["guardrails"],
-        )
-        # Recommendation e derivada de trust/read_path/guardrails/c1_health (tambem O(1)).
-        response["recommendation"] = _derive_action_recommendation(
-            trust=response["trust"],
-            read_path=response["read_path"],
-            guardrails=response["guardrails"],
-            c1_health=response["c1_health"],
-        )
+        response = await _build_observability_overview_payload(db=db, db_stats=db_stats)
         status_code = 200
         return response
     except HTTPException:
