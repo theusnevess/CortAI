@@ -359,3 +359,4 @@ Commits (MVP slice):
 Extensao de produto (sobre o painel MVP):
 - `Trust Banner` (`red|yellow|green`) integrado ao payload, com derivacao deterministica e precedencia testada;
 - `Action Recommendation` (MVP) integrada ao payload, com acao recomendada deterministica (`run_warmup`, `monitor`, `reduce_force_live_burst`, `inspect_upstream_path`, `open_report`, `none`) e precedencia testada via endpoint real.
+- `Internal Observability UI` (MVP) em `GET /internal/observability`, SSR simples com gate restrito, sem query nova e sem logica duplicada do painel.

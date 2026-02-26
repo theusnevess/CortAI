@@ -1497,3 +1497,43 @@ Notas:
 - derivado de `trust` + `read_path` + `guardrails` + `c1_health`;
 - precedencia e deterministica (early-return) e coberta por testes;
 - custo `O(1)` no request path (sem queries adicionais).
+
+### Internal Observability UI (MVP)
+
+Objetivo:
+- visualizar o `Operational Insights Panel` em `3-5s` para uso interno (operador/founder/dev), sem adicionar logica nova no backend.
+
+Acesso:
+- rota: `GET /internal/observability`
+- gate: `EXPOSE_C1_HEALTH_STATUS=1`
+- header obrigatorio: `X-Internal-Status: 1`
+- sem gate autorizado: `404` (reduz descoberta)
+
+O que a pagina mostra:
+- `TRUST` (banner grande com `trust.message`)
+- `Recommendation` (`action`, `priority`, `message`)
+- `C1 Health` (linhas por endpoint com `decision`, `p99`, `rps`)
+- `Read Path` (`overview/runs snapshot_status`, `freshness`, `jobs_queued_count`)
+- `Guardrails` (counts `202/429/503` + `last_events`)
+
+Notas de seguranca:
+- `Cache-Control: no-store`
+- endpoint interno; nao substitui monitoramento externo
+- usa o mesmo gate restrito do painel JSON (sem auth publica adicional no MVP)
+
+Notas tecnicas:
+- render server-side (template HTML simples)
+- reusa o mesmo builder do painel JSON (`/api/v1/observability/overview`)
+- sem query nova e sem fetch HTTP interno
+
+Teste rapido:
+```bash
+# sem header -> 404
+curl -i http://localhost:8000/internal/observability
+
+# com gate+header -> 200 HTML
+curl -i -H "X-Internal-Status: 1" http://localhost:8000/internal/observability
+
+# suite focada
+pytest -q tests/test_internal_observability_ui.py
+```
