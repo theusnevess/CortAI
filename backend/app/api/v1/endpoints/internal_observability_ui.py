@@ -41,8 +41,9 @@ async def get_internal_observability_ui(
         panel = await _build_observability_overview_payload(db=db, db_stats=db_stats)
         status_code = 200
         response = templates.TemplateResponse(
+            request,
             "internal_observability.html",
-            {"request": request, "panel": panel},
+            {"panel": panel},
         )
         response.headers["Cache-Control"] = "no-store"
         return response
