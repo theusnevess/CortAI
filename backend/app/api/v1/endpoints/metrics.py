@@ -212,7 +212,8 @@ def _build_overview_cache_key(
 
 
 def _overview_cache_key_hash(key: str) -> str:
-    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
+    # Hash utilitario (nao criptografico) para nomes curtos de cache em memoria.
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
 
 
 def _get_overview_cache(key: str) -> tuple[str, str] | None:
@@ -359,7 +360,8 @@ def _build_snapshot_etag(*, endpoint: str, query_key: str, refreshed_at: datetim
     Nao inclui freshness_seconds para evitar churn de ETag a cada request.
     """
     refreshed_token = refreshed_at.isoformat() if isinstance(refreshed_at, datetime) else "missing"
-    digest = hashlib.sha1(f"{endpoint}|{query_key}|{refreshed_token}".encode("utf-8")).hexdigest()[:16]
+    # ETag fraco deterministico; SHA-256 evita achado SAST por SHA-1.
+    digest = hashlib.sha256(f"{endpoint}|{query_key}|{refreshed_token}".encode("utf-8")).hexdigest()[:16]
     return f'W/"{digest}"'
 
 
