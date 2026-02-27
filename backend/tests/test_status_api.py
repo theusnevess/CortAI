@@ -540,3 +540,100 @@ async def test_status_public_action_mapping_defaults_to_inspect(client, monkeypa
     payload = response.json()
     assert payload["state"] == "action_required"
     assert payload["action"] == "inspect"
+
+
+@pytest.mark.anyio
+async def test_status_public_webhook_triggers_only_on_transition_to_action_required(client, monkeypatch):
+    status_endpoint._reset_public_webhook_state_for_tests()
+    monkeypatch.setenv("STATUS_WEBHOOK_URL", "https://example.com/hook")
+
+    state_box = {"state": "action_required", "action": "inspect_upstream_path"}
+
+    async def _fake_builder(**kwargs):
+        return {
+            "as_of": "2026-02-27T10:00:00Z",
+            "trust": {"decision": state_box["state"]},
+            "recommendation": {"action": state_box["action"]},
+        }
+
+    calls: list[dict] = []
+
+    async def _fake_send(url: str, payload: dict):
+        calls.append({"url": url, "payload": dict(payload)})
+
+    monkeypatch.setattr(status_endpoint, "_build_observability_overview_payload", _fake_builder)
+    monkeypatch.setattr(status_endpoint, "_send_public_status_webhook", _fake_send)
+
+    # 1) First transition into action_required -> trigger.
+    r1 = await client.get("/api/v1/status/public")
+    assert r1.status_code == 200
+    await asyncio.sleep(0.01)
+    assert len(calls) == 1
+    assert calls[0]["url"] == "https://example.com/hook"
+    assert calls[0]["payload"]["state"] == "action_required"
+    assert calls[0]["payload"]["action"] == "inspect"
+
+    # 2) Staying in action_required -> no new trigger.
+    r2 = await client.get("/api/v1/status/public")
+    assert r2.status_code == 200
+    await asyncio.sleep(0.01)
+    assert len(calls) == 1
+
+    # 3) Transition away from action_required -> no trigger.
+    state_box["state"] = "degraded"
+    state_box["action"] = "open_report"
+    r3 = await client.get("/api/v1/status/public")
+    assert r3.status_code == 200
+    await asyncio.sleep(0.01)
+    assert len(calls) == 1
+
+    # 4) Transition back to action_required -> trigger again.
+    state_box["state"] = "action_required"
+    state_box["action"] = "run_warmup"
+    r4 = await client.get("/api/v1/status/public")
+    assert r4.status_code == 200
+    await asyncio.sleep(0.01)
+    assert len(calls) == 2
+    assert calls[1]["payload"]["action"] == "inspect"
+
+
+@pytest.mark.anyio
+async def test_status_public_webhook_noop_when_disabled_or_non_action_required(client, monkeypatch):
+    status_endpoint._reset_public_webhook_state_for_tests()
+    calls: list[dict] = []
+
+    async def _fake_send(url: str, payload: dict):
+        calls.append({"url": url, "payload": dict(payload)})
+
+    # URL ausente -> no-op mesmo com action_required.
+    async def _builder_action_required(**kwargs):
+        return {
+            "as_of": "2026-02-27T10:00:00Z",
+            "trust": {"decision": "action_required"},
+            "recommendation": {"action": "inspect_upstream_path"},
+        }
+
+    monkeypatch.delenv("STATUS_WEBHOOK_URL", raising=False)
+    monkeypatch.setattr(status_endpoint, "_build_observability_overview_payload", _builder_action_required)
+    monkeypatch.setattr(status_endpoint, "_send_public_status_webhook", _fake_send)
+    r1 = await client.get("/api/v1/status/public")
+    assert r1.status_code == 200
+    await asyncio.sleep(0.01)
+    assert len(calls) == 0
+
+    # URL presente + estado nao critico -> no-op.
+    status_endpoint._reset_public_webhook_state_for_tests()
+    monkeypatch.setenv("STATUS_WEBHOOK_URL", "https://example.com/hook")
+
+    async def _builder_healthy(**kwargs):
+        return {
+            "as_of": "2026-02-27T10:00:00Z",
+            "trust": {"decision": "healthy"},
+            "recommendation": {"action": "none"},
+        }
+
+    monkeypatch.setattr(status_endpoint, "_build_observability_overview_payload", _builder_healthy)
+    r2 = await client.get("/api/v1/status/public")
+    assert r2.status_code == 200
+    await asyncio.sleep(0.01)
+    assert len(calls) == 0
