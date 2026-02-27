@@ -208,21 +208,21 @@ def _derive_trust_banner(
         return {
             "state": "red",
             "decision": "action_required",
-            "message": "Operational health failed",
+            "message": "Saude operacional falhou. Acao necessaria.",
             "derived_from": ["c1_health"],
         }
     if overview_snapshot_status == "missing":
         return {
             "state": "red",
             "decision": "action_required",
-            "message": "Overview snapshot missing",
+            "message": "Snapshot ausente. Execute warm-up para restaurar dados.",
             "derived_from": ["read_path"],
         }
     if snapshot_missing_503 > 0:
         return {
             "state": "red",
             "decision": "action_required",
-            "message": "Snapshot missing events observed",
+            "message": "Eventos de snapshot missing observados. Execute warm-up.",
             "derived_from": ["guardrails"],
         }
 
@@ -234,11 +234,11 @@ def _derive_trust_banner(
     if rate_limited_429 >= 3:
         derived_from.append("guardrails")
     if derived_from:
-        message = "System degraded"
+        message = "Sinais de degradacao observados."
         if "read_path" in derived_from and overall_score == "PASS":
-            message = "Read-path stale but system responsive"
+            message = "Dados possivelmente desatualizados. Verifique atualizacao recente."
         elif "guardrails" in derived_from and overall_score == "PASS":
-            message = "Rate limiting observed under burst"
+            message = "Muitas solicitacoes recentes. Reduza chamadas force_live."
         return {
             "state": "yellow",
             "decision": "degraded",
@@ -250,7 +250,7 @@ def _derive_trust_banner(
     return {
         "state": "green",
         "decision": "healthy",
-        "message": "All systems healthy",
+        "message": "Sistema saudavel e responsivo.",
         "derived_from": ["c1_health", "read_path", "guardrails"],
     }
 
@@ -302,7 +302,7 @@ def _derive_action_recommendation(
         recommendation = {
             "action": "run_warmup",
             "priority": "high",
-            "message": "Snapshots ausentes - execute warm-up do read-path.",
+            "message": "Snapshot ausente. Execute warm-up do read-path agora.",
             "derived_from": ["read_path"],
         }
     # 2) Jobs em fila: sistema ja reagiu; operador deve monitorar conclusao.
@@ -310,7 +310,7 @@ def _derive_action_recommendation(
         recommendation = {
             "action": "monitor",
             "priority": "medium",
-            "message": "Refresh em andamento - monitore a fila e a freshness.",
+            "message": "Atualizacao em andamento. Monitore a fila e aguarde concluir.",
             "derived_from": ["read_path"],
         }
     # 3) Eventos 503 recentes: indica churn de snapshot e exige acao no read-path.
@@ -318,7 +318,7 @@ def _derive_action_recommendation(
         recommendation = {
             "action": "run_warmup",
             "priority": "high",
-            "message": "Eventos de snapshot missing observados - execute warm-up do read-path.",
+            "message": "Snapshot missing recente. Execute warm-up do read-path.",
             "derived_from": ["guardrails"],
         }
     # 4) Eventos 429 recentes: reduzir burst de force_live e manter degradacao controlada.
@@ -326,7 +326,7 @@ def _derive_action_recommendation(
         recommendation = {
             "action": "reduce_force_live_burst",
             "priority": "medium",
-            "message": "Rate limiting recente - reduza burst de force_live.",
+            "message": "Muitas solicitacoes recentes. Aguarde ou reduza chamadas force_live.",
             "derived_from": ["guardrails"],
         }
     # 5) Trust red por falha operacional (tipicamente rps<1) sem sinais de snapshot/fila.
@@ -334,7 +334,7 @@ def _derive_action_recommendation(
         recommendation = {
             "action": "inspect_upstream_path",
             "priority": "high",
-            "message": "Saude operacional falhou - verifique upstream e infra path.",
+            "message": "Saude operacional falhou. Verifique upstream e caminho de infra.",
             "derived_from": ["trust", "c1_health"],
         }
     # 6) Fallback para casos degradados nao classificados (ex.: WARN por p99).
@@ -342,7 +342,7 @@ def _derive_action_recommendation(
         recommendation = {
             "action": "open_report",
             "priority": "medium",
-            "message": "Degradacao detectada - abra o observability report para diagnostico.",
+            "message": "Degradacao detectada. Abra o report para diagnostico.",
             "derived_from": ["trust", "c1_health"],
         }
     # 7) Estado saudavel: sem acao necessaria.
@@ -350,7 +350,7 @@ def _derive_action_recommendation(
         recommendation = {
             "action": "none",
             "priority": "low",
-            "message": "Nenhuma acao necessaria.",
+            "message": "Sistema saudavel. Nenhuma acao necessaria.",
             "derived_from": ["trust"],
         }
 
@@ -361,7 +361,7 @@ def _derive_action_recommendation(
     if str(recommendation.get("action")) not in _ALLOWED_RECOMMENDATION_ACTIONS:
         recommendation["action"] = "open_report"
         recommendation["priority"] = "medium"
-        recommendation["message"] = "Recomendacao invalida - abra o observability report para diagnostico."
+        recommendation["message"] = "Recomendacao invalida. Abra o report para diagnostico."
         recommendation["derived_from"] = ["trust"]
     # Mantem hook para futuras regras sem mudar o contrato atual.
     if overall_reasons and recommendation["action"] == "none":
