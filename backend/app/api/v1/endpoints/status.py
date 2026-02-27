@@ -1,11 +1,17 @@
 from datetime import datetime
 from time import perf_counter_ns
 import os
+import json
+import hmac
+import hashlib
+import asyncio
+import logging
 from copy import deepcopy
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +34,7 @@ from app.slo_contract import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _C1_HEALTH_STATUS_WINDOW_MINUTES = 15
 _PUBLIC_STATUS_VERSION = "v1"
@@ -39,6 +46,7 @@ _PUBLIC_ACTION_MAP = {
     "monitor": "monitor",
     "none": "none",
 }
+_public_webhook_last_state: str | None = None
 
 
 def _new_db_stats() -> dict[str, int]:
@@ -162,6 +170,91 @@ def _to_public_status_action(action: str | None) -> str:
     return _PUBLIC_ACTION_MAP.get(normalized, "inspect")
 
 
+def _reset_public_webhook_state_for_tests() -> None:
+    """
+    Reset explicito do estado de transicao para testes deterministas.
+    """
+    global _public_webhook_last_state
+    _public_webhook_last_state = None
+
+
+def _public_webhook_url() -> str:
+    return str(os.getenv("STATUS_WEBHOOK_URL") or "").strip()
+
+
+def _build_public_webhook_headers(payload: dict) -> dict[str, str]:
+    """
+    Monta headers do webhook com assinatura opcional por HMAC-SHA256.
+    """
+    headers = {"Content-Type": "application/json"}
+    secret = str(os.getenv("STATUS_WEBHOOK_SECRET") or "").strip()
+    if not secret:
+        return headers
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    signature = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    headers["X-Status-Signature"] = f"sha256={signature}"
+    return headers
+
+
+async def _send_public_status_webhook(url: str, payload: dict) -> None:
+    """
+    Envia webhook de status com timeout curto, sem retry no v1.
+    """
+    started_ns = perf_counter_ns()
+    headers = _build_public_webhook_headers(payload)
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.post(url, json=payload, headers=headers)
+        elapsed_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
+        logger.info(
+            "public_status_webhook_sent status=%s latency_ms=%s",
+            int(response.status_code),
+            int(elapsed_ms),
+        )
+    except Exception as exc:
+        elapsed_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
+        logger.warning(
+            "public_status_webhook_failed latency_ms=%s error=%s",
+            int(elapsed_ms),
+            str(exc),
+        )
+
+
+def _handle_webhook_task_done(task: asyncio.Task) -> None:
+    """
+    Consome excecao de task em background para evitar warnings silenciosos.
+    """
+    try:
+        task.result()
+    except Exception as exc:
+        logger.warning("public_status_webhook_task_exception error=%s", str(exc))
+
+
+def _maybe_trigger_public_status_webhook(payload: dict) -> None:
+    """
+    Dispara webhook apenas na transicao para action_required.
+    Nao bloqueia o request principal.
+    """
+    global _public_webhook_last_state
+    url = _public_webhook_url()
+    current_state = str(payload.get("state") or "").strip().lower()
+    previous_state = _public_webhook_last_state
+    _public_webhook_last_state = current_state
+
+    if not url:
+        return
+    if current_state != "action_required":
+        return
+    if previous_state == "action_required":
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(_send_public_status_webhook(url, payload))
+    task.add_done_callback(_handle_webhook_task_done)
+
+
 @router.get("/status/public")
 async def get_public_status(
     db: AsyncSession = Depends(get_db),
@@ -182,6 +275,7 @@ async def get_public_status(
             "as_of": panel.get("as_of") or (datetime.utcnow().replace(microsecond=0).isoformat() + "Z"),
             "version": _PUBLIC_STATUS_VERSION,
         }
+        _maybe_trigger_public_status_webhook(payload)
         status_code = 200
         return JSONResponse(
             status_code=200,
