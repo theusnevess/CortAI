@@ -153,3 +153,27 @@ async def test_internal_observability_ui_auto_refresh_controls_present(client, m
     assert 'id="ov-auto-refresh-indicator"' in html
     assert 'id="ov-panel-root"' in html
     assert "Auto-refresh OFF" in html
+
+
+@pytest.mark.anyio
+async def test_internal_observability_ui_demo_scenario_missing_renders_overlay_and_disables_refresh(client, monkeypatch):
+    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+
+    async def _should_not_be_called(**kwargs):
+        raise AssertionError("Real panel builder must not run in demo scenario")
+
+    monkeypatch.setattr(internal_ui, "_build_observability_overview_payload", _should_not_be_called)
+
+    response = await client.get("/internal/observability?demo_scenario=missing", headers=_internal_headers())
+    assert response.status_code == 200
+    assert "text/html" in response.headers.get("content-type", "").lower()
+    assert response.headers.get("cache-control") == "no-store"
+
+    html = response.text
+    assert "Modo de Demonstracao" in html
+    assert "Missing Snapshot" in html
+    assert "Snapshot ausente" in html
+    assert "run_warmup" in html
+    assert 'id="ov-auto-refresh"' in html
+    assert "disabled" in html
+    assert "Auto-refresh OFF" in html
