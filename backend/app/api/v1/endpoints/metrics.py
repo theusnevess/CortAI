@@ -371,6 +371,8 @@ def _if_none_match_matches(request: Request, etag: str) -> bool:
     """
     def _normalize_etag(value: str) -> str:
         token = value.strip()
+        # Some proxies forward quoted ETags with escaped quotes (e.g. W/\"abc\").
+        token = token.replace('\\"', '"')
         if token.startswith("W/") or token.startswith("w/"):
             token = token[2:].strip()
         if len(token) >= 2 and token[0] == '"' and token[-1] == '"':
