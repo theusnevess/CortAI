@@ -182,7 +182,7 @@ def _public_webhook_url() -> str:
     return str(os.getenv("STATUS_WEBHOOK_URL") or "").strip()
 
 
-def _build_public_webhook_headers(payload: dict) -> dict[str, str]:
+def _build_public_webhook_headers(raw_body: bytes) -> dict[str, str]:
     """
     Monta headers do webhook com assinatura opcional por HMAC-SHA256.
     """
@@ -190,8 +190,7 @@ def _build_public_webhook_headers(payload: dict) -> dict[str, str]:
     secret = str(os.getenv("STATUS_WEBHOOK_SECRET") or "").strip()
     if not secret:
         return headers
-    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    signature = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    signature = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
     headers["X-Status-Signature"] = f"sha256={signature}"
     return headers
 
@@ -201,10 +200,11 @@ async def _send_public_status_webhook(url: str, payload: dict) -> None:
     Envia webhook de status com timeout curto, sem retry no v1.
     """
     started_ns = perf_counter_ns()
-    headers = _build_public_webhook_headers(payload)
+    raw_body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    headers = _build_public_webhook_headers(raw_body)
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
-            response = await client.post(url, json=payload, headers=headers)
+            response = await client.post(url, content=raw_body, headers=headers)
         elapsed_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
         logger.info(
             "public_status_webhook_sent status=%s latency_ms=%s",
