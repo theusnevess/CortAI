@@ -101,7 +101,7 @@
     {% set rec_action = rec.get("action", "none") %}
     {% set rec_message = rec.get("message", "—") %}
     {% if rec_action == "reduce_force_live_burst" %}
-      {% set rec_message = "O sistema recebeu chamadas demais em pouco tempo (limite atingido). Aguarde alguns segundos ou reduza chamadas force_live." %}
+      {% set rec_message = "Chamadas demais em pouco tempo. Bloqueio temporario ativo. Aguarde alguns segundos e tente de novo." %}
     {% endif %}
     {% if trust_state == "red" %}
       {% set trust_hint = "Urgente: acao necessaria agora." %}
