@@ -479,3 +479,64 @@ async def test_status_c1_health_reasons_present(client, monkeypatch):
     assert "reasons" in c1
     assert "runs:p99>warn_limit" in c1["reasons"]
     assert "report:p99_missing" in c1["reasons"]
+
+
+@pytest.mark.anyio
+async def test_status_public_returns_minimal_sanitized_payload(client, monkeypatch):
+    async def _fake_builder(**kwargs):
+        return {
+            "as_of": "2026-02-27T10:00:00Z",
+            "trust": {
+                "state": "yellow",
+                "decision": "degraded",
+                "message": "internal detail",
+                "derived_from": ["guardrails"],
+            },
+            "recommendation": {
+                "action": "reduce_force_live_burst",
+                "priority": "medium",
+                "message": "internal detail",
+                "derived_from": ["guardrails"],
+            },
+            "c1_health": {"score": "WARN", "rows": [], "meta": {"cached": True}},
+            "read_path": {"overview_snapshot_status": "stale"},
+            "guardrails": {"events": {"rate_limited_429": 3}},
+        }
+
+    monkeypatch.setattr(status_endpoint, "_build_observability_overview_payload", _fake_builder)
+
+    response = await client.get("/api/v1/status/public")
+    assert response.status_code == 200
+    assert response.headers.get("cache-control") == "public, max-age=30"
+
+    payload = response.json()
+    assert set(payload.keys()) == {"state", "action", "as_of", "version"}
+    assert payload["state"] == "degraded"
+    assert payload["action"] == "monitor"
+    assert payload["as_of"] == "2026-02-27T10:00:00Z"
+    assert payload["version"] == "v1"
+
+    serialized = str(payload)
+    assert "derived_from" not in serialized
+    assert "reasons" not in serialized
+    assert "meta" not in serialized
+    assert "c1_health" not in serialized
+    assert "guardrails" not in serialized
+
+
+@pytest.mark.anyio
+async def test_status_public_action_mapping_defaults_to_inspect(client, monkeypatch):
+    async def _fake_builder(**kwargs):
+        return {
+            "as_of": "2026-02-27T10:00:00Z",
+            "trust": {"decision": "action_required"},
+            "recommendation": {"action": "unknown_action"},
+        }
+
+    monkeypatch.setattr(status_endpoint, "_build_observability_overview_payload", _fake_builder)
+
+    response = await client.get("/api/v1/status/public")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "action_required"
+    assert payload["action"] == "inspect"
