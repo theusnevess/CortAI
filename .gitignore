@@ -69,3 +69,17 @@ backend/celerybeat-schedule.db
 backend/celerybeat-schedule.dat
 backend/celerybeat-schedule.dir
 backend/celerybeat-schedule.bak
+
+# --- Audit / Recheck artifacts (operacionais, nao versionar) ---
+OUT/
+.tmp_*
+backend/.tmp_p2/
+.tmp_p2/
+.tmp_p2_*
+.tmp_p2_gateway/
+.tmp_p2_gha_*
+docker-compose.netem.yml
+
+# --- Perf / bench local ---
+*.wrk.log
+*.audit.txt

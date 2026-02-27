@@ -218,6 +218,19 @@ Politica operacional:
 - C1 Health Score (`PASS|WARN|FAIL`) e regras de leitura do summary: ver `docs/observability.md` na secao `C1 Health Score (PASS/WARN/FAIL)`.
 - Warm-up pos-deploy do read-path: ver `docs/observability.md` na secao `Warm-up opcional no deploy (read-path)`.
 
+## Fechamento pos-auditoria (RECHECK TOTAL)
+
+Status:
+- **RECHECK TOTAL: GO**
+
+Evidencias de correcao:
+- `e16c04e` - `fix(observability): corrige telemetria e agregacao de metricas (post-auditoria)`
+- `f167e4a` - `fix(ops): ajusta nginx/edge para consistencia operacional (post-auditoria)`
+
+WARNs remanescentes (governados):
+- bandit com achados Low/Medium (sem High)
+- excecao ecdsa (`GHSA-wj6h-64fc-37mp`) formalizada em `SECURITY_ACCEPTED_RISKS.md`
+
 ## Regra de validade do benchmark externo (stop-the-line)
 
 Uma rodada externa e invalida para promocao de envelope quando qualquer endpoint apresentar:
