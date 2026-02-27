@@ -1537,3 +1537,68 @@ curl -i -H "X-Internal-Status: 1" http://localhost:8000/internal/observability
 # suite focada
 pytest -q tests/test_internal_observability_ui.py
 ```
+
+### Webhook action_required (v1)
+
+Objetivo:
+- permitir integracao externa reativa quando o estado publico transiciona para:
+  - `state == "action_required"`
+- sem alterar o contrato publico de `GET /api/v1/status/public`.
+
+Escopo (v1):
+- disparo apenas em transicao para `action_required`;
+- fire-and-forget (nao bloqueia request publico);
+- timeout fixo de `2s`;
+- sem retry automatico;
+- sem fila ou worker dedicado;
+- ativacao opcional por ENV.
+
+Ativacao (ENV):
+- `STATUS_WEBHOOK_URL=<https://seu-endpoint>`
+- `STATUS_WEBHOOK_SECRET=<opcional>`
+
+Regras:
+- sem `STATUS_WEBHOOK_URL`: webhook desativado (no-op);
+- com `STATUS_WEBHOOK_SECRET`: envia assinatura HMAC SHA256 no header.
+
+Payload enviado (POST JSON):
+```json
+{
+  "state": "action_required",
+  "action": "inspect",
+  "as_of": "2025-01-01T12:00:00Z",
+  "version": "v1"
+}
+```
+
+Assinatura opcional:
+- header: `X-Status-Signature: sha256=<hex_digest>`
+- calculo: `HMAC_SHA256(secret, raw_body)`
+
+Responsabilidades do consumidor:
+- validar assinatura;
+- validar idempotencia;
+- aplicar rate limiting proprio.
+
+Regra de disparo (anti-spam):
+- somente em transicao real:
+  - `previous_state != "action_required"`
+  - `current_state == "action_required"`
+
+Nao-objetivos (v1):
+- retry automatico;
+- backoff exponencial;
+- persistencia de eventos;
+- garantia de entrega;
+- multi-webhook;
+- webhook para outros estados.
+
+Garantias:
+- nao altera latencia de `/api/v1/status/public`;
+- nao altera contrato publico;
+- nao introduz query nova;
+- nao introduz infra nova.
+
+Observabilidade:
+- falhas de envio nao impactam o endpoint publico;
+- envio registra sucesso/falha e latencia no log da aplicacao.
