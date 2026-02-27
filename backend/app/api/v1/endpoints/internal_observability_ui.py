@@ -15,6 +15,153 @@ router = APIRouter(prefix="/internal", tags=["internal"])
 
 _TEMPLATES_DIR = Path(__file__).resolve().parents[3] / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+_ALLOWED_DEMO_SCENARIOS = {"missing", "429", "stale", "green"}
+
+
+def _build_demo_panel_payload(scenario: str) -> dict:
+    """
+    Constroi payload visual de demonstracao sem consultas de DB.
+    Afeta apenas a UI interna HTML.
+    """
+    labels = {
+        "missing": "Missing Snapshot",
+        "429": "Rate Limited (429)",
+        "stale": "Stale Snapshot",
+        "green": "Healthy",
+    }
+    base = {
+        "as_of": "demo",
+        "panel_version": "v1",
+        "overall": {"score": "WARN", "decision": "degraded", "reasons": ["demo"]},
+        "trust": {
+            "state": "yellow",
+            "decision": "degraded",
+            "message": "Modo demonstracao ativo.",
+            "derived_from": ["demo"],
+        },
+        "recommendation": {
+            "action": "monitor",
+            "priority": "medium",
+            "message": "Cenario de demonstracao (demo).",
+            "derived_from": ["demo"],
+        },
+        "c1_health": {
+            "score": "WARN",
+            "version": "v1.1",
+            "meta": {"cached": True, "cache_age_seconds": 0, "compute_ms": 0},
+            "rows": [
+                {
+                    "path": "demo",
+                    "endpoint": "overview",
+                    "decision": "WARN",
+                    "p99_ms": 20,
+                    "rps": 1.2,
+                    "reasons": ["demo"],
+                },
+                {
+                    "path": "demo",
+                    "endpoint": "runs",
+                    "decision": "WARN",
+                    "p99_ms": 24,
+                    "rps": 1.1,
+                    "reasons": ["demo"],
+                },
+                {
+                    "path": "demo",
+                    "endpoint": "report",
+                    "decision": "WARN",
+                    "p99_ms": 0,
+                    "rps": 1.0,
+                    "reasons": ["demo"],
+                },
+            ],
+            "reasons": ["demo"],
+        },
+        "read_path": {
+            "overview_snapshot_status": "fresh",
+            "overview_freshness_seconds": 12,
+            "runs_snapshot_status": "fresh",
+            "runs_freshness_seconds": 13,
+            "runs_key_count": 1,
+            "jobs_queued_count": 0,
+        },
+        "guardrails": {
+            "window_minutes": 15,
+            "events": {"accepted_202": 0, "rate_limited_429": 0, "snapshot_missing_503": 0},
+            "last_events": [],
+        },
+    }
+    if scenario == "missing":
+        base["overall"] = {"score": "FAIL", "decision": "action_required", "reasons": ["snapshot_missing(demo)"]}
+        base["trust"] = {
+            "state": "red",
+            "decision": "action_required",
+            "message": "Snapshot ausente. Execute warm-up para restaurar dados. (demo)",
+            "derived_from": ["read_path"],
+        }
+        base["recommendation"] = {
+            "action": "run_warmup",
+            "priority": "high",
+            "message": "Snapshot ausente no cenario demo. Execute warm-up.",
+            "derived_from": ["read_path"],
+        }
+        base["read_path"]["overview_snapshot_status"] = "missing"
+        base["read_path"]["runs_snapshot_status"] = "missing"
+        base["guardrails"]["events"]["snapshot_missing_503"] = 1
+    elif scenario == "429":
+        base["overall"] = {"score": "WARN", "decision": "degraded", "reasons": ["rate_limited_429(demo)"]}
+        base["trust"] = {
+            "state": "yellow",
+            "decision": "degraded",
+            "message": "Muitas solicitacoes recentes. Reduza chamadas force_live. (demo)",
+            "derived_from": ["guardrails"],
+        }
+        base["recommendation"] = {
+            "action": "reduce_force_live_burst",
+            "priority": "medium",
+            "message": "Rate limited no cenario demo. Reduza burst de force_live.",
+            "derived_from": ["guardrails"],
+        }
+        base["guardrails"]["events"]["rate_limited_429"] = 3
+    elif scenario == "stale":
+        base["overall"] = {"score": "WARN", "decision": "degraded", "reasons": ["snapshot_stale(demo)"]}
+        base["trust"] = {
+            "state": "yellow",
+            "decision": "degraded",
+            "message": "Dados possivelmente desatualizados. Verifique atualizacao recente. (demo)",
+            "derived_from": ["read_path"],
+        }
+        base["recommendation"] = {
+            "action": "open_report",
+            "priority": "medium",
+            "message": "Snapshot stale no cenario demo. Abra report para diagnostico.",
+            "derived_from": ["read_path"],
+        }
+        base["read_path"]["overview_snapshot_status"] = "stale"
+        base["read_path"]["runs_snapshot_status"] = "stale"
+        base["read_path"]["overview_freshness_seconds"] = 220
+        base["read_path"]["runs_freshness_seconds"] = 215
+    elif scenario == "green":
+        base["overall"] = {"score": "PASS", "decision": "healthy", "reasons": ["healthy(demo)"]}
+        base["trust"] = {
+            "state": "green",
+            "decision": "healthy",
+            "message": "Sistema saudavel e responsivo. (demo)",
+            "derived_from": ["c1_health", "read_path", "guardrails"],
+        }
+        base["recommendation"] = {
+            "action": "none",
+            "priority": "low",
+            "message": "Sistema saudavel. Nenhuma acao necessaria. (demo)",
+            "derived_from": ["trust"],
+        }
+        base["c1_health"]["score"] = "PASS"
+        for row in base["c1_health"]["rows"]:
+            row["decision"] = "PASS"
+            row["reasons"] = ["demo"]
+
+    base["demo"] = {"enabled": True, "scenario": scenario, "label": labels.get(scenario, scenario)}
+    return base
 
 
 @router.get("/observability", response_class=HTMLResponse)
@@ -38,12 +185,26 @@ async def get_internal_observability_ui(
             status_code = 404
             raise HTTPException(status_code=404, detail="Not Found")
 
-        panel = await _build_observability_overview_payload(db=db, db_stats=db_stats)
+        demo_scenario = request.query_params.get("demo_scenario")
+        if demo_scenario not in _ALLOWED_DEMO_SCENARIOS:
+            demo_scenario = None
+
+        panel = (
+            _build_demo_panel_payload(demo_scenario)
+            if demo_scenario
+            else await _build_observability_overview_payload(db=db, db_stats=db_stats)
+        )
+        demo = {
+            "enabled": bool(demo_scenario),
+            "scenario": demo_scenario,
+            "label": panel.get("demo", {}).get("label") if isinstance(panel.get("demo"), dict) else None,
+        }
+
         status_code = 200
         response = templates.TemplateResponse(
             request,
             "internal_observability.html",
-            {"panel": panel},
+            {"panel": panel, "demo": demo},
         )
         response.headers["Cache-Control"] = "no-store"
         return response

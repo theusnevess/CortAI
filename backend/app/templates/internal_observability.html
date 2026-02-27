@@ -73,11 +73,18 @@
     }
   </style>
 </head>
-<body>
+<body data-demo-enabled="{% if demo and demo.get('enabled') %}1{% else %}0{% endif %}">
   <div class="wrap">
+    {% set demo_enabled = demo and demo.get("enabled") %}
+    {% if demo_enabled %}
+    <div class="banner b-yellow" style="margin-bottom:10px;">
+      <strong>Modo de Demonstracao</strong>
+      <span class="mut"> - cenario: {{ demo.get("label") or demo.get("scenario") }}</span>
+    </div>
+    {% endif %}
     <div class="ov-toolbar">
       <label class="ov-toggle" for="ov-auto-refresh">
-        <input id="ov-auto-refresh" type="checkbox" />
+        <input id="ov-auto-refresh" type="checkbox" {% if demo_enabled %}disabled{% endif %} />
         <span>Auto-refresh</span>
       </label>
       <span id="ov-auto-refresh-indicator" class="ov-pill is-off">Auto-refresh OFF</span>
@@ -271,6 +278,7 @@
     let panelRoot = document.getElementById(PANEL_ROOT_ID);
 
     if (!toggle || !panelRoot) return;
+    const isDemo = document.body.getAttribute("data-demo-enabled") === "1";
 
     function setIndicator(isOn) {
       if (!indicator) return;
@@ -328,6 +336,10 @@
 
     toggle.checked = false;
     setIndicator(false);
+    if (isDemo) {
+      toggle.disabled = true;
+      return;
+    }
 
     toggle.addEventListener("change", () => {
       const on = Boolean(toggle.checked);
