@@ -259,6 +259,27 @@ Status final:
 Proxima evolucao:
 - deliberada e separada desta fase (infra dedicada para reavaliar `C2`, ou metricas runtime embutidas).
 
+## Validacao humana completa do sinal operacional (v2.1.0)
+
+Escopo:
+- 5 participantes x 4 cenarios (`missing`, `stale`, `429`, `green`).
+- UI interna em modo demo deterministico (`/internal/observability?demo_scenario=...`).
+- Objetivo: validar compreensao de estado + acao sob pressao cognitiva leve.
+
+KPIs finais:
+- `taxa_acerto_30s = 0.95` (meta >= `0.85`) -> `PASS`
+- `confianca_media = 4.10` (meta >= `4.0`) -> `PASS`
+- `clareza_media = 8.15` (meta >= `8.0`) -> `PASS`
+- confusao sistemica em `429`/`stale`: `nao observada`
+
+Decisao:
+- `APROVADO` para validacao humana do core cognitivo.
+- Tag de checkpoint: `v2.1.0-human-validated-core`.
+
+Observacao:
+- ajuste final de microcopy para `429` (curto e humano) aplicado antes da rodada final:
+  - "Chamadas demais em pouco tempo. Bloqueio temporario ativo. Aguarde alguns segundos e tente de novo."
+
 ## Recheck Final - GO
 
 Referencia de fix do bloqueante:
