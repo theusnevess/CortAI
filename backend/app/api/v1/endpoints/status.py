@@ -5,10 +5,12 @@ from copy import deepcopy
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.metrics import _emit_metrics_endpoint_timing
+from app.api.v1.endpoints.observability import _build_observability_overview_payload
 from app.db.session import engine
 from app.db.session import get_db
 from app.observability.runtime_health import (
@@ -28,6 +30,15 @@ from app.slo_contract import (
 router = APIRouter()
 
 _C1_HEALTH_STATUS_WINDOW_MINUTES = 15
+_PUBLIC_STATUS_VERSION = "v1"
+_PUBLIC_ACTION_MAP = {
+    "run_warmup": "inspect",
+    "reduce_force_live_burst": "monitor",
+    "inspect_upstream_path": "inspect",
+    "open_report": "monitor",
+    "monitor": "monitor",
+    "none": "none",
+}
 
 
 def _new_db_stats() -> dict[str, int]:
@@ -144,6 +155,51 @@ def _read_read_api_config() -> dict:
         "up": enabled,
         "base_url": base_url,
     }
+
+
+def _to_public_status_action(action: str | None) -> str:
+    normalized = str(action or "").strip().lower()
+    return _PUBLIC_ACTION_MAP.get(normalized, "inspect")
+
+
+@router.get("/status/public")
+async def get_public_status(
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Endpoint publico read-only com payload sanitizado de estado operacional.
+    Reusa o builder do painel sem expor campos internos.
+    """
+    started_at = datetime.utcnow()
+    status_code = 500
+    query_fingerprint = "public_status=v1"
+    db_stats = _new_db_stats()
+    try:
+        panel = await _build_observability_overview_payload(db=db, db_stats=db_stats)
+        payload = {
+            "state": str((panel.get("trust") or {}).get("decision") or "degraded"),
+            "action": _to_public_status_action((panel.get("recommendation") or {}).get("action")),
+            "as_of": panel.get("as_of") or (datetime.utcnow().replace(microsecond=0).isoformat() + "Z"),
+            "version": _PUBLIC_STATUS_VERSION,
+        }
+        status_code = 200
+        return JSONResponse(
+            status_code=200,
+            content=payload,
+            headers={"Cache-Control": "public, max-age=30"},
+        )
+    finally:
+        duration_ms = int(max(0.0, (datetime.utcnow() - started_at).total_seconds() * 1000.0))
+        _emit_metrics_endpoint_timing(
+            endpoint="/api/v1/status/public",
+            method="GET",
+            status_code=status_code,
+            duration_ms=duration_ms,
+            query_fingerprint=query_fingerprint,
+            db_us=db_stats["db_us"],
+            db_queries=db_stats["db_queries"],
+            db_pool_wait_us=db_stats["db_pool_wait_us"],
+        )
 
 
 @router.get("/status")
