@@ -280,6 +280,59 @@ Observacao:
 - ajuste final de microcopy para `429` (curto e humano) aplicado antes da rodada final:
   - "Chamadas demais em pouco tempo. Bloqueio temporario ativo. Aguarde alguns segundos e tente de novo."
 
+## Rollout Public Status Endpoint - Day 0 (v2.1.x)
+
+Contexto:
+- Exposicao publica controlada do endpoint read-only:
+  - `GET /api/v1/status/public`
+- Contrato minimo congelado por 1 ciclo:
+  - `{ "state": "...", "action": "...", "as_of": "...", "version": "v1" }`
+- Sem novos campos, sem parametros e sem exposicao de metricas internas.
+
+Evidencia tecnica - Day 0:
+1. Validacao direta (read_api, sem edge)
+   - endpoint: `http://127.0.0.1:8000/api/v1/status/public`
+   - resultado:
+     - `HTTP 200`
+     - `Cache-Control: public, max-age=30`
+     - payload minimo conforme contrato
+
+2. Validacao via edge (nginx)
+   - endpoint: `http://localhost:8001/api/v1/status/public`
+   - resultado:
+     - `HTTP 200`
+     - `Cache-Control` preservado
+     - payload minimo correto
+
+3. Rate limit validado (edge)
+   - configuracao:
+     - `limit_req_zone`: `30 req/min` por IP
+     - `burst=10`
+     - `limit_req_status 429`
+   - burst test (`40` requests):
+     - `200: 15`
+     - `429: 25`
+     - `404: 0`
+     - `5xx: 0`
+   - confirmacao:
+     - rate limit ativo
+     - upstream funcional
+     - path isolado corretamente
+
+Commit de infraestrutura:
+- `21b5be9`
+- `feat(ops): aplica rate limit e logging dedicado para /api/v1/status/public no nginx`
+
+Decisao operacional:
+- status: `GO` para rollout publico controlado
+- condicoes:
+  - monitorar `2xx/4xx/5xx` e latencia `p95` por 7 dias
+  - manter contrato congelado no periodo
+  - sem expansao de escopo
+
+Observacao:
+- esta etapa marca a primeira exposicao publica de sinal operacional derivado do sistema interno validado (`v2.1.0-human-validated-core`), mantendo governanca de seguranca, sanitizacao e limitacao de trafego.
+
 ## Recheck Final - GO
 
 Referencia de fix do bloqueante:
