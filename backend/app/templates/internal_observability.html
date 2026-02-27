@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="pt-br">
 <head>
   <meta charset="utf-8"/>
@@ -98,6 +98,18 @@
     {% set read_path = panel.get("read_path", {}) %}
     {% set guardrails = panel.get("guardrails", {}) %}
     {% set trust_state = trust.get("state", "yellow") %}
+    {% set rec_action = rec.get("action", "none") %}
+    {% set rec_message = rec.get("message", "—") %}
+    {% if rec_action == "reduce_force_live_burst" %}
+      {% set rec_message = "O sistema recebeu chamadas demais em pouco tempo (limite atingido). Aguarde alguns segundos ou reduza chamadas force_live." %}
+    {% endif %}
+    {% if trust_state == "red" %}
+      {% set trust_hint = "Urgente: acao necessaria agora." %}
+    {% elif trust_state == "yellow" %}
+      {% set trust_hint = "Atencao: sistema degradado, acompanhe e verifique." %}
+    {% else %}
+      {% set trust_hint = "Estavel: nenhuma acao necessaria no momento." %}
+    {% endif %}
 
     <div class="banner {% if trust_state == 'green' %}b-green{% elif trust_state == 'red' %}b-red{% else %}b-yellow{% endif %}">
       <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;">
@@ -111,21 +123,24 @@
           <div class="h1" style="margin-top:10px;">
             {{ trust.get("message","(no message)") }}
           </div>
+          <div class="mut" style="margin-top:4px;">
+            {{ trust_hint }}
+          </div>
           <div class="mut">
-            derived_from: {{ (trust.get("derived_from", [])|join(", ")) if trust.get("derived_from") else "—" }}
+            derived_from: {{ (trust.get("derived_from", [])|join(", ")) if trust.get("derived_from") else "â€”" }}
           </div>
         </div>
         <div class="card" style="min-width: 320px;">
-          <div class="mut">Recommendation</div>
+          <div class="mut">Recommendation (Proxima acao)</div>
           <div style="margin-top:6px;">
             <strong>{{ rec.get("action","none") }}</strong>
             <span class="mut">({{ rec.get("priority","low") }})</span>
           </div>
           <div class="small" style="margin-top:8px;">
-            {{ rec.get("message","—") }}
+            {{ rec_message }}
           </div>
           <div class="mut" style="margin-top:8px;">
-            derived_from: {{ (rec.get("derived_from", [])|join(", ")) if rec.get("derived_from") else "—" }}
+            derived_from: {{ (rec.get("derived_from", [])|join(", ")) if rec.get("derived_from") else "â€”" }}
           </div>
         </div>
       </div>
@@ -137,7 +152,7 @@
         <div class="kv">
           <div>
             <div class="mut">as_of</div>
-            <div><code>{{ panel.get("as_of","—") }}</code></div>
+            <div><code>{{ panel.get("as_of","â€”") }}</code></div>
           </div>
           <div>
             <div class="mut">panel_version</div>
@@ -153,7 +168,7 @@
           </div>
         </div>
         <div class="mut" style="margin-top:10px;">
-          overall.reasons: {{ (overall.get("reasons", [])|join(", ")) if overall.get("reasons") else "—" }}
+          overall.reasons: {{ (overall.get("reasons", [])|join(", ")) if overall.get("reasons") else "â€”" }}
         </div>
       </div>
 
@@ -164,23 +179,23 @@
             <div class="mut">overview</div>
             <div>
               <strong>{{ read_path.get("overview_snapshot_status","?") }}</strong>
-              <span class="mut">({{ read_path.get("overview_freshness_seconds","—") }}s)</span>
+              <span class="mut">({{ read_path.get("overview_freshness_seconds","â€”") }}s)</span>
             </div>
           </div>
           <div>
             <div class="mut">runs</div>
             <div>
               <strong>{{ read_path.get("runs_snapshot_status","?") }}</strong>
-              <span class="mut">({{ read_path.get("runs_freshness_seconds","—") }}s)</span>
+              <span class="mut">({{ read_path.get("runs_freshness_seconds","â€”") }}s)</span>
             </div>
           </div>
           <div>
             <div class="mut">runs_key_count</div>
-            <div><strong>{{ read_path.get("runs_key_count","—") }}</strong></div>
+            <div><strong>{{ read_path.get("runs_key_count","â€”") }}</strong></div>
           </div>
           <div>
             <div class="mut">jobs_queued_count</div>
-            <div><strong>{{ read_path.get("jobs_queued_count","—") }}</strong></div>
+            <div><strong>{{ read_path.get("jobs_queued_count","â€”") }}</strong></div>
           </div>
         </div>
       </div>
@@ -190,11 +205,11 @@
       <div class="h1">C1 Health</div>
       <div class="mut">
         score: <strong>{{ c1.get("score","?") }}</strong>
-        · version: <code>{{ c1.get("version","—") }}</code>
+        Â· version: <code>{{ c1.get("version","â€”") }}</code>
         {% if c1.get("meta") %}
-          · cached: <code>{{ c1.get("meta",{}).get("cached","—") }}</code>
-          · age: <code>{{ c1.get("meta",{}).get("cache_age_seconds","—") }}s</code>
-          · compute: <code>{{ c1.get("meta",{}).get("compute_ms","—") }}ms</code>
+          Â· cached: <code>{{ c1.get("meta",{}).get("cached","â€”") }}</code>
+          Â· age: <code>{{ c1.get("meta",{}).get("cache_age_seconds","â€”") }}s</code>
+          Â· compute: <code>{{ c1.get("meta",{}).get("compute_ms","â€”") }}ms</code>
         {% endif %}
       </div>
 
@@ -212,13 +227,13 @@
         <tbody>
         {% for row in c1.get("rows", []) %}
           <tr>
-            <td>{{ row.get("path","—") }}</td>
-            <td>{{ row.get("endpoint","—") }}</td>
-            {% set d = row.get("decision","—") %}
+            <td>{{ row.get("path","â€”") }}</td>
+            <td>{{ row.get("endpoint","â€”") }}</td>
+            {% set d = row.get("decision","â€”") %}
             <td class="d-{{ d }}">{{ d }}</td>
-            <td>{{ row.get("p99_ms","—") }}</td>
-            <td>{{ row.get("rps","—") }}</td>
-            <td class="mut">{{ (row.get("reasons", [])|join(", ")) if row.get("reasons") else "—" }}</td>
+            <td>{{ row.get("p99_ms","â€”") }}</td>
+            <td>{{ row.get("rps","â€”") }}</td>
+            <td class="mut">{{ (row.get("reasons", [])|join(", ")) if row.get("reasons") else "â€”" }}</td>
           </tr>
         {% endfor %}
         </tbody>
@@ -246,19 +261,22 @@
       <ul class="small">
         {% for ev in guardrails.get("last_events", []) %}
           <li>
-            <code>{{ ev.get("ts","—") }}</code>
-            · <strong>{{ ev.get("endpoint","—") }}</strong>
-            → <strong>{{ ev.get("status_code","—") }}</strong>
-            {% if ev.get("scope") %} · scope=<code>{{ ev.get("scope") }}</code>{% endif %}
-            {% if ev.get("snapshot_status") %} · snapshot_status=<code>{{ ev.get("snapshot_status") }}</code>{% endif %}
+            <code>{{ ev.get("ts","â€”") }}</code>
+            Â· <strong>{{ ev.get("endpoint","â€”") }}</strong>
+            â†’ <strong>{{ ev.get("status_code","â€”") }}</strong>
+            {% if ev.get("scope") %} Â· scope=<code>{{ ev.get("scope") }}</code>{% endif %}
+            {% if ev.get("snapshot_status") %} Â· snapshot_status=<code>{{ ev.get("snapshot_status") }}</code>{% endif %}
           </li>
         {% else %}
-          <li class="mut">—</li>
+          <li class="mut">â€”</li>
         {% endfor %}
       </ul>
     </div>
 
     <div class="mut" style="margin-top:12px;">
+      Dica rapida: 429 = limite temporario (nao e queda). Stale = dados podem estar atrasados, com sistema ativo.
+    </div>
+    <div class="mut" style="margin-top:6px;">
       Internal UI (MVP). Gate required. No history. No external auth.
     </div>
     </div>
@@ -359,3 +377,6 @@
   </script>
 </body>
 </html>
+
+
+
