@@ -41,6 +41,67 @@ Reasons canonicamente suportados:
 - `failed_ratio`
 - `ces_regression:CES_v1`
 
+### collector_run
+Fonte: adaptador do coletor (`CollectorAdapter`) com persistencia best-effort em `observations`.
+
+Objetivo:
+- registrar sucesso ou falha classificada do coletor sem abrir query nova no request path;
+- reduzir debug manual de problemas como URL invalida, `HTTP 4xx/5xx`, `timeout`, `DNS` e `TLS/CA`.
+
+Fatos obrigatorios:
+- `event_type` (`collector_run`)
+- `status` (`success` | `failed`)
+- `duration_ms`
+- `source_ref` (sanitizado)
+- `job_id` (quando existir)
+- `source_type` (`audio` | `video` | `null`)
+- `error_type` (`invalid_input` | `http_4xx` | `http_5xx` | `ssl_cert_verify_failed` | `dns_failed` | `timeout` | `upstream_blocked` | `unknown` | `null`)
+- `retryable`
+
+Fatos opcionais:
+- `http_status`
+- `minio_bucket`
+- `minio_key_prefix`
+
+Regras de sanitizacao:
+- remover query params sensiveis de `source_ref` (`token`, `sig`, `signature`, `key`, `auth`, `access_token`);
+- nunca persistir a chave completa do MinIO;
+- `minio_key_prefix` deve ser apenas o prefixo truncado da key (maximo 32 chars).
+
+Exemplo de sucesso:
+```json
+{
+  "event_type": "collector_run",
+  "status": "success",
+  "source_type": "audio",
+  "duration_ms": 842,
+  "error_type": null,
+  "http_status": null,
+  "retryable": false,
+  "job_id": "job-123",
+  "source_ref": "http://localhost:8001/smoke-assets/audio_1s.wav",
+  "minio_bucket": "videos-raw",
+  "minio_key_prefix": "smoke/audio_1s.wav"
+}
+```
+
+Exemplo de falha:
+```json
+{
+  "event_type": "collector_run",
+  "status": "failed",
+  "source_type": null,
+  "duration_ms": 119,
+  "error_type": "http_4xx",
+  "http_status": 404,
+  "retryable": false,
+  "job_id": "job-404",
+  "source_ref": "https://example.com/video.mp4",
+  "minio_bucket": null,
+  "minio_key_prefix": null
+}
+```
+
 ## Saida do pipeline
 
 `write_artifact` gera um manifest deterministico em `storage/agent_output/<decision_id>.json` com:
