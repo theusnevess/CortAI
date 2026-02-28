@@ -5,7 +5,7 @@ import logging
 import uuid
 from datetime import datetime
 from time import perf_counter
-from typing import Any
+from typing import Any, cast
 
 from app.agents.adapters.audio_extractor_adapter import AudioExtractorAdapter
 from app.agents.adapters.collector_adapter import CollectorAdapter
@@ -127,6 +127,7 @@ class MaestroOrchestrator:
                 agent=self.segmenter,
                 payload={"audio_local_path": audio_local_path},
             )
+            segments = self._require_valid_segments(state)
             await self._run_step(
                 job=job,
                 state=state,
@@ -134,7 +135,7 @@ class MaestroOrchestrator:
                 agent=self.transcriber,
                 payload={
                     "audio_local_path": audio_local_path,
-                    "segments": state.get("segments"),
+                    "segments": segments,
                 },
             )
 
@@ -198,3 +199,29 @@ class MaestroOrchestrator:
                 "duration_ms": job.step_durations_ms[step],
             },
         )
+
+    def _require_valid_segments(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        """Valida o contrato minimo do segmenter antes de chamar o transcriber."""
+
+        segments_any = state.get("segments")
+        if not isinstance(segments_any, list) or len(segments_any) == 0:
+            raise ValueError("ContractViolation: segmenter must provide non-empty segments")
+
+        segments = cast(list[Any], segments_any)
+        for idx, seg in enumerate(segments):
+            if not isinstance(seg, dict):
+                raise ValueError(
+                    f"ContractViolation: segmenter must provide segment dicts (idx={idx})"
+                )
+            start_ms = seg.get("start_ms")
+            end_ms = seg.get("end_ms")
+            if not isinstance(start_ms, int) or start_ms < 0:
+                raise ValueError(
+                    f"ContractViolation: segment.start_ms must be int>=0 (idx={idx})"
+                )
+            if not isinstance(end_ms, int) or end_ms <= start_ms:
+                raise ValueError(
+                    f"ContractViolation: segment.end_ms must be int>start_ms (idx={idx})"
+                )
+
+        return cast(list[dict[str, Any]], segments_any)

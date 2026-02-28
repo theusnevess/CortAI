@@ -57,7 +57,14 @@ class _SegmenterOk:
     def process(self, state, payload=None):
         next_state = dict(state)
         next_state["segments"] = [
-            {"segment_id": 0, "start_time": 0.0, "end_time": 1.0, "energy_score": 0.9}
+            {
+                "segment_id": 0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "start_ms": 0,
+                "end_ms": 1000,
+                "energy_score": 0.9,
+            }
         ]
         next_state.setdefault("artifacts", {})
         next_state["artifacts"]["segments_ready"] = True
@@ -190,3 +197,52 @@ async def test_maestro_orchestrator_marks_failed_when_transcriber_breaks():
     assert "segments" in result.state
     assert "transcriptions" not in result.state
     assert set(result.job.step_durations_ms) == {"collector", "segmenter"}
+
+
+@pytest.mark.anyio
+async def test_maestro_contract_hardening_fails_when_segments_missing():
+    class _SegmenterNoSegments:
+        def process(self, state, payload=None):
+            next_state = dict(state)
+            next_state.setdefault("artifacts", {})
+            next_state["artifacts"]["segments_ready"] = False
+            return next_state
+
+    orchestrator = MaestroOrchestrator(
+        collector=_CollectorVideoOk(),
+        audio_extractor=_AudioExtractorOk(),
+        segmenter=_SegmenterNoSegments(),
+        transcriber=_TranscriberOk(),
+    )
+
+    result = await orchestrator.run({"input_ref": "https://example.com/video"})
+
+    assert result.job.status == "failed"
+    assert result.job.step == "segmenter"
+    assert "ContractViolation: segmenter must provide non-empty segments" in (
+        result.job.error or ""
+    )
+
+
+@pytest.mark.anyio
+async def test_maestro_contract_hardening_fails_when_segments_invalid():
+    class _SegmenterBadSegments:
+        def process(self, state, payload=None):
+            next_state = dict(state)
+            next_state.setdefault("artifacts", {})
+            next_state["segments"] = [{"start_ms": 1000, "end_ms": 1000}]
+            next_state["artifacts"]["segments_ready"] = True
+            return next_state
+
+    orchestrator = MaestroOrchestrator(
+        collector=_CollectorVideoOk(),
+        audio_extractor=_AudioExtractorOk(),
+        segmenter=_SegmenterBadSegments(),
+        transcriber=_TranscriberOk(),
+    )
+
+    result = await orchestrator.run({"input_ref": "https://example.com/video"})
+
+    assert result.job.status == "failed"
+    assert result.job.step == "segmenter"
+    assert "ContractViolation: segment.end_ms must be int>start_ms" in (result.job.error or "")

@@ -51,7 +51,14 @@ class _DemoSegmenter:
     def process(self, state: dict, payload: dict | None = None) -> dict:
         next_state = dict(state)
         next_state["segments"] = [
-            {"segment_id": 0, "start_time": 0.0, "end_time": 1.0, "energy_score": 0.9}
+            {
+                "segment_id": 0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "start_ms": 0,
+                "end_ms": 1000,
+                "energy_score": 0.9,
+            }
         ]
         next_state.setdefault("artifacts", {})
         next_state["artifacts"]["segments_ready"] = True
