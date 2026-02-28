@@ -144,6 +144,45 @@ Interpretacao:
 - migration e validada dentro do container `cortai_api`, que e o ambiente correto para o runtime do Maestro;
 - `GO` exige gates, migration, testes focais, smoke demo, smoke real failed-controlado, persistencia, no-leak e logs.
 
+## CI Strategy
+
+### maestro_focal (GitHub Actions)
+
+Objetivo:
+- regressao rapida do nucleo Maestro (v0.3)
+
+Escopo:
+- `compileall` (stop-the-line)
+- pytest focal:
+  - `tests/test_maestro_orchestrator.py`
+  - `tests/test_internal_maestro_api.py`
+  - `tests/test_audio_extractor_adapter.py`
+- sem Docker
+- sem Compose
+- sem DB
+
+Tempo esperado:
+- menor que 1 minuto
+
+### recheck_maestro.ps1 (Local / Operacional)
+
+Objetivo:
+- auditoria completa do runtime Maestro
+
+Inclui:
+- gates HTTP
+- migration no container correto
+- smoke demo
+- smoke real failed-controlado
+- contrato v0.3
+- invariantes
+- no-leak
+- logs
+- evidencia em `OUT/`
+
+Critério:
+- `GO` / `NO-GO` explicito
+
 ## Saida do pipeline
 
 `write_artifact` gera um manifest deterministico em `storage/agent_output/<decision_id>.json` com:
