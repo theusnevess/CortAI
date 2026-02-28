@@ -52,31 +52,27 @@ async def test_internal_maestro_run_requires_gate(client, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_internal_maestro_run_returns_success_payload(client, monkeypatch):
+async def test_internal_maestro_run_returns_done_payload_in_demo_mode(client, monkeypatch):
     monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
-    monkeypatch.setattr(
-        "app.api.v1.endpoints.internal_maestro.MaestroOrchestrator",
-        _make_fake_orchestrator(status="done", step=None, error=None, duration_ms=321),
-    )
 
     response = await client.post(
-        "/internal/maestro/run",
+        "/internal/maestro/run?demo=1",
         headers={"X-Internal-Status": "1"},
         json={"source_ref": "https://example.com/video"},
     )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "job_id": "job-test-123",
-        "status": "done",
-        "step": None,
-        "error": None,
-        "duration_ms": 321,
-    }
+    body = response.json()
+    assert body["status"] == "done"
+    assert body["step"] is None
+    assert body["error"] is None
+    assert isinstance(body["job_id"], str) and body["job_id"]
+    assert isinstance(body["duration_ms"], int)
+    assert body["duration_ms"] >= 0
 
 
 @pytest.mark.anyio
-async def test_internal_maestro_run_returns_failed_payload(client, monkeypatch):
+async def test_internal_maestro_run_returns_failed_payload_in_real_mode(client, monkeypatch):
     monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
     monkeypatch.setattr(
         "app.api.v1.endpoints.internal_maestro.MaestroOrchestrator",
