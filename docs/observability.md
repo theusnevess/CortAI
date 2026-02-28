@@ -1469,6 +1469,50 @@ Exemplo (trecho):
 }
 ```
 
+### Collector no Operational Insights (v0.1)
+
+Objetivo:
+- expor um resumo operacional do coletor na mesma janela curta do painel (`15m`);
+- facilitar leitura rapida de sucesso/falha do coletor sem abrir dashboard novo;
+- nao altera `trust` nem `recommendation` nesta versao.
+
+Fonte:
+- `observations`
+- filtro: `facts.event_type = "collector_run"`
+
+Shape:
+```json
+{
+  "collector": {
+    "window_minutes": 15,
+    "events": {
+      "success": 3,
+      "failed": 1
+    },
+    "by_error_type": {
+      "http_4xx": 1
+    },
+    "last_events": [
+      {
+        "ts": "2026-02-28T18:00:00Z",
+        "status": "failed",
+        "error_type": "http_4xx",
+        "http_status": 404,
+        "retryable": false,
+        "job_id": "job-404"
+      }
+    ]
+  }
+}
+```
+
+Regras:
+- `events` agrega apenas `success` e `failed`;
+- `by_error_type` agrupa falhas por `error_type`;
+- `last_events` e limitado aos `5` eventos mais recentes;
+- `source_ref`, `minio_path` e qualquer campo sensivel nao entram no payload do overview;
+- em caso de falha na agregacao, o painel retorna `"collector": null` (best-effort).
+
 Notas de performance:
 - janela fixa de `15m`;
 - `last_events` limitado a `5`;
