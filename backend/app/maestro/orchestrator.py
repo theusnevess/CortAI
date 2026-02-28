@@ -20,10 +20,13 @@ class MaestroOrchestrator:
     """
     Orquestrador linear mínimo para validar o pipeline de agentes de ponta a ponta.
 
-    Contrato v0.1:
+    Contrato v0.3:
     - collector deve entregar a mídia de origem para o pipeline.
-    - audio_extractor deve produzir `audio_local_path` quando a entrada ainda
-      não estiver normalizada como áudio local.
+    - audio_extractor suporta dois modos:
+      - `raw_video_minio_path`: extrai áudio e produz `audio_local_path` +
+        `audio_minio_path`
+      - `audio_minio_path`: materializa `audio_local_path` sem reextrair
+    - segmenter/transcriber continuam consumindo `audio_local_path`.
     - se esse contrato não for atendido, o job falha de forma explícita.
     """
 
@@ -42,7 +45,7 @@ class MaestroOrchestrator:
         self.transcriber = transcriber or TranscriberAdapter()
 
     async def run(self, job_input: dict[str, Any]) -> MaestroRunResult:
-        """Executa o fluxo collector -> segmenter -> transcriber para um job."""
+        """Executa o fluxo collector -> audio_extractor -> segmenter -> transcriber."""
 
         input_ref = str(job_input.get("input_ref") or job_input.get("url") or "").strip()
         if not input_ref:
@@ -72,24 +75,37 @@ class MaestroOrchestrator:
             )
 
             audio_local_path = state.get("audio_local_path") or job_input.get("audio_local_path")
+            audio_minio_path = state.get("audio_minio_path") or job_input.get("audio_minio_path")
+
             if not isinstance(audio_local_path, str) or not audio_local_path:
-                raw_video_minio_path = (
-                    state.get("raw_video_minio_path")
-                    or state.get("artifacts", {}).get("raw_video_minio_path")
-                )
-                if not isinstance(raw_video_minio_path, str) or not raw_video_minio_path:
-                    raise ValueError(
-                        "ContractViolation: collector must provide raw_video_minio_path or "
-                        "audio_local_path"
+                if isinstance(audio_minio_path, str) and audio_minio_path:
+                    await self._run_step(
+                        job=job,
+                        state=state,
+                        step="audio_extractor",
+                        agent=self.audio_extractor,
+                        payload={"audio_minio_path": audio_minio_path},
                     )
-                await self._run_step(
-                    job=job,
-                    state=state,
-                    step="audio_extractor",
-                    agent=self.audio_extractor,
-                    payload={"raw_video_minio_path": raw_video_minio_path},
-                )
+                else:
+                    raw_video_minio_path = (
+                        state.get("raw_video_minio_path")
+                        or state.get("artifacts", {}).get("raw_video_minio_path")
+                    )
+                    if not isinstance(raw_video_minio_path, str) or not raw_video_minio_path:
+                        raise ValueError(
+                            "ContractViolation: collector must provide raw_video_minio_path or "
+                            "audio_minio_path to derive audio_local_path"
+                        )
+                    await self._run_step(
+                        job=job,
+                        state=state,
+                        step="audio_extractor",
+                        agent=self.audio_extractor,
+                        payload={"raw_video_minio_path": raw_video_minio_path},
+                    )
+
                 audio_local_path = state.get("audio_local_path")
+                audio_minio_path = state.get("audio_minio_path") or audio_minio_path
 
             if not isinstance(audio_local_path, str) or not audio_local_path:
                 raise ValueError(
@@ -97,8 +113,12 @@ class MaestroOrchestrator:
                 )
 
             state["audio_local_path"] = audio_local_path
+            if isinstance(audio_minio_path, str) and audio_minio_path:
+                state["audio_minio_path"] = audio_minio_path
             state.setdefault("artifacts", {})
             state["artifacts"]["audio_local_path"] = audio_local_path
+            if isinstance(audio_minio_path, str) and audio_minio_path:
+                state["artifacts"]["audio_minio_path"] = audio_minio_path
 
             await self._run_step(
                 job=job,

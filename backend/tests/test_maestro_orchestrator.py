@@ -14,6 +14,7 @@ class _CollectorVideoOk:
     def process(self, state, payload=None):
         next_state = dict(state)
         next_state.setdefault("artifacts", {})
+        next_state["raw_video_minio_path"] = "videos/sample.mp4"
         next_state["artifacts"]["raw_video_minio_path"] = "videos/sample.mp4"
         next_state["artifacts"]["raw_video_ready"] = True
         return next_state
@@ -23,8 +24,11 @@ class _CollectorAudioReadyOk:
     def process(self, state, payload=None):
         next_state = dict(state)
         next_state["audio_local_path"] = "/tmp/sample.wav"
+        next_state["audio_minio_path"] = "audio-raw/sample.wav"
         next_state.setdefault("artifacts", {})
         next_state["artifacts"]["audio_ready"] = True
+        next_state["artifacts"]["audio_local_path"] = next_state["audio_local_path"]
+        next_state["artifacts"]["audio_minio_path"] = next_state["audio_minio_path"]
         return next_state
 
 
@@ -36,8 +40,11 @@ class _AudioExtractorOk:
         self.calls += 1
         next_state = dict(state)
         next_state["audio_local_path"] = "/tmp/sample.wav"
+        next_state["audio_minio_path"] = "audio-raw/sample.wav"
         next_state.setdefault("artifacts", {})
         next_state["artifacts"]["audio_ready"] = True
+        next_state["artifacts"]["audio_local_path"] = next_state["audio_local_path"]
+        next_state["artifacts"]["audio_minio_path"] = next_state["audio_minio_path"]
         return next_state
 
 
@@ -98,6 +105,7 @@ async def test_maestro_orchestrator_runs_linear_pipeline_with_audio_extractor(ca
     }
     assert audio_extractor.calls == 1
     assert result.state["audio_local_path"] == "/tmp/sample.wav"
+    assert result.state["audio_minio_path"] == "audio-raw/sample.wav"
     assert result.state["segments"][0]["segment_id"] == 0
     assert result.state["transcriptions"][0]["text"] == "hello"
     assert result.state["job_id"] == result.job.id
@@ -121,6 +129,30 @@ async def test_maestro_orchestrator_skips_audio_extractor_when_audio_is_already_
     assert set(result.job.step_durations_ms) == {"collector", "segmenter", "transcriber"}
     assert audio_extractor.calls == 0
     assert result.state["audio_local_path"] == "/tmp/sample.wav"
+    assert result.state["audio_minio_path"] == "audio-raw/sample.wav"
+
+
+@pytest.mark.anyio
+async def test_maestro_orchestrator_materializes_local_audio_from_audio_minio_path_input():
+    audio_extractor = _AudioExtractorOk()
+    orchestrator = MaestroOrchestrator(
+        collector=_CollectorVideoOk(),
+        audio_extractor=audio_extractor,
+        segmenter=_SegmenterOk(),
+        transcriber=_TranscriberOk(),
+    )
+
+    result = await orchestrator.run(
+        {
+            "input_ref": "https://example.com/video",
+            "audio_minio_path": "audio-raw/from-input.wav",
+        }
+    )
+
+    assert result.job.status == "done"
+    assert audio_extractor.calls == 1
+    assert result.state["audio_local_path"] == "/tmp/sample.wav"
+    assert result.state["audio_minio_path"] == "audio-raw/sample.wav"
 
 
 @pytest.mark.anyio

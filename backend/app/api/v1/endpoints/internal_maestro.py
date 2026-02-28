@@ -32,13 +32,15 @@ class _DemoCollector:
 
 
 class _DemoAudioExtractor:
-    """Double local que fecha o contrato de audio_local_path no smoke interno."""
+    """Double local que fecha o contrato de audio_local_path + audio_minio_path."""
 
     def process(self, state: dict, payload: dict | None = None) -> dict:
         next_state = dict(state)
         next_state["audio_local_path"] = "/tmp/demo.wav"
+        next_state["audio_minio_path"] = "audio-raw/demo.wav"
         next_state.setdefault("artifacts", {})
         next_state["artifacts"]["audio_local_path"] = next_state["audio_local_path"]
+        next_state["artifacts"]["audio_minio_path"] = next_state["audio_minio_path"]
         next_state["artifacts"]["audio_ready"] = True
         return next_state
 
