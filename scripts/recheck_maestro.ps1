@@ -179,13 +179,7 @@ Assert-True -Condition ($jobsGate.StatusCode -eq 404) -Message "expected 404 on 
 Run-Cmd -OutFile $out02 -Title "alembic current in cortai_api" -Cmd "docker exec $ApiContainer sh -lc ""cd /app && python -m alembic current 2>&1""" | Out-Null
 Run-Cmd -OutFile $out02 -Title "alembic upgrade head in cortai_api" -Cmd "docker exec $ApiContainer sh -lc ""cd /app && python -m alembic upgrade head 2>&1""" | Out-Null
 Run-Cmd -OutFile $out02 -Title "alembic current confirm in cortai_api" -Cmd "docker exec $ApiContainer sh -lc ""cd /app && python -m alembic current 2>&1""" | Out-Null
-Run-Cmd -OutFile $out02 -Title "DB check maestro_jobs exists in cortai_api" -Cmd "docker exec $ApiContainer sh -lc ""python - <<'PY'
-from sqlalchemy import create_engine, text
-from app.core.config import settings
-eng = create_engine(settings.DATABASE_URL.replace('+asyncpg', ''))
-with eng.connect() as c:
-    print(c.execute(text(\"\"select to_regclass('public.maestro_jobs')\"\"\)).scalar())
-PY""" | Out-Null
+Run-Cmd -OutFile $out02 -Title "DB check maestro_jobs exists in cortai_api" -Cmd "docker exec $ApiContainer sh -lc ""python -c \""from sqlalchemy import create_engine, text; from app.core.config import settings; eng = create_engine(settings.DATABASE_URL.replace('+asyncpg', '')); conn = eng.connect(); print(conn.execute(text('select to_regclass(''''public.maestro_jobs'''')')).scalar()); conn.close()\"""" | Out-Null
 
 $migration = Get-Content $out02 -Raw
 Assert-True -Condition ($migration -match 'a7f9e1d2c3b4') -Message "migration head missing"
