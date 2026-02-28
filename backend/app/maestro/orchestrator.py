@@ -138,6 +138,7 @@ class MaestroOrchestrator:
                     "segments": segments,
                 },
             )
+            self._require_valid_transcriptions(state)
 
             job.status = "done"
             job.step = None
@@ -225,3 +226,39 @@ class MaestroOrchestrator:
                 )
 
         return cast(list[dict[str, Any]], segments_any)
+
+    def _require_valid_transcriptions(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        """Valida o contrato minimo do transcriber antes de concluir o job."""
+
+        transcriptions_any = state.get("transcriptions")
+        if not isinstance(transcriptions_any, list):
+            raise ValueError("ContractViolation: transcriber must provide transcriptions as list")
+        if len(transcriptions_any) == 0:
+            raise ValueError(
+                "ContractViolation: transcriber transcriptions must be non-empty list"
+            )
+
+        transcriptions = cast(list[Any], transcriptions_any)
+        for idx, item in enumerate(transcriptions):
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"ContractViolation: transcriber transcriptions[{idx}] must be dict"
+                )
+            text = item.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(
+                    f"ContractViolation: transcriber transcriptions[{idx}].text must be non-empty string"
+                )
+            item["text"] = text.strip()
+
+        language = state.get("language")
+        if language is not None and (not isinstance(language, str) or not language.strip()):
+            raise ValueError(
+                "ContractViolation: transcriber language must be non-empty string when present"
+            )
+
+        words = state.get("words")
+        if words is not None and not isinstance(words, list):
+            raise ValueError("ContractViolation: transcriber words must be a list when present")
+
+        return cast(list[dict[str, Any]], transcriptions_any)
