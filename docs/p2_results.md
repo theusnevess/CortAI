@@ -472,3 +472,19 @@ Validacao operacional:
 
 Observacao:
 - o caminho real falhou por ambiente externo de coleta (`SSL/CERTIFICATE_VERIFY_FAILED` no coletor), nao por erro do runtime do Maestro.
+
+## Collector TLS Fix
+
+Status:
+- corrigido no runtime do container e validado operacionalmente.
+
+Inclui:
+- `ca-certificates` + `openssl` no `backend/Dockerfile` e `backend/Dockerfile.gpu`;
+- `update-ca-certificates` no build das imagens;
+- `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` e `CURL_CA_BUNDLE` fixados para `/etc/ssl/certs/ca-certificates.crt`;
+- `compat_opts=['no-certifi']` no coletor para alinhar o `yt-dlp` ao CA store do sistema.
+
+Validacao operacional:
+- `requests.get("https://example.com")` dentro do `cortai_api` -> `200`;
+- `POST /internal/maestro/run` com `source_ref=https://example.com/video.mp4` deixou de falhar por `SSL/CERTIFICATE_VERIFY_FAILED`;
+- o erro real passou a ser `HTTP 404`, consistente com a URL de teste e com TLS funcional.
