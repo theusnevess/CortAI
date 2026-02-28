@@ -7,6 +7,7 @@ from datetime import datetime
 from time import perf_counter
 from typing import Any
 
+from app.agents.adapters.audio_extractor_adapter import AudioExtractorAdapter
 from app.agents.adapters.collector_adapter import CollectorAdapter
 from app.agents.adapters.segment_adapter import SegmenterAdapter
 from app.agents.adapters.transcriber_adapter import TranscriberAdapter
@@ -20,20 +21,23 @@ class MaestroOrchestrator:
     Orquestrador linear mínimo para validar o pipeline de agentes de ponta a ponta.
 
     Contrato v0.1:
-    - collector deve deixar `audio_local_path` pronto no estado, ou o job_input
-      deve fornecê-lo explicitamente.
+    - collector deve entregar a mídia de origem para o pipeline.
+    - audio_extractor deve produzir `audio_local_path` quando a entrada ainda
+      não estiver normalizada como áudio local.
     - se esse contrato não for atendido, o job falha de forma explícita.
     """
 
     def __init__(
         self,
         collector: Any | None = None,
+        audio_extractor: Any | None = None,
         segmenter: Any | None = None,
         transcriber: Any | None = None,
     ) -> None:
         """Inicializa o orquestrador com agentes injetáveis para runtime e testes."""
 
         self.collector = collector or CollectorAdapter()
+        self.audio_extractor = audio_extractor or AudioExtractorAdapter()
         self.segmenter = segmenter or SegmenterAdapter()
         self.transcriber = transcriber or TranscriberAdapter()
 
@@ -66,13 +70,31 @@ class MaestroOrchestrator:
                 payload={"url": input_ref},
             )
 
-            # v0.1 mantém o limite atual entre agentes explícito, em vez de
-            # esconder uma etapa extra de extração dentro do orquestrador.
             audio_local_path = state.get("audio_local_path") or job_input.get("audio_local_path")
             if not isinstance(audio_local_path, str) or not audio_local_path:
-                raise ValueError(
-                    "ContractViolation: collector must provide audio_local_path for segmenter"
+                raw_video_minio_path = (
+                    state.get("raw_video_minio_path")
+                    or state.get("artifacts", {}).get("raw_video_minio_path")
                 )
+                if not isinstance(raw_video_minio_path, str) or not raw_video_minio_path:
+                    raise ValueError(
+                        "ContractViolation: collector must provide raw_video_minio_path or "
+                        "audio_local_path"
+                    )
+                await self._run_step(
+                    job=job,
+                    state=state,
+                    step="audio_extractor",
+                    agent=self.audio_extractor,
+                    payload={"raw_video_minio_path": raw_video_minio_path},
+                )
+                audio_local_path = state.get("audio_local_path")
+
+            if not isinstance(audio_local_path, str) or not audio_local_path:
+                raise ValueError(
+                    "ContractViolation: audio_extractor must provide audio_local_path"
+                )
+
             state["audio_local_path"] = audio_local_path
             state.setdefault("artifacts", {})
             state["artifacts"]["audio_local_path"] = audio_local_path

@@ -10,13 +10,40 @@ def anyio_backend():
     return "asyncio"
 
 
-class _CollectorOk:
+class _CollectorVideoOk:
+    def process(self, state, payload=None):
+        next_state = dict(state)
+        next_state.setdefault("artifacts", {})
+        next_state["artifacts"]["raw_video_minio_path"] = "videos/sample.mp4"
+        next_state["artifacts"]["raw_video_ready"] = True
+        return next_state
+
+
+class _CollectorAudioReadyOk:
     def process(self, state, payload=None):
         next_state = dict(state)
         next_state["audio_local_path"] = "/tmp/sample.wav"
         next_state.setdefault("artifacts", {})
-        next_state["artifacts"]["raw_video_minio_path"] = "videos/sample.mp4"
+        next_state["artifacts"]["audio_ready"] = True
         return next_state
+
+
+class _AudioExtractorOk:
+    def __init__(self):
+        self.calls = 0
+
+    def process(self, state, payload=None):
+        self.calls += 1
+        next_state = dict(state)
+        next_state["audio_local_path"] = "/tmp/sample.wav"
+        next_state.setdefault("artifacts", {})
+        next_state["artifacts"]["audio_ready"] = True
+        return next_state
+
+
+class _AudioExtractorFail:
+    def process(self, state, payload=None):
+        raise RuntimeError("audio extractor exploded")
 
 
 class _SegmenterOk:
@@ -41,21 +68,18 @@ class _TranscriberOk:
         return next_state
 
 
-class _SegmenterFail:
-    def process(self, state, payload=None):
-        raise RuntimeError("segmenter exploded")
-
-
 class _TranscriberFail:
     def process(self, state, payload=None):
         raise RuntimeError("transcriber exploded")
 
 
 @pytest.mark.anyio
-async def test_maestro_orchestrator_runs_linear_pipeline_success(caplog):
+async def test_maestro_orchestrator_runs_linear_pipeline_with_audio_extractor(caplog):
     caplog.set_level(logging.INFO)
+    audio_extractor = _AudioExtractorOk()
     orchestrator = MaestroOrchestrator(
-        collector=_CollectorOk(),
+        collector=_CollectorVideoOk(),
+        audio_extractor=audio_extractor,
         segmenter=_SegmenterOk(),
         transcriber=_TranscriberOk(),
     )
@@ -66,7 +90,13 @@ async def test_maestro_orchestrator_runs_linear_pipeline_success(caplog):
     assert result.job.step is None
     assert result.job.error is None
     assert result.job.duration_ms is not None
-    assert set(result.job.step_durations_ms) == {"collector", "segmenter", "transcriber"}
+    assert set(result.job.step_durations_ms) == {
+        "collector",
+        "audio_extractor",
+        "segmenter",
+        "transcriber",
+    }
+    assert audio_extractor.calls == 1
     assert result.state["audio_local_path"] == "/tmp/sample.wav"
     assert result.state["segments"][0]["segment_id"] == 0
     assert result.state["transcriptions"][0]["text"] == "hello"
@@ -76,31 +106,51 @@ async def test_maestro_orchestrator_runs_linear_pipeline_success(caplog):
 
 
 @pytest.mark.anyio
-async def test_maestro_orchestrator_marks_failed_when_segmenter_breaks():
+async def test_maestro_orchestrator_skips_audio_extractor_when_audio_is_already_ready():
+    audio_extractor = _AudioExtractorOk()
     orchestrator = MaestroOrchestrator(
-        collector=_CollectorOk(),
-        segmenter=_SegmenterFail(),
+        collector=_CollectorAudioReadyOk(),
+        audio_extractor=audio_extractor,
+        segmenter=_SegmenterOk(),
+        transcriber=_TranscriberOk(),
+    )
+
+    result = await orchestrator.run({"input_ref": "https://example.com/audio"})
+
+    assert result.job.status == "done"
+    assert set(result.job.step_durations_ms) == {"collector", "segmenter", "transcriber"}
+    assert audio_extractor.calls == 0
+    assert result.state["audio_local_path"] == "/tmp/sample.wav"
+
+
+@pytest.mark.anyio
+async def test_maestro_orchestrator_marks_failed_when_audio_extractor_breaks():
+    orchestrator = MaestroOrchestrator(
+        collector=_CollectorVideoOk(),
+        audio_extractor=_AudioExtractorFail(),
+        segmenter=_SegmenterOk(),
         transcriber=_TranscriberOk(),
     )
 
     result = await orchestrator.run({"input_ref": "https://example.com/video"})
 
     assert result.job.status == "failed"
-    assert result.job.step == "segmenter"
-    assert result.job.error == "segmenter exploded"
-    assert "transcriptions" not in result.state
+    assert result.job.step == "audio_extractor"
+    assert result.job.error == "audio extractor exploded"
+    assert "segments" not in result.state
     assert set(result.job.step_durations_ms) == {"collector"}
 
 
 @pytest.mark.anyio
 async def test_maestro_orchestrator_marks_failed_when_transcriber_breaks():
     orchestrator = MaestroOrchestrator(
-        collector=_CollectorOk(),
+        collector=_CollectorAudioReadyOk(),
+        audio_extractor=_AudioExtractorOk(),
         segmenter=_SegmenterOk(),
         transcriber=_TranscriberFail(),
     )
 
-    result = await orchestrator.run({"input_ref": "https://example.com/video"})
+    result = await orchestrator.run({"input_ref": "https://example.com/audio"})
 
     assert result.job.status == "failed"
     assert result.job.step == "transcriber"
