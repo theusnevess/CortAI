@@ -47,9 +47,10 @@ class MaestroOrchestrator:
         input_ref = str(job_input.get("input_ref") or job_input.get("url") or "").strip()
         if not input_ref:
             raise ValueError("MissingField: job_input.input_ref")
+        requested_job_id = str(job_input.get("job_id") or "").strip() or None
 
         job = MaestroJob(
-            id=str(uuid.uuid4()),
+            id=requested_job_id or str(uuid.uuid4()),
             input_ref=input_ref,
             status="running",
             started_at=datetime.utcnow(),

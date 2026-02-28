@@ -283,3 +283,26 @@ class PublishReceipt(Base):
         Index("ix_publish_receipts_manifest_decision_id", "manifest_decision_id"),
         Index("ix_publish_receipts_created_at", "created_at"),
     )
+
+
+class MaestroJobModel(Base):
+    __tablename__ = "maestro_jobs"
+
+    job_id = Column(String, primary_key=True)
+    source_ref = Column(String, nullable=False)
+
+    status = Column(String, nullable=False)
+    step = Column(String, nullable=True)
+    error = Column(Text, nullable=True)
+
+    started_at = Column(DateTime, nullable=False)
+    finished_at = Column(DateTime, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+
+    demo_mode = Column(Boolean, nullable=False, default=False)
+    step_durations_json = Column(JSONB, nullable=True, default=dict)
+
+    __table_args__ = (
+        Index("ix_maestro_jobs_status", "status"),
+        Index("ix_maestro_jobs_started_at", "started_at"),
+    )
