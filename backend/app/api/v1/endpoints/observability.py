@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 from time import monotonic, perf_counter_ns
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import text
@@ -371,6 +372,21 @@ def _derive_action_recommendation(
     return recommendation
 
 
+def _project_operational_decision(policy: dict[str, Any] | None) -> dict[str, Any] | None:
+    """
+    Projeta um bloco read-only a partir de `policy` sem recalcular regra alguma.
+    """
+    if not isinstance(policy, dict):
+        return None
+    return {
+        "version": policy.get("version"),
+        "score": policy.get("score"),
+        "state": policy.get("state"),
+        "decision": policy.get("decision"),
+        "signals": policy.get("signals"),
+    }
+
+
 async def _get_guardrails_summary(
     db: AsyncSession,
     db_stats: dict[str, int],
@@ -672,6 +688,7 @@ async def _build_observability_overview_payload(
         "collector": collector,
     }
     response["policy"] = derive_operational_policy(collector)
+    response["operational_decision"] = _project_operational_decision(response.get("policy"))
     try:
         response["policy_bridge"] = derive_policy_bridge(
             collector,
