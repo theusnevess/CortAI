@@ -78,11 +78,19 @@ def _make_panel_stubs(*, score: str, overview_snapshot_status: str, snapshot_mis
             "last_events": [],
         }
 
-    return _fake_c1_health, _fake_read_path, _fake_guardrails
+    async def _fake_collector_summary(*, db, db_stats, execute_with_db_stats, window_minutes=15, last_events_limit=5):
+        return {
+            "window_minutes": int(window_minutes),
+            "events": {"success": 0, "failed": 0},
+            "by_error_type": {},
+            "last_events": [],
+        }
+
+    return _fake_c1_health, _fake_read_path, _fake_guardrails, _fake_collector_summary
 
 
 def _patch_panel_dependencies(monkeypatch, *, score: str, overview_snapshot_status: str, snapshot_missing_503: int, rate_limited_429: int) -> None:
-    fake_c1_health, fake_read_path, fake_guardrails = _make_panel_stubs(
+    fake_c1_health, fake_read_path, fake_guardrails, fake_collector_summary = _make_panel_stubs(
         score=score,
         overview_snapshot_status=overview_snapshot_status,
         snapshot_missing_503=snapshot_missing_503,
@@ -91,6 +99,7 @@ def _patch_panel_dependencies(monkeypatch, *, score: str, overview_snapshot_stat
     monkeypatch.setattr(observability_endpoint, "get_runtime_c1_health_cached", fake_c1_health)
     monkeypatch.setattr(observability_endpoint, "_get_read_path_compact", fake_read_path)
     monkeypatch.setattr(observability_endpoint, "_get_guardrails_summary", fake_guardrails)
+    monkeypatch.setattr(observability_endpoint, "get_collector_summary", fake_collector_summary)
 
 
 def _patch_panel_dependencies_with_jobs(
@@ -128,9 +137,18 @@ def _patch_panel_dependencies_with_jobs(
             "last_events": [],
         }
 
+    async def _fake_collector_summary(*, db, db_stats, execute_with_db_stats, window_minutes=15, last_events_limit=5):
+        return {
+            "window_minutes": int(window_minutes),
+            "events": {"success": 0, "failed": 0},
+            "by_error_type": {},
+            "last_events": [],
+        }
+
     monkeypatch.setattr(observability_endpoint, "get_runtime_c1_health_cached", _fake_c1_health)
     monkeypatch.setattr(observability_endpoint, "_get_read_path_compact", _fake_read_path)
     monkeypatch.setattr(observability_endpoint, "_get_guardrails_summary", _fake_guardrails)
+    monkeypatch.setattr(observability_endpoint, "get_collector_summary", _fake_collector_summary)
 
 
 def _assert_recommendation_contract(rec: dict) -> None:
@@ -181,7 +199,7 @@ async def test_insights_panel_gate_on_returns_200_and_min_shape(client, monkeypa
     response = await client.get("/api/v1/observability/overview", headers=_internal_headers())
     assert response.status_code == 200
     payload = response.json()
-    for key in ("panel_version", "as_of", "overall", "c1_health", "read_path", "guardrails"):
+    for key in ("panel_version", "as_of", "overall", "c1_health", "read_path", "guardrails", "collector"):
         assert key in payload
     assert payload["panel_version"] == "v1"
     assert "score" in payload["overall"]
@@ -202,6 +220,106 @@ async def test_guardrails_summary_empty_when_no_events(client, monkeypatch):
         "snapshot_missing_503": 0,
     }
     assert guardrails["last_events"] == []
+
+
+@pytest.mark.anyio
+async def test_collector_summary_empty_when_no_events(client, monkeypatch):
+    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+    response = await client.get("/api/v1/observability/overview", headers=_internal_headers())
+    assert response.status_code == 200
+    collector = response.json()["collector"]
+    assert collector["window_minutes"] == 15
+    assert collector["events"] == {"success": 0, "failed": 0}
+    assert collector["by_error_type"] == {}
+    assert collector["last_events"] == []
+
+
+@pytest.mark.anyio
+async def test_collector_summary_counts_and_last_events_populate(client, monkeypatch, seed_observation):
+    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+    now = datetime.utcnow()
+
+    await seed_observation(
+        timestamp=now - timedelta(seconds=50),
+        process_id="P_COLLECTOR_SUCCESS",
+        source_outcome_id=str(uuid.uuid4()),
+        facts={
+            "event_type": "collector_run",
+            "status": "success",
+            "source_type": "audio",
+            "duration_ms": 120,
+            "error_type": None,
+            "http_status": None,
+            "retryable": False,
+            "job_id": "job-success",
+            "source_ref": "http://localhost:8001/smoke-assets/audio_1s.wav",
+            "minio_bucket": "videos-raw",
+            "minio_key_prefix": "smoke/audio_1s.wav",
+        },
+    )
+    await seed_observation(
+        timestamp=now - timedelta(seconds=40),
+        process_id="P_COLLECTOR_HTTP_404",
+        source_outcome_id=str(uuid.uuid4()),
+        facts={
+            "event_type": "collector_run",
+            "status": "failed",
+            "source_type": None,
+            "duration_ms": 85,
+            "error_type": "http_4xx",
+            "http_status": 404,
+            "retryable": False,
+            "job_id": "job-404",
+            "source_ref": "https://example.com/video.mp4",
+            "minio_bucket": None,
+            "minio_key_prefix": None,
+        },
+    )
+    await seed_observation(
+        timestamp=now - timedelta(seconds=30),
+        process_id="P_COLLECTOR_TIMEOUT",
+        source_outcome_id=str(uuid.uuid4()),
+        facts={
+            "event_type": "collector_run",
+            "status": "failed",
+            "source_type": None,
+            "duration_ms": 1500,
+            "error_type": "timeout",
+            "http_status": None,
+            "retryable": True,
+            "job_id": "job-timeout",
+            "source_ref": "https://upstream.example.com/file.mp4",
+            "minio_bucket": None,
+            "minio_key_prefix": None,
+        },
+    )
+
+    response = await client.get("/api/v1/observability/overview", headers=_internal_headers())
+    assert response.status_code == 200
+    collector = response.json()["collector"]
+    assert collector["events"] == {"success": 1, "failed": 2}
+    assert collector["by_error_type"] == {"http_4xx": 1, "timeout": 1}
+    assert len(collector["last_events"]) == 3
+    assert collector["last_events"][0]["job_id"] == "job-timeout"
+    assert collector["last_events"][0]["error_type"] == "timeout"
+    assert collector["last_events"][1]["http_status"] == 404
+    serialized = str(collector)
+    assert "source_ref" not in serialized
+    assert "minio_path" not in serialized
+
+
+@pytest.mark.anyio
+async def test_collector_summary_query_failure_is_safe(client, monkeypatch):
+    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("collector summary failed")
+
+    monkeypatch.setattr(observability_endpoint, "get_collector_summary", _boom)
+
+    response = await client.get("/api/v1/observability/overview", headers=_internal_headers())
+    assert response.status_code == 200
+    assert response.json()["collector"] is None
 
 
 @pytest.mark.anyio
