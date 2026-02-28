@@ -46,6 +46,15 @@ _PUBLIC_ACTION_MAP = {
     "monitor": "monitor",
     "none": "none",
 }
+_PUBLIC_SIGNAL_FORBIDDEN_SUBSTRINGS = (
+    "source_ref",
+    "minio",
+    "job_id",
+    "query_key",
+    "key=",
+    "/tmp",
+    "/storage/",
+)
 _public_webhook_last_state: str | None = None
 
 
@@ -170,6 +179,70 @@ def _to_public_status_action(action: str | None) -> str:
     return _PUBLIC_ACTION_MAP.get(normalized, "inspect")
 
 
+def _extract_optional_policy_fields(panel: dict[str, Any]) -> dict[str, Any]:
+    """
+    Projeta campos opcionais e sanitizados de policy para /status/public.
+    Nunca expoe identificadores internos, paths, nem estruturas complexas.
+    """
+    policy = panel.get("policy")
+    if not isinstance(policy, dict):
+        return {}
+
+    out: dict[str, Any] = {}
+
+    state = policy.get("state")
+    decision = policy.get("decision")
+    score = policy.get("score")
+    signals = policy.get("signals")
+
+    if isinstance(state, str) and state:
+        out["decision_state"] = state
+    else:
+        legacy_state = policy.get("system_state")
+        if isinstance(legacy_state, str) and legacy_state:
+            out["decision_state"] = legacy_state
+
+    if isinstance(decision, str) and decision:
+        out["decision_action"] = decision
+
+    if isinstance(score, int):
+        out["score"] = score
+    else:
+        legacy_score = policy.get("trust_score")
+        if isinstance(legacy_score, int):
+            out["score"] = legacy_score
+
+    safe_signals: dict[str, Any] = {}
+    if isinstance(signals, dict):
+        for key, value in signals.items():
+            if not isinstance(key, str) or not key:
+                continue
+            if any(token in key.lower() for token in _PUBLIC_SIGNAL_FORBIDDEN_SUBSTRINGS):
+                continue
+            if value is None:
+                continue
+            if isinstance(value, (bool, int, float, str)):
+                safe_signals[key] = value
+                continue
+            if isinstance(value, list) and all(isinstance(item, (bool, int, float, str)) for item in value):
+                safe_signals[key] = value
+    elif isinstance(signals, list):
+        sanitized_list = [
+            item
+            for item in signals
+            if isinstance(item, str)
+            and item
+            and not any(token in item.lower() for token in _PUBLIC_SIGNAL_FORBIDDEN_SUBSTRINGS)
+        ]
+        if sanitized_list:
+            safe_signals["items"] = sanitized_list
+
+    if safe_signals:
+        out["signals"] = safe_signals
+
+    return out
+
+
 def _reset_public_webhook_state_for_tests() -> None:
     """
     Reset explicito do estado de transicao para testes deterministas.
@@ -275,6 +348,7 @@ async def get_public_status(
             "as_of": panel.get("as_of") or (datetime.utcnow().replace(microsecond=0).isoformat() + "Z"),
             "version": _PUBLIC_STATUS_VERSION,
         }
+        payload.update(_extract_optional_policy_fields(panel))
         _maybe_trigger_public_status_webhook(payload)
         status_code = 200
         return JSONResponse(
