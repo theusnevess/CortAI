@@ -123,6 +123,7 @@ Ensure-OutDir
 $runUrl = "$ApiBase/internal/maestro/run"
 $jobsUrl = "$ApiBase/internal/maestro/jobs"
 $headers = @{ "X-Internal-Status" = "1" }
+$dbContainer = "cortai_db"
 
 $out00 = Join-Path $OutDir "00_maestro_precheck.txt"
 $out01 = Join-Path $OutDir "01_maestro_gates_http.txt"
@@ -179,9 +180,7 @@ Assert-True -Condition ($jobsGate.StatusCode -eq 404) -Message "expected 404 on 
 Run-Cmd -OutFile $out02 -Title "alembic current in cortai_api" -Cmd "docker exec $ApiContainer sh -lc ""cd /app && python -m alembic current 2>&1""" | Out-Null
 Run-Cmd -OutFile $out02 -Title "alembic upgrade head in cortai_api" -Cmd "docker exec $ApiContainer sh -lc ""cd /app && python -m alembic upgrade head 2>&1""" | Out-Null
 Run-Cmd -OutFile $out02 -Title "alembic current confirm in cortai_api" -Cmd "docker exec $ApiContainer sh -lc ""cd /app && python -m alembic current 2>&1""" | Out-Null
-$dbCheckCmd = @"
-docker exec $ApiContainer sh -lc "python -c ""from sqlalchemy import create_engine, text; from app.core.config import settings; eng = create_engine(settings.DATABASE_URL.replace('+asyncpg', '')); conn = eng.connect(); print(conn.execute(text(\"select to_regclass('public.maestro_jobs')\")).scalar()); conn.close()"""
-"@
+$dbCheckCmd = "docker exec $dbContainer psql -U cortai_admin -d cortai_db -tAc ""select to_regclass('public.maestro_jobs');"""
 Run-Cmd -OutFile $out02 -Title "DB check maestro_jobs exists in cortai_api" -Cmd $dbCheckCmd | Out-Null
 
 $migration = Get-Content $out02 -Raw
