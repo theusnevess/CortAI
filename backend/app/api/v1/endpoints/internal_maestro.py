@@ -1,10 +1,20 @@
 from time import perf_counter_ns
+import uuid
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.metrics import _emit_metrics_endpoint_timing
+from app.db.session import get_db
 from app.maestro.orchestrator import MaestroOrchestrator
+from app.maestro.repository import (
+    create_running_job,
+    get_job_by_id,
+    update_job_failure,
+    update_job_success,
+)
 from app.observability.runtime_health import should_include_internal_status
 
 router = APIRouter(prefix="/internal", tags=["internal"])
@@ -77,8 +87,28 @@ def _build_demo_orchestrator() -> MaestroOrchestrator:
     )
 
 
+def _serialize_job(record) -> dict:
+    """Normaliza a resposta publica do runtime interno do Maestro."""
+
+    return {
+        "job_id": record.job_id,
+        "source_ref": record.source_ref,
+        "status": record.status,
+        "step": record.step,
+        "error": record.error,
+        "started_at": record.started_at.isoformat() + "Z" if record.started_at else None,
+        "finished_at": record.finished_at.isoformat() + "Z" if record.finished_at else None,
+        "duration_ms": record.duration_ms,
+        "demo_mode": bool(record.demo_mode),
+    }
+
+
 @router.post("/maestro/run")
-async def run_internal_maestro(request: Request, payload: MaestroRunRequest):
+async def run_internal_maestro(
+    request: Request,
+    payload: MaestroRunRequest,
+    db: AsyncSession = Depends(get_db),
+):
     """
     Executa o pipeline linear do Maestro via endpoint interno restrito.
 
@@ -90,27 +120,61 @@ async def run_internal_maestro(request: Request, payload: MaestroRunRequest):
     started_ns = perf_counter_ns()
     status_code = 500
     demo_mode = False
+    persisted_job_id: str | None = None
     try:
         if not should_include_internal_status(request):
             status_code = 404
             raise HTTPException(status_code=404, detail="Not Found")
 
         demo_mode = str(request.query_params.get("demo", "")).strip() == "1"
-        orchestrator = _build_demo_orchestrator() if demo_mode else MaestroOrchestrator()
-        result = await orchestrator.run(
-            {
-                "input_ref": payload.source_ref,
-                "job_id": payload.job_id,
-            }
+        source_ref = payload.source_ref
+        persisted_job_id = (
+            payload.job_id.strip()
+            if isinstance(payload.job_id, str) and payload.job_id.strip()
+            else str(uuid.uuid4())
         )
+        await create_running_job(
+            db,
+            job_id=persisted_job_id,
+            source_ref=source_ref,
+            demo_mode=demo_mode,
+        )
+        await db.commit()
+
+        orchestrator = _build_demo_orchestrator() if demo_mode else MaestroOrchestrator()
+        result = await orchestrator.run({"input_ref": source_ref, "job_id": persisted_job_id})
+
+        if result.job.status == "done":
+            record = await update_job_success(db, job_id=result.job.id, job=result.job)
+        else:
+            record = await update_job_failure(db, job_id=result.job.id, job=result.job)
+        await db.commit()
         status_code = 200
-        return {
-            "job_id": result.job.id,
-            "status": result.job.status,
-            "step": result.job.step,
-            "error": result.job.error,
-            "duration_ms": result.job.duration_ms,
+        response_payload = {
+            "job_id": record.job_id,
+            "status": record.status,
+            "step": record.step,
+            "error": record.error,
+            "duration_ms": record.duration_ms,
         }
+        response = JSONResponse(response_payload)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if persisted_job_id:
+            try:
+                await update_job_failure(
+                    db,
+                    job_id=persisted_job_id,
+                    step="unknown",
+                    error=str(exc),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+        raise
     finally:
         duration_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
         _emit_metrics_endpoint_timing(
@@ -123,3 +187,23 @@ async def run_internal_maestro(request: Request, payload: MaestroRunRequest):
             db_queries=0,
             db_pool_wait_us=0,
         )
+
+
+@router.get("/maestro/jobs/{job_id}")
+async def get_internal_maestro_job(
+    job_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Consulta o estado persistido de um job do Maestro via endpoint interno."""
+
+    if not should_include_internal_status(request):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    record = await get_job_by_id(db, job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    response = JSONResponse(_serialize_job(record))
+    response.headers["Cache-Control"] = "no-store"
+    return response
