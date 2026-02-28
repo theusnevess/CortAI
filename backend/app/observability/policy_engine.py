@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+POLICY_DECISION_VERSION = "v0.2"
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -10,18 +12,28 @@ def _utc_now_iso() -> str:
 
 def derive_operational_policy(collector_summary: dict[str, Any] | None) -> dict[str, Any]:
     """
-    Operational Policy Engine v0.1.
+    Operational Policy Engine v0.2.
 
     Deriva um sinal deterministico de saude operacional a partir do bloco
     `collector` ja presente no overview. Nao executa queries e nao altera os
     sinais existentes de trust/recommendation.
+
+    v0.2:
+    - evolui `policy` para um shape de decisao (`score/state/decision/signals`)
+    - preserva chaves legadas por compatibilidade temporaria com testes/consumidores
     """
     if not collector_summary:
+        legacy_as_of = _utc_now_iso()
         return {
+            "version": POLICY_DECISION_VERSION,
+            "score": 100,
+            "state": "stable",
+            "decision": "monitor",
+            "signals": [],
             "trust_score": 100,
             "system_state": "healthy",
             "recommendation": "normal_operation",
-            "as_of": _utc_now_iso(),
+            "as_of": legacy_as_of,
         }
 
     score = 100
@@ -79,12 +91,58 @@ def derive_operational_policy(collector_summary: dict[str, Any] | None) -> dict[
         system_state = "action_required"
         recommendation = "manual_intervention_required"
 
+    state, decision, signals = _derive_decision_from_score_and_signals(
+        score=score,
+        collector_summary=collector_summary,
+    )
+
     return {
+        "version": POLICY_DECISION_VERSION,
+        "score": score,
+        "state": state,
+        "decision": decision,
+        "signals": signals,
         "trust_score": score,
         "system_state": system_state,
         "recommendation": recommendation,
         "as_of": _utc_now_iso(),
     }
+
+
+def _derive_decision_from_score_and_signals(
+    *,
+    score: int,
+    collector_summary: dict[str, Any] | None,
+) -> tuple[str, str, list[str]]:
+    """
+    Mapeia score -> state/decision e resume sinais de forma deterministica.
+    """
+    signals: list[str] = []
+
+    if collector_summary:
+        events = collector_summary.get("events") or {}
+        failed = int(events.get("failed") or 0)
+        if failed > 0:
+            signals.append(f"collector_failed={failed}")
+
+        by_error_type = collector_summary.get("by_error_type") or {}
+        top_error_types = sorted(
+            (
+                (str(error_type), int(count or 0))
+                for error_type, count in by_error_type.items()
+                if error_type
+            ),
+            key=lambda item: (-item[1], item[0]),
+        )[:2]
+        for error_type, count in top_error_types:
+            if count > 0:
+                signals.append(f"collector_error_type:{error_type}={count}")
+
+    if score >= 85:
+        return "stable", "monitor", signals[:3]
+    if score >= 60:
+        return "degraded", "inspect", signals[:3]
+    return "action_required", "investigate_now", signals[:3]
 
 
 def derive_policy_bridge(
