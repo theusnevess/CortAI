@@ -17,22 +17,33 @@ KNOWN_BAD_URL = os.getenv(
 )
 
 
-def _resolve_good_url() -> str:
+def _good_url_candidates() -> tuple[str, ...]:
     if KNOWN_GOOD_URL:
-        return KNOWN_GOOD_URL
-
-    candidates = (
+        return (KNOWN_GOOD_URL,)
+    return (
         "http://localhost:8001/smoke-assets/audio_1s.wav",
+        "http://localhost:8001/smoke-assets/video_1s.mp4",
         "http://cortai_edge:8080/smoke-assets/audio_1s.wav",
+        "http://cortai_edge:8080/smoke-assets/video_1s.mp4",
     )
-    for candidate in candidates:
+
+
+def _resolve_good_urls() -> list[str]:
+    resolved: list[str] = []
+    for candidate in _good_url_candidates():
         try:
             response = requests.get(candidate, timeout=5)
         except Exception:
             continue
         if response.status_code == 200:
-            return candidate
-    pytest.skip("Smoke asset indisponivel nos endpoints conhecidos")
+            resolved.append(candidate)
+    if not resolved:
+        pytest.skip("Smoke assets indisponiveis nos endpoints conhecidos")
+    return resolved
+
+
+def _resolve_good_url() -> str:
+    return _resolve_good_urls()[0]
 
 
 def _ensure_smoke_stack() -> str:
@@ -46,8 +57,9 @@ def _ensure_smoke_stack() -> str:
     return good_url
 
 
-def test_collector_smoke_known_good_url_persists_object():
-    good_url = _ensure_smoke_stack()
+@pytest.mark.parametrize("good_url", _resolve_good_urls())
+def test_collector_smoke_known_good_url_persists_object(good_url: str):
+    _ensure_smoke_stack()
 
     result = CollectorAgent().process(good_url)
 
