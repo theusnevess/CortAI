@@ -10,11 +10,71 @@ from app.observability.runtime_health import should_include_internal_status
 router = APIRouter(prefix="/internal", tags=["internal"])
 
 
+class _DemoCollector:
+    """Double local para smoke controlado do coletor."""
+
+    def process(self, state: dict, payload: dict | None = None) -> dict:
+        next_state = dict(state)
+        next_state.setdefault("artifacts", {})
+        next_state["artifacts"]["raw_video_minio_path"] = "demo/video.mp4"
+        next_state["artifacts"]["raw_video_ready"] = True
+        return next_state
+
+
+class _DemoAudioExtractor:
+    """Double local que fecha o contrato de audio_local_path no smoke interno."""
+
+    def process(self, state: dict, payload: dict | None = None) -> dict:
+        next_state = dict(state)
+        next_state["audio_local_path"] = "/tmp/demo.wav"
+        next_state.setdefault("artifacts", {})
+        next_state["artifacts"]["audio_local_path"] = next_state["audio_local_path"]
+        next_state["artifacts"]["audio_ready"] = True
+        return next_state
+
+
+class _DemoSegmenter:
+    """Double local que produz uma segmentacao minima e deterministica."""
+
+    def process(self, state: dict, payload: dict | None = None) -> dict:
+        next_state = dict(state)
+        next_state["segments"] = [
+            {"segment_id": 0, "start_time": 0.0, "end_time": 1.0, "energy_score": 0.9}
+        ]
+        next_state.setdefault("artifacts", {})
+        next_state["artifacts"]["segments_ready"] = True
+        return next_state
+
+
+class _DemoTranscriber:
+    """Double local que finaliza o smoke com uma transcricao minima."""
+
+    def process(self, state: dict, payload: dict | None = None) -> dict:
+        next_state = dict(state)
+        next_state["transcriptions"] = [
+            {"segment_id": 0, "start_time": 0.0, "end_time": 1.0, "text": "demo transcript"}
+        ]
+        next_state.setdefault("artifacts", {})
+        next_state["artifacts"]["transcriptions_ready"] = True
+        return next_state
+
+
 class MaestroRunRequest(BaseModel):
     """Payload minimo aceito para disparar uma execucao linear do Maestro."""
 
     source_ref: str
     job_id: str | None = None
+
+
+def _build_demo_orchestrator() -> MaestroOrchestrator:
+    """Monta um orquestrador deterministico para smoke interno do endpoint."""
+
+    return MaestroOrchestrator(
+        collector=_DemoCollector(),
+        audio_extractor=_DemoAudioExtractor(),
+        segmenter=_DemoSegmenter(),
+        transcriber=_DemoTranscriber(),
+    )
 
 
 @router.post("/maestro/run")
@@ -29,12 +89,14 @@ async def run_internal_maestro(request: Request, payload: MaestroRunRequest):
     """
     started_ns = perf_counter_ns()
     status_code = 500
+    demo_mode = False
     try:
         if not should_include_internal_status(request):
             status_code = 404
             raise HTTPException(status_code=404, detail="Not Found")
 
-        orchestrator = MaestroOrchestrator()
+        demo_mode = str(request.query_params.get("demo", "")).strip() == "1"
+        orchestrator = _build_demo_orchestrator() if demo_mode else MaestroOrchestrator()
         result = await orchestrator.run(
             {
                 "input_ref": payload.source_ref,
@@ -56,7 +118,7 @@ async def run_internal_maestro(request: Request, payload: MaestroRunRequest):
             method="POST",
             status_code=status_code,
             duration_ms=int(duration_ms),
-            query_fingerprint="maestro_version=v0.1",
+            query_fingerprint="maestro_version=v0.1&demo=1" if demo_mode else "maestro_version=v0.1",
             db_us=0,
             db_queries=0,
             db_pool_wait_us=0,
