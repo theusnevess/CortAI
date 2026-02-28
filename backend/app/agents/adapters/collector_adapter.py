@@ -20,6 +20,11 @@ class CollectorAdapter:
         result = CollectorAgent().process(url)
         if not isinstance(result, dict):
             raise ValueError("InvalidAgentReturn: CollectorAgent returned non-dict")
+        error = result.get("error")
+        if isinstance(error, dict) and error.get("error_type"):
+            error_type = error.get("error_type")
+            message = error.get("message") or "Falha desconhecida no coletor"
+            raise OSError(f"CollectorFailed:{error_type}:{message}")
         minio_path = result.get("minio_path")
         if not isinstance(minio_path, str) or not minio_path:
             raise OSError("CollectorFailed: minio_path inválido")
