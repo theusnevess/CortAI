@@ -102,6 +102,48 @@ Exemplo de falha:
 }
 ```
 
+## Recheck Maestro
+
+Objetivo:
+- validar o slice de orquestracao do Maestro com stop-the-line;
+- gerar evidencia auditavel em `OUT/`;
+- terminar em `GO` ou `NO-GO` com exit code coerente.
+
+Pre-requisitos:
+- Docker daemon ativo;
+- Compose com `cortai_api`, `cortai_edge`, `cortai_db` e `cortai_minio` em execucao;
+- endpoints internos expostos no `api`;
+- gate interno habilitado para o header `X-Internal-Status: 1`.
+
+Comando unico:
+```powershell
+.\scripts\recheck_maestro.ps1
+```
+
+Wrapper curto:
+```cmd
+scripts\recheck_maestro.cmd
+```
+
+Artefatos gerados:
+- `OUT/00_maestro_precheck.txt`
+- `OUT/01_maestro_gates_http.txt`
+- `OUT/02_maestro_migration.txt`
+- `OUT/03_maestro_pytest_focal.txt`
+- `OUT/04_maestro_demo_smoke.txt`
+- `OUT/05_maestro_real_failed_smoke.txt`
+- `OUT/06_maestro_contract_v03.txt`
+- `OUT/07_maestro_invariants.txt`
+- `OUT/08_maestro_no_leak.txt`
+- `OUT/09_maestro_logs.txt`
+- `OUT/RECHECK_MAESTRO_TOTAL.md`
+- `OUT/RECHECK_MAESTRO_SUMMARY.md`
+
+Interpretacao:
+- qualquer falha em uma secao stop-the-line encerra o script com `NO-GO`;
+- migration e validada dentro do container `cortai_api`, que e o ambiente correto para o runtime do Maestro;
+- `GO` exige gates, migration, testes focais, smoke demo, smoke real failed-controlado, persistencia, no-leak e logs.
+
 ## Saida do pipeline
 
 `write_artifact` gera um manifest deterministico em `storage/agent_output/<decision_id>.json` com:
