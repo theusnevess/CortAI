@@ -70,7 +70,7 @@ function Invoke-JsonRequest {
     param(
         [Parameter(Mandatory = $true)][string]$Method,
         [Parameter(Mandatory = $true)][string]$Uri,
-        [string]$Body,
+        [AllowNull()][string]$Body = $null,
         [hashtable]$Headers = @{}
     )
     try {
