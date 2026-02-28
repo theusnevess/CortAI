@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import os
-import subprocess
+import subprocess  # nosec B404
+import tempfile
 import uuid
 from pathlib import Path
 
 from app.agents.collector.utils import parse_minio_path
 from app.services.storage import MinioService
 
-TMP_DIR = Path("/tmp/cortai/audio_extractor")
 DEFAULT_AUDIO_BUCKET = os.getenv("MINIO_BUCKET_AUDIO", "audio-raw")
+TMP_DIR = Path(tempfile.gettempdir()) / "cortai" / "audio_extractor"
 
 
 class AudioExtractorAdapter:
@@ -42,9 +43,11 @@ class AudioExtractorAdapter:
 
         if isinstance(raw_video_minio_path, str) and raw_video_minio_path:
             artifacts["raw_video_minio_path"] = raw_video_minio_path
-            audio_local_path, audio_minio_path = self._extract_from_raw_video(raw_video_minio_path)
+            audio_local_path, audio_minio_path = self._extract_from_raw_video(
+                raw_video_minio_path, TMP_DIR
+            )
         elif isinstance(audio_minio_path, str) and audio_minio_path:
-            audio_local_path = self._download_audio_to_tmp(audio_minio_path)
+            audio_local_path = self._download_audio_to_tmp(audio_minio_path, TMP_DIR)
         else:
             raise ValueError("ContractViolation: invalid payload values for audio_extractor")
 
@@ -64,23 +67,27 @@ class AudioExtractorAdapter:
             out_state["raw_video_minio_path"] = artifacts["raw_video_minio_path"]
         return out_state
 
-    def _extract_from_raw_video(self, raw_video_minio_path: str) -> tuple[str, str]:
-        local_video_path = self._download_to_tmp(raw_video_minio_path)
+    def _extract_from_raw_video(
+        self, raw_video_minio_path: str, tmp_dir: Path
+    ) -> tuple[str, str]:
+        local_video_path = self._download_to_tmp(raw_video_minio_path, tmp_dir)
         audio_local_path = self._extract_wav(local_video_path)
         audio_minio_path = self._upload_audio(audio_local_path)
         return audio_local_path, audio_minio_path
 
-    def _download_audio_to_tmp(self, audio_minio_path: str) -> str:
-        return self._download_to_tmp(audio_minio_path, suffix=".wav")
+    def _download_audio_to_tmp(self, audio_minio_path: str, tmp_dir: Path) -> str:
+        return self._download_to_tmp(audio_minio_path, tmp_dir, suffix=".wav")
 
-    def _download_to_tmp(self, minio_path: str, suffix: str | None = None) -> str:
+    def _download_to_tmp(
+        self, minio_path: str, tmp_dir: Path, suffix: str | None = None
+    ) -> str:
         parsed = parse_minio_path(minio_path)
         src_storage = MinioService()
         src_storage.bucket_name = parsed.bucket
         src_storage._ensure_bucket_exists()
 
         file_suffix = suffix or Path(parsed.key).suffix or ".bin"
-        local_path = TMP_DIR / f"{uuid.uuid4()}{file_suffix}"
+        local_path = tmp_dir / f"{uuid.uuid4()}{file_suffix}"
         src_storage.download_file(parsed.key, str(local_path))
         if not local_path.exists():
             raise RuntimeError("AudioExtractorError: download did not produce local file")
@@ -102,7 +109,12 @@ class AudioExtractorAdapter:
             "16000",
             str(audio_local_path),
         ]
-        proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        proc = subprocess.run(  # nosec B603
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
         if proc.returncode != 0:
             msg = (proc.stderr or proc.stdout or "").strip()
             raise OSError(f"FFmpegFailed: {msg[:500]}")
