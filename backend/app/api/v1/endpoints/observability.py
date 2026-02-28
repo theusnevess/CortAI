@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.metrics import CES_DEFAULT_VERSION, _emit_metrics_endpoint_timing
 from app.db.session import get_db
+from app.observability.collector_summary import get_collector_summary
 from app.observability.runtime_health import get_runtime_c1_health_cached, should_include_internal_status
 from app.version import get_app_version
 
@@ -639,6 +640,16 @@ async def _build_observability_overview_payload(
     c1_health = await get_runtime_c1_health_cached(db=db, db_stats=db_stats)
     read_path = await _get_read_path_compact(db=db, db_stats=db_stats)
     guardrails = await _get_guardrails_summary(db=db, db_stats=db_stats, window_minutes=15, last_events_limit=5)
+    try:
+        collector = await get_collector_summary(
+            db=db,
+            db_stats=db_stats,
+            execute_with_db_stats=_execute_with_db_stats,
+            window_minutes=15,
+            last_events_limit=5,
+        )
+    except Exception:
+        collector = None
 
     score = str(c1_health.get("score", "FAIL"))
     response = {
@@ -657,6 +668,7 @@ async def _build_observability_overview_payload(
         "c1_health": c1_health,
         "read_path": read_path,
         "guardrails": guardrails,
+        "collector": collector,
     }
     # Trust Banner e derivado do payload ja montado (O(1), sem consultas extras).
     response["trust"] = _derive_trust_banner(
