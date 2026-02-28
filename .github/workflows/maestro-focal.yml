@@ -44,5 +44,6 @@ jobs:
             tests/test_maestro_orchestrator.py \
             tests/test_internal_maestro_api.py \
             tests/test_audio_extractor_adapter.py \
+            tests/test_policy_bridge.py \
             tests/test_policy_engine.py \
             --noconftest
