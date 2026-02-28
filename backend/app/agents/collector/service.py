@@ -37,6 +37,11 @@ class CollectorAgent:
             'fragment_retries': 5,
         }
 
+        # O yt-dlp usa certifi por padrao quando disponivel. Neste runtime, o
+        # bundle valido e o store de CAs do sistema; por isso forcamos o modo
+        # no-certifi para alinhar o downloader ao mesmo trust store do requests.
+        ydl_opts['compat_opts'] = ['no-certifi']
+
         # Se temos cookies, passa para o yt-dlp para suportar vídeos privados/restritos
         if os.path.exists(cookie_file):
             ydl_opts['cookiefile'] = cookie_file
