@@ -2,6 +2,7 @@ import os  # Para operacoes de sistema de arquivos e variaveis de ambiente
 import re
 import socket
 import ssl
+import tempfile
 import uuid  # Para manipulacao de UUIDs
 from datetime import datetime  # Manipulacao de datas
 
@@ -84,7 +85,8 @@ class CollectorAgent:
     def __init__(self):
         self.storage = None
         # Caminho de download configurável (usa /tmp por padrão em containers)
-        self.download_path = os.getenv("COLLECTOR_DOWNLOAD_PATH", "/tmp/downloads")
+        default_download_path = os.path.join(tempfile.gettempdir(), "downloads")
+        self.download_path = os.getenv("COLLECTOR_DOWNLOAD_PATH", default_download_path)
         os.makedirs(self.download_path, exist_ok=True) # Garante que o diretório de download exista
 
     def process(self, url: str) -> dict:

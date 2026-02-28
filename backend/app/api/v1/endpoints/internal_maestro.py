@@ -1,5 +1,7 @@
 from time import perf_counter_ns
+import tempfile
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -36,7 +38,9 @@ class _DemoAudioExtractor:
 
     def process(self, state: dict, payload: dict | None = None) -> dict:
         next_state = dict(state)
-        next_state["audio_local_path"] = "/tmp/demo.wav"
+        next_state["audio_local_path"] = str(
+            Path(tempfile.gettempdir()) / "cortai" / "demo.wav"
+        )
         next_state["audio_minio_path"] = "audio-raw/demo.wav"
         next_state.setdefault("artifacts", {})
         next_state["artifacts"]["audio_local_path"] = next_state["audio_local_path"]

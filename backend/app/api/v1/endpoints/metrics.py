@@ -1934,7 +1934,7 @@ def _sanitize_error_message(message: Any) -> str | None:
         return None
     sanitized = message
     sanitized = sanitized.replace("\\", "/")
-    for token in ("/tmp/", "storage/", "videos-raw/", ".mp4", ".wav"):
+    for token in ("/tmp/", "storage/", "videos-raw/", ".mp4", ".wav"):  # nosec B108
         if token in sanitized:
             sanitized = sanitized.replace(token, "<path>/")
     return sanitized[:500]

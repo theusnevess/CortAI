@@ -227,6 +227,11 @@ def cleanup_metrics(sync_session_factory):
             )
         )
         session.execute(
+            delete(ObservationRecord).where(
+                ObservationRecord.facts["event_type"].astext == "collector_run"
+            )
+        )
+        session.execute(
             delete(ObservationRecord).where(ObservationRecord.process_id.like("P_METRICS_DAILY_%"))
         )
         session.execute(
