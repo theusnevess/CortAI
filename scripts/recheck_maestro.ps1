@@ -81,7 +81,7 @@ function Invoke-JsonRequest {
             UseBasicParsing = $true
             ErrorAction  = "Stop"
         }
-        if ($null -ne $Body) {
+        if ($PSBoundParameters.ContainsKey("Body")) {
             $params.ContentType = "application/json"
             $params.Body = $Body
         }
