@@ -3,7 +3,14 @@ from time import perf_counter_ns
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1.endpoints import videos, metrics, observability, status, internal_observability_ui
+from app.api.v1.endpoints import (
+    videos,
+    metrics,
+    observability,
+    status,
+    internal_observability_ui,
+    internal_maestro,
+)
 from app.cognitive_core import run_cognitive_cycle
 from app.version import get_app_version
 from app.worker import execute_action
@@ -52,6 +59,7 @@ app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])
 app.include_router(observability.router, prefix="/api/v1/observability", tags=["observability"])
 app.include_router(status.router, prefix="/api/v1", tags=["status"])
 app.include_router(internal_observability_ui.router)
+app.include_router(internal_maestro.router)
 
 # --- Rotas (Endpoints) ---
 
