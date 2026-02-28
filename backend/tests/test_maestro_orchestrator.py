@@ -107,7 +107,7 @@ async def test_maestro_orchestrator_runs_linear_pipeline_with_audio_extractor(ca
     assert result.state["audio_local_path"] == "/tmp/sample.wav"
     assert result.state["audio_minio_path"] == "audio-raw/sample.wav"
     assert result.state["segments"][0]["segment_id"] == 0
-    assert result.state["transcriptions"][0]["text"] == "broken-for-branch-protection"
+    assert result.state["transcriptions"][0]["text"] == "hello"
     assert result.state["job_id"] == result.job.id
     assert any(record.message == "maestro_step_started" for record in caplog.records)
     assert any(getattr(record, "job_id", None) == result.job.id for record in caplog.records)
