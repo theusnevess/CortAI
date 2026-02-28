@@ -447,3 +447,23 @@ Extensao de produto (sobre o painel MVP):
 - `Trust Banner` (`red|yellow|green`) integrado ao payload, com derivacao deterministica e precedencia testada;
 - `Action Recommendation` (MVP) integrada ao payload, com acao recomendada deterministica (`run_warmup`, `monitor`, `reduce_force_live_burst`, `inspect_upstream_path`, `open_report`, `none`) e precedencia testada via endpoint real.
 - `Internal Observability UI` (MVP) em `GET /internal/observability`, SSR simples com gate restrito, sem query nova e sem logica duplicada do painel.
+
+## Maestro Runtime v0.2
+
+Status:
+- implementado e validado em testes focais.
+
+Inclui:
+- persistencia leve de jobs do Maestro;
+- migration `a7f9e1d2c3b4_add_maestro_jobs`;
+- endpoint interno `GET /internal/maestro/jobs/{job_id}`;
+- integracao do `POST /internal/maestro/run` com criacao e atualizacao do job (`running -> done|failed`), preservando `demo=1`.
+
+Validacao focal:
+- `tests/test_maestro_repository.py` ✅
+- `tests/test_internal_maestro_api.py` ✅
+- `tests/test_maestro_orchestrator.py` ✅
+
+Pendencia operacional (bloqueio de ambiente neste host):
+- `alembic upgrade head` nao executado por indisponibilidade de DB/Docker local;
+- smoke real `POST/GET` com persistencia nao executado neste host.
