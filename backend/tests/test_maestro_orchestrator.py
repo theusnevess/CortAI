@@ -246,3 +246,104 @@ async def test_maestro_contract_hardening_fails_when_segments_invalid():
     assert result.job.status == "failed"
     assert result.job.step == "segmenter"
     assert "ContractViolation: segment.end_ms must be int>start_ms" in (result.job.error or "")
+
+
+@pytest.mark.anyio
+async def test_maestro_contract_hardening_fails_when_transcriptions_missing():
+    class _TranscriberNoTranscriptions:
+        def process(self, state, payload=None):
+            next_state = dict(state)
+            next_state.setdefault("artifacts", {})
+            return next_state
+
+    orchestrator = MaestroOrchestrator(
+        collector=_CollectorAudioReadyOk(),
+        audio_extractor=_AudioExtractorOk(),
+        segmenter=_SegmenterOk(),
+        transcriber=_TranscriberNoTranscriptions(),
+    )
+
+    result = await orchestrator.run({"input_ref": "https://example.com/audio"})
+
+    assert result.job.status == "failed"
+    assert result.job.step == "transcriber"
+    assert "ContractViolation: transcriber must provide transcriptions as list" in (
+        result.job.error or ""
+    )
+
+
+@pytest.mark.anyio
+async def test_maestro_contract_hardening_fails_when_transcriptions_empty():
+    class _TranscriberEmptyTranscriptions:
+        def process(self, state, payload=None):
+            next_state = dict(state)
+            next_state["transcriptions"] = []
+            next_state.setdefault("artifacts", {})
+            return next_state
+
+    orchestrator = MaestroOrchestrator(
+        collector=_CollectorAudioReadyOk(),
+        audio_extractor=_AudioExtractorOk(),
+        segmenter=_SegmenterOk(),
+        transcriber=_TranscriberEmptyTranscriptions(),
+    )
+
+    result = await orchestrator.run({"input_ref": "https://example.com/audio"})
+
+    assert result.job.status == "failed"
+    assert result.job.step == "transcriber"
+    assert "ContractViolation: transcriber transcriptions must be non-empty list" in (
+        result.job.error or ""
+    )
+
+
+@pytest.mark.anyio
+async def test_maestro_contract_hardening_fails_when_transcription_item_invalid():
+    class _TranscriberInvalidItem:
+        def process(self, state, payload=None):
+            next_state = dict(state)
+            next_state["transcriptions"] = [{}]
+            next_state.setdefault("artifacts", {})
+            return next_state
+
+    orchestrator = MaestroOrchestrator(
+        collector=_CollectorAudioReadyOk(),
+        audio_extractor=_AudioExtractorOk(),
+        segmenter=_SegmenterOk(),
+        transcriber=_TranscriberInvalidItem(),
+    )
+
+    result = await orchestrator.run({"input_ref": "https://example.com/audio"})
+
+    assert result.job.status == "failed"
+    assert result.job.step == "transcriber"
+    assert (
+        "ContractViolation: transcriber transcriptions[0].text must be non-empty string"
+        in (result.job.error or "")
+    )
+
+
+@pytest.mark.anyio
+async def test_maestro_contract_hardening_fails_when_transcriber_optional_invalid():
+    class _TranscriberInvalidOptional:
+        def process(self, state, payload=None):
+            next_state = dict(state)
+            next_state["transcriptions"] = [{"text": "ok"}]
+            next_state["language"] = 123
+            next_state.setdefault("artifacts", {})
+            return next_state
+
+    orchestrator = MaestroOrchestrator(
+        collector=_CollectorAudioReadyOk(),
+        audio_extractor=_AudioExtractorOk(),
+        segmenter=_SegmenterOk(),
+        transcriber=_TranscriberInvalidOptional(),
+    )
+
+    result = await orchestrator.run({"input_ref": "https://example.com/audio"})
+
+    assert result.job.status == "failed"
+    assert result.job.step == "transcriber"
+    assert "ContractViolation: transcriber language must be non-empty string when present" in (
+        result.job.error or ""
+    )
