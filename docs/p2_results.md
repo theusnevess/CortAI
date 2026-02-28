@@ -451,7 +451,7 @@ Extensao de produto (sobre o painel MVP):
 ## Maestro Runtime v0.2
 
 Status:
-- implementado e validado em testes focais.
+- implementado e validado operacionalmente.
 
 Inclui:
 - persistencia leve de jobs do Maestro;
@@ -464,6 +464,11 @@ Validacao focal:
 - `tests/test_internal_maestro_api.py` ✅
 - `tests/test_maestro_orchestrator.py` ✅
 
-Pendencia operacional (bloqueio de ambiente neste host):
-- `alembic upgrade head` nao executado por indisponibilidade de DB/Docker local;
-- smoke real `POST/GET` com persistencia nao executado neste host.
+Validacao operacional:
+- `python -m alembic upgrade head` executado com sucesso no `cortai_api`;
+- `alembic current` em `a7f9e1d2c3b4 (head)`;
+- `POST /internal/maestro/run?demo=1` -> `done` persistido e recuperado via `GET /internal/maestro/jobs/{job_id}`;
+- `POST /internal/maestro/run` -> `failed` controlado em `collector`, persistido e recuperado via `GET /internal/maestro/jobs/{job_id}`.
+
+Observacao:
+- o caminho real falhou por ambiente externo de coleta (`SSL/CERTIFICATE_VERIFY_FAILED` no coletor), nao por erro do runtime do Maestro.
