@@ -85,3 +85,95 @@ def derive_operational_policy(collector_summary: dict[str, Any] | None) -> dict[
         "recommendation": recommendation,
         "as_of": _utc_now_iso(),
     }
+
+
+def derive_policy_bridge(
+    collector_summary: dict[str, Any] | None,
+    *,
+    as_of: str | None = None,
+) -> dict[str, Any] | None:
+    """
+    Policy bridge v0.2.
+
+    Gera um bloco operacional aditivo e acionavel para o overview sem alterar
+    trust/recommendation existentes e sem depender de banco.
+    """
+    if not collector_summary:
+        return None
+
+    events = collector_summary.get("events") or {}
+    success = int(events.get("success") or 0)
+    failed = int(events.get("failed") or 0)
+
+    by_error_type = collector_summary.get("by_error_type") or {}
+    normalized_errors: dict[str, int] = {}
+    for key, value in by_error_type.items():
+        if key is None:
+            continue
+        try:
+            normalized_errors[str(key)] = int(value or 0)
+        except Exception:
+            continue
+
+    total = success + failed
+    failure_rate = (failed / total) if total > 0 else 0.0
+
+    severity = "info"
+    if failed >= 3 or (failed >= 2 and failed > success) or failure_rate >= 0.50:
+        severity = "critical"
+    elif failed >= 1 or failure_rate >= 0.10:
+        severity = "warn"
+
+    if normalized_errors.get("ssl_cert_verify_failed", 0) > 0:
+        severity = "critical"
+    elif normalized_errors.get("dns_failed", 0) > 0 or normalized_errors.get("timeout", 0) > 0:
+        severity = "warn"
+
+    if severity == "info":
+        headline = "Coleta estavel na janela recente."
+        next_actions = ["Manter monitoramento."]
+    else:
+        headline = "Coleta com falhas na janela recente."
+        next_actions = [
+            "Verificar ultimos eventos do coletor e confirmar se e flake ou padrao.",
+            "Reduzir variaveis: testar com smoke-assets e comparar com URL real.",
+            "Se persistir, abrir report com exemplos (error_type + http_status).",
+        ]
+
+        if normalized_errors.get("ssl_cert_verify_failed", 0) > 0:
+            headline = "Falhas de TLS/CA detectadas no coletor."
+            next_actions = [
+                "Verificar CA bundle do container (SSL_CERT_FILE/REQUESTS_CA_BUNDLE).",
+                "Revalidar smoke-assets e uma URL real com TLS.",
+                "Se persistir, coletar chain/issuer e registrar incidente.",
+            ]
+        elif normalized_errors.get("http_4xx", 0) > 0:
+            headline = "Falhas HTTP 4xx detectadas no coletor."
+            next_actions = [
+                "Confirmar URL/redirects e se o recurso existe (4xx nao e instabilidade do sistema).",
+                "Testar com smoke-assets para isolar rede vs origem.",
+                "Se 4xx for recorrente em fontes reais, ajustar estrategia de coleta.",
+            ]
+        elif normalized_errors.get("http_5xx", 0) > 0:
+            headline = "Falhas HTTP 5xx detectadas no coletor."
+            next_actions = [
+                "Verificar disponibilidade do upstream (5xx pode ser intermitente).",
+                "Reexecutar apos curto intervalo e comparar taxa de falha.",
+                "Se persistir, registrar e mitigar com backoff/fila (proximo ciclo).",
+            ]
+
+    cleaned_actions = [
+        action.strip()
+        for action in next_actions
+        if isinstance(action, str) and action.strip()
+    ][:3]
+    if not cleaned_actions:
+        cleaned_actions = ["Manter monitoramento."]
+
+    return {
+        "version": "v0.2",
+        "severity": severity,
+        "headline": headline,
+        "next_actions": cleaned_actions,
+        "as_of": as_of,
+    }
