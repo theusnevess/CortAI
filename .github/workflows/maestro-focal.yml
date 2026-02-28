@@ -47,5 +47,6 @@ jobs:
             tests/test_operational_decision_projection.py \
             tests/test_policy_bridge.py \
             tests/test_policy_decision.py \
+            tests/test_policy_trust_harmonization.py \
             tests/test_policy_engine.py \
             --noconftest
