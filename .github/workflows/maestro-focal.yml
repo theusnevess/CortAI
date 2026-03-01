@@ -47,6 +47,7 @@ jobs:
             tests/test_operational_decision_projection.py \
             tests/test_policy_bridge.py \
             tests/test_policy_decision.py \
+            tests/test_decision_audit_log.py \
             tests/test_status_public_policy_projection.py \
             tests/test_policy_trust_harmonization.py \
             tests/test_webhook_observability.py \
