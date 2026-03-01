@@ -17,6 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.metrics import _emit_metrics_endpoint_timing
 from app.api.v1.endpoints.observability import _build_observability_overview_payload
+from app.decision_core.projection import (
+    extract_optional_policy_fields as _core_extract_optional_policy_fields,
+    to_public_status_action as _core_to_public_status_action,
+)
 from app.db.session import engine
 from app.db.session import get_db
 from app.observability.webhook_metrics import WebhookMetrics
@@ -39,23 +43,6 @@ logger = logging.getLogger(__name__)
 
 _C1_HEALTH_STATUS_WINDOW_MINUTES = 15
 _PUBLIC_STATUS_VERSION = "v1"
-_PUBLIC_ACTION_MAP = {
-    "run_warmup": "inspect",
-    "reduce_force_live_burst": "monitor",
-    "inspect_upstream_path": "inspect",
-    "open_report": "monitor",
-    "monitor": "monitor",
-    "none": "none",
-}
-_PUBLIC_SIGNAL_FORBIDDEN_SUBSTRINGS = (
-    "source_ref",
-    "minio",
-    "job_id",
-    "query_key",
-    "key=",
-    "/tmp",
-    "/storage/",
-)
 _public_webhook_last_state: str | None = None
 
 
@@ -176,72 +163,13 @@ def _read_read_api_config() -> dict:
 
 
 def _to_public_status_action(action: str | None) -> str:
-    normalized = str(action or "").strip().lower()
-    return _PUBLIC_ACTION_MAP.get(normalized, "inspect")
+    """Wrapper de compatibilidade para o mapeamento publico do decision_core."""
+    return _core_to_public_status_action(action)
 
 
 def _extract_optional_policy_fields(panel: dict[str, Any]) -> dict[str, Any]:
-    """
-    Projeta campos opcionais e sanitizados de policy para /status/public.
-    Nunca expoe identificadores internos, paths, nem estruturas complexas.
-    """
-    policy = panel.get("policy")
-    if not isinstance(policy, dict):
-        return {}
-
-    out: dict[str, Any] = {}
-
-    state = policy.get("state")
-    decision = policy.get("decision")
-    score = policy.get("score")
-    signals = policy.get("signals")
-
-    if isinstance(state, str) and state:
-        out["decision_state"] = state
-    else:
-        legacy_state = policy.get("system_state")
-        if isinstance(legacy_state, str) and legacy_state:
-            out["decision_state"] = legacy_state
-
-    if isinstance(decision, str) and decision:
-        out["decision_action"] = decision
-
-    if isinstance(score, int):
-        out["score"] = score
-    else:
-        legacy_score = policy.get("trust_score")
-        if isinstance(legacy_score, int):
-            out["score"] = legacy_score
-
-    safe_signals: dict[str, Any] = {}
-    if isinstance(signals, dict):
-        for key, value in signals.items():
-            if not isinstance(key, str) or not key:
-                continue
-            if any(token in key.lower() for token in _PUBLIC_SIGNAL_FORBIDDEN_SUBSTRINGS):
-                continue
-            if value is None:
-                continue
-            if isinstance(value, (bool, int, float, str)):
-                safe_signals[key] = value
-                continue
-            if isinstance(value, list) and all(isinstance(item, (bool, int, float, str)) for item in value):
-                safe_signals[key] = value
-    elif isinstance(signals, list):
-        sanitized_list = [
-            item
-            for item in signals
-            if isinstance(item, str)
-            and item
-            and not any(token in item.lower() for token in _PUBLIC_SIGNAL_FORBIDDEN_SUBSTRINGS)
-        ]
-        if sanitized_list:
-            safe_signals["items"] = sanitized_list
-
-    if safe_signals:
-        out["signals"] = safe_signals
-
-    return out
+    """Wrapper de compatibilidade para a projection sanitizada do decision_core."""
+    return _core_extract_optional_policy_fields(panel)
 
 
 def _reset_public_webhook_state_for_tests() -> None:
