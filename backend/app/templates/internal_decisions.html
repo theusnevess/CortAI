@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Decision History</title>
+  <style>
+    :root {
+      --bg: #0b1118;
+      --panel: #111a24;
+      --line: #223043;
+      --fg: #edf3fb;
+      --muted: #98a8bc;
+      --accent: #60a5fa;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --ok: #22c55e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      background: linear-gradient(180deg, #091018 0%, #0d1520 100%);
+      color: var(--fg);
+    }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 24px; }
+    .hero {
+      margin-bottom: 18px;
+      padding: 18px 20px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background:
+        radial-gradient(circle at top right, rgba(96,165,250,0.18), transparent 32%),
+        linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+    }
+    .hero h1 { margin: 0; font-size: 24px; }
+    .muted { color: var(--muted); }
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-top: 12px;
+    }
+    .btn, .toggle {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.03);
+      color: var(--fg);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 13px;
+    }
+    .btn { cursor: pointer; }
+    .btn:hover { border-color: rgba(96,165,250,0.45); }
+    .toggle { display: inline-flex; align-items: center; gap: 8px; }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.9fr);
+      gap: 16px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+      min-height: 220px;
+    }
+    .card-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .card-title { font-size: 15px; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td {
+      padding: 10px 12px;
+      text-align: left;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      font-size: 13px;
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 500; }
+    tbody tr { cursor: pointer; }
+    tbody tr:hover { background: rgba(96,165,250,0.06); }
+    tbody tr.is-active { background: rgba(96,165,250,0.12); }
+    .pill {
+      display: inline-flex;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      border: 1px solid var(--line);
+    }
+    .s-stable { color: var(--ok); border-color: rgba(34,197,94,0.35); }
+    .s-degraded { color: var(--warn); border-color: rgba(245,158,11,0.35); }
+    .s-action_required { color: #fca5a5; border-color: rgba(239,68,68,0.35); }
+    .body { padding: 16px; }
+    .empty {
+      padding: 28px 16px;
+      text-align: center;
+      color: var(--muted);
+    }
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 14px;
+      margin-bottom: 16px;
+    }
+    .meta-key { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    pre {
+      margin: 0;
+      padding: 14px;
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 12px;
+      background: rgba(0,0,0,0.18);
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .error {
+      border: 1px solid rgba(239,68,68,0.35);
+      background: rgba(239,68,68,0.10);
+      color: #fecaca;
+      padding: 12px;
+      border-radius: 12px;
+      font-size: 13px;
+    }
+    @media (max-width: 960px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>Decision History</h1>
+      <div class="muted">Histórico interno, read-only e sanitizado. Sem escrita, sem side effects.</div>
+      <div class="toolbar">
+        <button id="refresh-btn" class="btn" type="button">Atualizar lista</button>
+        <label class="toggle">
+          <input id="auto-refresh" type="checkbox"/>
+          <span>Auto-refresh 30s</span>
+        </label>
+        <span id="refresh-state" class="muted">Pronto</span>
+      </div>
+    </section>
+
+    <section class="layout">
+      <article class="card">
+        <div class="card-head">
+          <div class="card-title">Decisions</div>
+          <div class="muted" id="list-count">{{ items|length }} items</div>
+        </div>
+        {% if items %}
+        <table>
+          <thead>
+            <tr>
+              <th>ts</th>
+              <th>state</th>
+              <th>decision</th>
+              <th>score</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="decisions-tbody">
+            {% for item in items %}
+            {% set policy = item.get("policy", {}) %}
+            <tr data-decision-id="{{ item.get('decision_id') }}">
+              <td>{{ item.get("ts", "—") }}</td>
+              <td><span class="pill s-{{ policy.get('state', 'stable') }}">{{ policy.get("state", "—") }}</span></td>
+              <td>{{ policy.get("decision", "—") }}</td>
+              <td>{{ policy.get("score", "—") }}</td>
+              <td><button class="btn" type="button" data-open="{{ item.get('decision_id') }}">ver</button></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <div id="decisions-empty" class="empty">Nenhuma decisão registrada ainda.</div>
+        <table style="display:none;"><tbody id="decisions-tbody"></tbody></table>
+        {% endif %}
+      </article>
+
+      <aside class="card">
+        <div class="card-head">
+          <div class="card-title">Decision Detail</div>
+        </div>
+        <div class="body">
+          <div id="detail-error" class="error" style="display:none;"></div>
+          <div id="detail-empty" class="empty">Selecione uma decisão para ver o payload sanitizado.</div>
+          <div id="detail-content" style="display:none;">
+            <div class="meta">
+              <div>
+                <div class="meta-key">decision_id</div>
+                <div id="detail-id">—</div>
+              </div>
+              <div>
+                <div class="meta-key">ts</div>
+                <div id="detail-ts">—</div>
+              </div>
+              <div>
+                <div class="meta-key">state</div>
+                <div id="detail-state">—</div>
+              </div>
+              <div>
+                <div class="meta-key">decision</div>
+                <div id="detail-decision">—</div>
+              </div>
+            </div>
+            <pre id="detail-json"></pre>
+          </div>
+        </div>
+      </aside>
+    </section>
+  </div>
+
+  <script id="decisions-data" type="application/json">{{ items|tojson }}</script>
+  <script>
+    ;(() => {
+      const listUrl = "{{ decisions_api_url }}";
+      const detailBase = "{{ detail_api_base }}";
+      const headers = { "X-Internal-Status": "1" };
+      const refreshBtn = document.getElementById("refresh-btn");
+      const autoRefresh = document.getElementById("auto-refresh");
+      const refreshState = document.getElementById("refresh-state");
+      const tbody = document.getElementById("decisions-tbody");
+      const listCount = document.getElementById("list-count");
+      const detailError = document.getElementById("detail-error");
+      const detailEmpty = document.getElementById("detail-empty");
+      const detailContent = document.getElementById("detail-content");
+      const detailId = document.getElementById("detail-id");
+      const detailTs = document.getElementById("detail-ts");
+      const detailState = document.getElementById("detail-state");
+      const detailDecision = document.getElementById("detail-decision");
+      const detailJson = document.getElementById("detail-json");
+      const emptyNode = document.getElementById("decisions-empty");
+      let timer = null;
+      let selectedId = null;
+
+      function setStatus(text) {
+        if (refreshState) refreshState.textContent = text;
+      }
+
+      function renderDetail(payload) {
+        detailError.style.display = "none";
+        detailEmpty.style.display = "none";
+        detailContent.style.display = "block";
+        detailId.textContent = payload.decision_id || "—";
+        detailTs.textContent = payload.ts || "—";
+        detailState.textContent = payload.policy?.state || "—";
+        detailDecision.textContent = payload.policy?.decision || "—";
+        detailJson.textContent = JSON.stringify(payload.policy || {}, null, 2);
+      }
+
+      function renderError(message) {
+        detailContent.style.display = "none";
+        detailEmpty.style.display = "none";
+        detailError.style.display = "block";
+        detailError.textContent = message;
+      }
+
+      function markSelected(id) {
+        selectedId = id;
+        if (!tbody) return;
+        tbody.querySelectorAll("tr").forEach((row) => {
+          row.classList.toggle("is-active", row.dataset.decisionId === id);
+        });
+      }
+
+      async function loadDetail(id) {
+        markSelected(id);
+        try {
+          const response = await fetch(`${detailBase}/${encodeURIComponent(id)}`, {
+            method: "GET",
+            cache: "no-store",
+            headers,
+          });
+          if (response.status === 404) {
+            renderError("Acesso interno necessário.");
+            return;
+          }
+          if (!response.ok) {
+            renderError(`Falha ao carregar decisão (${response.status}).`);
+            return;
+          }
+          renderDetail(await response.json());
+        } catch (_) {
+          renderError("Falha ao carregar decisão.");
+        }
+      }
+
+      function buildRow(item) {
+        const tr = document.createElement("tr");
+        tr.dataset.decisionId = item.decision_id;
+        const policy = item.policy || {};
+        tr.innerHTML = `
+          <td>${item.ts || "—"}</td>
+          <td><span class="pill s-${policy.state || "stable"}">${policy.state || "—"}</span></td>
+          <td>${policy.decision || "—"}</td>
+          <td>${policy.score ?? "—"}</td>
+          <td><button class="btn" type="button" data-open="${item.decision_id}">ver</button></td>
+        `;
+        return tr;
+      }
+
+      async function refreshList() {
+        setStatus("Atualizando...");
+        try {
+          const response = await fetch(`${listUrl}?limit=20`, {
+            method: "GET",
+            cache: "no-store",
+            headers,
+          });
+          if (response.status === 404) {
+            renderError("Acesso interno necessário.");
+            setStatus("Gate interno ausente");
+            return;
+          }
+          if (!response.ok) {
+            setStatus(`Falha na lista (${response.status})`);
+            return;
+          }
+          const body = await response.json();
+          const items = Array.isArray(body.items) ? body.items : [];
+          if (tbody) {
+            tbody.innerHTML = "";
+            items.forEach((item) => tbody.appendChild(buildRow(item)));
+          }
+          if (listCount) {
+            listCount.textContent = `${items.length} items`;
+          }
+          if (emptyNode) {
+            emptyNode.style.display = items.length ? "none" : "block";
+          }
+          if (selectedId && items.some((item) => item.decision_id === selectedId)) {
+            markSelected(selectedId);
+          }
+          setStatus(`Atualizado: ${new Date().toLocaleTimeString()}`);
+        } catch (_) {
+          setStatus("Falha ao atualizar lista");
+        }
+      }
+
+      document.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        const id = target.dataset.open || target.closest("tr")?.dataset.decisionId;
+        if (id) {
+          event.preventDefault();
+          loadDetail(id);
+        }
+      });
+
+      refreshBtn?.addEventListener("click", refreshList);
+      autoRefresh?.addEventListener("change", () => {
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
+        }
+        if (autoRefresh.checked) {
+          timer = window.setInterval(refreshList, 30000);
+        }
+      });
+
+      const initialItemsNode = document.getElementById("decisions-data");
+      if (initialItemsNode) {
+        try {
+          const initialItems = JSON.parse(initialItemsNode.textContent || "[]");
+          if (Array.isArray(initialItems) && initialItems.length > 0) {
+            loadDetail(initialItems[0].decision_id);
+          }
+        } catch (_) {
+          // no-op
+        }
+      }
+    })();
+  </script>
+</body>
+</html>
