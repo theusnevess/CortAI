@@ -16,8 +16,18 @@ _PUBLIC_SIGNAL_FORBIDDEN_SUBSTRINGS = (
     "job_id",
     "query_key",
     "key=",
+    "?key=",
+    "?token=",
     "/tmp",
     "/storage/",
+    "/app/",
+    "/etc/",
+    "token",
+    "secret",
+    "authorization",
+    "bearer ",
+    "akia",
+    "-----begin",
 )
 
 
@@ -25,6 +35,11 @@ def to_public_status_action(action: str | None) -> str:
     """Mapeia recommendation.action para o enum publico estavel."""
     normalized = str(action or "").strip().lower()
     return _PUBLIC_ACTION_MAP.get(normalized, "inspect")
+
+
+def _contains_forbidden_token(value: str) -> bool:
+    lowered = value.lower()
+    return any(token in lowered for token in _PUBLIC_SIGNAL_FORBIDDEN_SUBSTRINGS)
 
 
 def project_operational_decision(policy: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -81,18 +96,29 @@ def extract_optional_policy_fields(panel: dict[str, Any]) -> dict[str, Any]:
                 continue
             if value is None:
                 continue
-            if isinstance(value, (bool, int, float, str)):
+            if isinstance(value, str):
+                if _contains_forbidden_token(value):
+                    continue
+                safe_signals[key] = value
+                continue
+            if isinstance(value, (bool, int, float)):
                 safe_signals[key] = value
                 continue
             if isinstance(value, list) and all(isinstance(item, (bool, int, float, str)) for item in value):
-                safe_signals[key] = value
+                sanitized_items = [
+                    item
+                    for item in value
+                    if not (isinstance(item, str) and _contains_forbidden_token(item))
+                ]
+                if sanitized_items:
+                    safe_signals[key] = sanitized_items
     elif isinstance(signals, list):
         sanitized_list = [
             item
             for item in signals
             if isinstance(item, str)
             and item
-            and not any(token in item.lower() for token in _PUBLIC_SIGNAL_FORBIDDEN_SUBSTRINGS)
+            and not _contains_forbidden_token(item)
         ]
         if sanitized_list:
             safe_signals["items"] = sanitized_list
