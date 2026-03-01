@@ -109,6 +109,35 @@ def test_maybe_append_respects_flag_off(monkeypatch) -> None:
     assert called is False
 
 
+def test_maybe_append_calls_writer_once_when_flag_on(monkeypatch) -> None:
+    import app.observability.decision_audit_log as mod
+
+    called = 0
+
+    async def _fake_append(*args: Any, **kwargs: Any) -> None:
+        nonlocal called
+        called += 1
+
+    monkeypatch.setattr(mod, "append_decision_audit", _fake_append)
+    monkeypatch.setenv("DECISION_AUDIT_LOG", "1")
+
+    wrote = asyncio.run(
+        maybe_append_decision_audit(
+            FakeSession(),
+            source="observability_overview",
+            request_id=None,
+            response={
+                "policy": {"version": "v0.2", "state": "degraded", "decision": "monitor", "score": 55},
+                "operational_decision": {"state": "degraded", "action": "monitor"},
+                "as_of": "2026-03-01T00:00:00Z",
+            },
+        )
+    )
+
+    assert wrote is True
+    assert called == 1
+
+
 def test_append_skips_duplicate_inside_dedup_window(monkeypatch) -> None:
     class DummyRow:
         def __init__(self, **kwargs: Any) -> None:
@@ -191,6 +220,44 @@ def test_append_writes_again_outside_dedup_window(monkeypatch) -> None:
     )
 
     assert session.committed is True
+    assert len(session.added) == 1
+
+
+def test_append_is_best_effort_when_commit_fails(monkeypatch) -> None:
+    class DummyRow:
+        def __init__(self, **kwargs: Any) -> None:
+            self.payload = kwargs["payload"]
+            self.kwargs = kwargs
+
+    class BrokenCommitSession(FakeSession):
+        async def commit(self) -> None:
+            raise RuntimeError("db write failed")
+
+    import app.observability.decision_audit_log as mod
+
+    monkeypatch.setattr(mod, "DecisionAuditLog", DummyRow)
+
+    session = BrokenCommitSession()
+    policy = {
+        "version": "v0.2",
+        "state": "degraded",
+        "score": 55,
+        "decision": "monitor",
+        "signals": {"ok": True},
+    }
+
+    asyncio.run(
+        append_decision_audit(
+            session,
+            source="observability_overview",
+            request_id=None,
+            policy=policy,
+            operational_decision={"state": "degraded", "action": "monitor"},
+            as_of="2026-03-01T12:04:00Z",
+        )
+    )
+
+    assert session.rolled_back is True
     assert len(session.added) == 1
 
 
