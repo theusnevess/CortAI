@@ -1,0 +1,16 @@
+{
+  "event_id": "f8ce8d43-eb89-4f0d-b1b4-f0c44eff71da",
+  "trace_id": "trace-20260301-0004",
+  "causation_id": "aa8aa916-b682-426a-b7e2-233ce49e14b1",
+  "source": "cortai.worker",
+  "type": "maestro.job_finished",
+  "version": "1",
+  "ts": "2026-03-01T00:01:30Z",
+  "payload": {
+    "job_id": "job-20260301-0001",
+    "status": "done",
+    "step": null,
+    "duration_ms": 30214,
+    "error_type": null
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "event_id": "7d09cf13-e8e3-4db4-ac1e-3102972f6b52",
+  "trace_id": "trace-20260301-0003",
+  "causation_id": "b6bb65dc-2c1c-44d7-ae57-f2381b85dd79",
+  "source": "cortai.api",
+  "type": "webhook.delivery_failed",
+  "version": "1",
+  "ts": "2026-03-01T00:00:12Z",
+  "payload": {
+    "error_kind": "http_5xx",
+    "status_code": 503,
+    "retryable": true
+  }
+}

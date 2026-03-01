@@ -1,0 +1,19 @@
+{
+  "event_id": "8c1e3e4f-c35c-4f06-a7d7-5b2f09fa1d50",
+  "trace_id": "trace-20260301-0001",
+  "causation_id": null,
+  "source": "cortai.api",
+  "type": "decision.created",
+  "version": "1",
+  "ts": "2026-03-01T00:00:00Z",
+  "payload": {
+    "decision_id": "dec-20260301-0001",
+    "policy": {
+      "version": "v0.2",
+      "state": "degraded",
+      "decision": "monitor"
+    },
+    "score": 72,
+    "as_of": "2026-03-01T00:00:00Z"
+  }
+}

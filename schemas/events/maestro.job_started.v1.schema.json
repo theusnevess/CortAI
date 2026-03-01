@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/events/maestro.job_started.v1.schema.json",
+  "title": "maestro.job_started v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "job_id",
+    "input_kind",
+    "demo_mode"
+  ],
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "input_kind": {
+      "type": "string",
+      "enum": ["url", "audio_minio", "raw_video_minio"]
+    },
+    "demo_mode": {
+      "type": "boolean"
+    }
+  }
+}

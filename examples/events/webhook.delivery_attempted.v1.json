@@ -1,0 +1,15 @@
+{
+  "event_id": "b6bb65dc-2c1c-44d7-ae57-f2381b85dd79",
+  "trace_id": "trace-20260301-0002",
+  "causation_id": "8c1e3e4f-c35c-4f06-a7d7-5b2f09fa1d50",
+  "source": "cortai.api",
+  "type": "webhook.delivery_attempted",
+  "version": "1",
+  "ts": "2026-03-01T00:00:10Z",
+  "payload": {
+    "destination_kind": "status_webhook",
+    "status_code": 200,
+    "latency_ms": 84,
+    "ok": true
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/events/decision.created.v1.schema.json",
+  "title": "decision.created v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision_id",
+    "policy",
+    "score",
+    "as_of"
+  ],
+  "properties": {
+    "decision_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "state",
+        "decision"
+      ],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "state": {
+          "type": "string",
+          "enum": ["stable", "degraded", "action_required"]
+        },
+        "decision": {
+          "type": "string",
+          "enum": ["monitor", "inspect", "investigate_now"]
+        }
+      }
+    },
+    "score": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "as_of": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/events/webhook.delivery_attempted.v1.schema.json",
+  "title": "webhook.delivery_attempted v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "destination_kind",
+    "status_code",
+    "latency_ms",
+    "ok"
+  ],
+  "properties": {
+    "destination_kind": {
+      "type": "string",
+      "enum": ["status_webhook"]
+    },
+    "status_code": {
+      "type": ["integer", "null"],
+      "minimum": 100,
+      "maximum": 599
+    },
+    "latency_ms": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "ok": {
+      "type": "boolean"
+    }
+  }
+}

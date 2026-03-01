@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/events/maestro.job_finished.v1.schema.json",
+  "title": "maestro.job_finished v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "job_id",
+    "status",
+    "step",
+    "duration_ms",
+    "error_type"
+  ],
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["running", "done", "failed"]
+    },
+    "step": {
+      "type": ["string", "null"]
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "error_type": {
+      "type": ["string", "null"]
+    }
+  }
+}
