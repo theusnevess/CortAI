@@ -10,6 +10,7 @@ from app.api.v1.endpoints import (
     status,
     internal_observability_ui,
     internal_maestro,
+    internal_decisions,
 )
 from app.cognitive_core import run_cognitive_cycle
 from app.version import get_app_version
@@ -60,6 +61,7 @@ app.include_router(observability.router, prefix="/api/v1/observability", tags=["
 app.include_router(status.router, prefix="/api/v1", tags=["status"])
 app.include_router(internal_observability_ui.router)
 app.include_router(internal_maestro.router)
+app.include_router(internal_decisions.router)
 
 # --- Rotas (Endpoints) ---
 
