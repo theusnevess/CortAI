@@ -135,7 +135,7 @@ async def list_decision_history(
     if state:
         stmt = stmt.where(DecisionAuditLog.policy_state == state)
 
-    stmt = stmt.order_by(desc(DecisionAuditLog.ts)).limit(lim)
+    stmt = stmt.order_by(desc(DecisionAuditLog.ts), desc(DecisionAuditLog.id)).limit(lim)
     rows = (await db.execute(stmt)).all()
     return [
         to_item(
