@@ -306,3 +306,27 @@ class MaestroJobModel(Base):
         Index("ix_maestro_jobs_status", "status"),
         Index("ix_maestro_jobs_started_at", "started_at"),
     )
+
+
+class DecisionAuditLog(Base):
+    __tablename__ = "decision_audit_log"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ts = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    source = Column(String, nullable=False)
+    request_id = Column(String, nullable=True)
+
+    policy_version = Column(String, nullable=False, default="")
+    policy_state = Column(String, nullable=False, default="")
+    policy_score = Column(Integer, nullable=False, default=0)
+    policy_decision = Column(String, nullable=False, default="")
+
+    decision_state = Column(String, nullable=True)
+    decision_action = Column(String, nullable=True)
+
+    payload = Column(JSONB, nullable=False, default=dict)
+
+    __table_args__ = (
+        Index("ix_decision_audit_log_ts", "ts"),
+        Index("ix_decision_audit_log_policy_state_ts", "policy_state", "ts"),
+    )
