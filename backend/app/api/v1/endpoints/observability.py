@@ -13,6 +13,7 @@ from app.db.session import get_db
 from app.observability.collector_summary import get_collector_summary
 from app.observability.policy_engine import derive_operational_policy, derive_policy_bridge
 from app.observability.runtime_health import get_runtime_c1_health_cached, should_include_internal_status
+from app.observability.webhook_metrics import WebhookMetrics
 from app.version import get_app_version
 
 router = APIRouter()
@@ -776,6 +777,8 @@ async def _build_observability_overview_payload(
         guardrails=response["guardrails"],
         c1_health=response["c1_health"],
     )
+    webhook_url = str(os.getenv("STATUS_WEBHOOK_URL") or "").strip()
+    response["webhook"] = WebhookMetrics.snapshot() if webhook_url else None
     _harmonize_policy_trust_recommendation(response)
     return response
 

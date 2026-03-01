@@ -19,6 +19,7 @@ from app.api.v1.endpoints.metrics import _emit_metrics_endpoint_timing
 from app.api.v1.endpoints.observability import _build_observability_overview_payload
 from app.db.session import engine
 from app.db.session import get_db
+from app.observability.webhook_metrics import WebhookMetrics
 from app.observability.runtime_health import (
     build_c1_health_payload as _build_c1_health_payload,
     classify_c1_health_row as _classify_c1_health_row,
@@ -275,10 +276,15 @@ async def _send_public_status_webhook(url: str, payload: dict) -> None:
     started_ns = perf_counter_ns()
     raw_body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     headers = _build_public_webhook_headers(raw_body)
+    WebhookMetrics.record_attempt()
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.post(url, content=raw_body, headers=headers)
         elapsed_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
+        if 200 <= int(response.status_code) < 300:
+            WebhookMetrics.record_success(latency_ms=int(elapsed_ms), status=int(response.status_code))
+        else:
+            WebhookMetrics.record_error(latency_ms=int(elapsed_ms), status=int(response.status_code))
         logger.info(
             "public_status_webhook_sent status=%s latency_ms=%s",
             int(response.status_code),
@@ -286,6 +292,7 @@ async def _send_public_status_webhook(url: str, payload: dict) -> None:
         )
     except Exception as exc:
         elapsed_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
+        WebhookMetrics.record_error(latency_ms=int(elapsed_ms), status=None)
         logger.warning(
             "public_status_webhook_failed latency_ms=%s error=%s",
             int(elapsed_ms),
