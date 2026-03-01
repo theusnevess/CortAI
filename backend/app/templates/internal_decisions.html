@@ -294,13 +294,37 @@
         const tr = document.createElement("tr");
         tr.dataset.decisionId = item.decision_id;
         const policy = item.policy || {};
-        tr.innerHTML = `
-          <td>${item.ts || "—"}</td>
-          <td><span class="pill s-${policy.state || "stable"}">${policy.state || "—"}</span></td>
-          <td>${policy.decision || "—"}</td>
-          <td>${policy.score ?? "—"}</td>
-          <td><button class="btn" type="button" data-open="${item.decision_id}">ver</button></td>
-        `;
+
+        const tsCell = document.createElement("td");
+        tsCell.textContent = item.ts || "—";
+        tr.appendChild(tsCell);
+
+        const stateCell = document.createElement("td");
+        const statePill = document.createElement("span");
+        const stateValue = typeof policy.state === "string" && policy.state ? policy.state : "stable";
+        statePill.className = `pill s-${stateValue}`;
+        statePill.textContent = typeof policy.state === "string" && policy.state ? policy.state : "—";
+        stateCell.appendChild(statePill);
+        tr.appendChild(stateCell);
+
+        const decisionCell = document.createElement("td");
+        decisionCell.textContent =
+          typeof policy.decision === "string" && policy.decision ? policy.decision : "—";
+        tr.appendChild(decisionCell);
+
+        const scoreCell = document.createElement("td");
+        scoreCell.textContent = policy.score == null ? "—" : String(policy.score);
+        tr.appendChild(scoreCell);
+
+        const actionCell = document.createElement("td");
+        const openButton = document.createElement("button");
+        openButton.type = "button";
+        openButton.className = "btn";
+        openButton.dataset.open = item.decision_id;
+        openButton.textContent = "ver";
+        actionCell.appendChild(openButton);
+        tr.appendChild(actionCell);
+
         return tr;
       }
 
