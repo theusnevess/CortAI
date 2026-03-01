@@ -1,0 +1,53 @@
+{
+  "operational_decision": {
+    "decision": "investigate_now",
+    "score": 30,
+    "signals": [
+      "collector_failed=5",
+      "collector_error_type:ssl_cert_verify_failed=1"
+    ],
+    "state": "action_required",
+    "version": "v0.2"
+  },
+  "policy": {
+    "as_of": "<normalized>",
+    "decision": "investigate_now",
+    "recommendation": "manual_intervention_required",
+    "score": 30,
+    "signals": [
+      "collector_failed=5",
+      "collector_error_type:ssl_cert_verify_failed=1"
+    ],
+    "state": "action_required",
+    "system_state": "action_required",
+    "trust_score": 30,
+    "version": "v0.2"
+  },
+  "recommendation": {
+    "action": "inspect_upstream_path",
+    "derived_from": [
+      "policy_harmonized"
+    ],
+    "message": "Sistema saudavel. Nenhuma acao necessaria.",
+    "priority": "low"
+  },
+  "status_public_optional": {
+    "decision_action": "investigate_now",
+    "decision_state": "action_required",
+    "score": 30,
+    "signals": {
+      "items": [
+        "collector_failed=5",
+        "collector_error_type:ssl_cert_verify_failed=1"
+      ]
+    }
+  },
+  "trust": {
+    "decision": "action_required",
+    "derived_from": [
+      "policy_harmonized"
+    ],
+    "message": "Sistema saudavel e responsivo.",
+    "state": "red"
+  }
+}

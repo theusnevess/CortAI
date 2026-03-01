@@ -1,0 +1,43 @@
+{
+  "operational_decision": {
+    "decision": "monitor",
+    "score": 100,
+    "signals": [],
+    "state": "stable",
+    "version": "v0.2"
+  },
+  "policy": {
+    "as_of": "<normalized>",
+    "decision": "monitor",
+    "recommendation": "normal_operation",
+    "score": 100,
+    "signals": [],
+    "state": "stable",
+    "system_state": "healthy",
+    "trust_score": 100,
+    "version": "v0.2"
+  },
+  "recommendation": {
+    "action": "monitor",
+    "derived_from": [
+      "policy_harmonized"
+    ],
+    "message": "Sistema saudavel. Nenhuma acao necessaria.",
+    "priority": "low"
+  },
+  "status_public_optional": {
+    "decision_action": "monitor",
+    "decision_state": "stable",
+    "score": 100
+  },
+  "trust": {
+    "decision": "healthy",
+    "derived_from": [
+      "c1_health",
+      "read_path",
+      "guardrails"
+    ],
+    "message": "Sistema saudavel e responsivo.",
+    "state": "green"
+  }
+}

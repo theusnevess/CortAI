@@ -1,0 +1,50 @@
+{
+  "operational_decision": {
+    "decision": "inspect",
+    "score": 70,
+    "signals": [
+      "collector_failed=2"
+    ],
+    "state": "degraded",
+    "version": "v0.2"
+  },
+  "policy": {
+    "as_of": "<normalized>",
+    "decision": "inspect",
+    "recommendation": "monitor_collector",
+    "score": 70,
+    "signals": [
+      "collector_failed=2"
+    ],
+    "state": "degraded",
+    "system_state": "degraded",
+    "trust_score": 70,
+    "version": "v0.2"
+  },
+  "recommendation": {
+    "action": "open_report",
+    "derived_from": [
+      "policy_harmonized"
+    ],
+    "message": "Sistema saudavel. Nenhuma acao necessaria.",
+    "priority": "low"
+  },
+  "status_public_optional": {
+    "decision_action": "inspect",
+    "decision_state": "degraded",
+    "score": 70,
+    "signals": {
+      "items": [
+        "collector_failed=2"
+      ]
+    }
+  },
+  "trust": {
+    "decision": "degraded",
+    "derived_from": [
+      "policy_harmonized"
+    ],
+    "message": "Sistema saudavel e responsivo.",
+    "state": "yellow"
+  }
+}
