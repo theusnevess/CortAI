@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-"""Congela o shape das projecoes public-ish do fluxo de decisao offline."""
+"""Congela o shape das projecoes public-ish do fluxo de decisao offline.
+
+Se este teste falhar por mudanca deliberada de contrato, atualize os snapshots
+em `backend/tests/snapshots/*.json` somente apos revisar o diff manualmente.
+Nao atualize snapshots para esconder regressao. Garanta que `policy.as_of`
+continue normalizado e que nao entrem campos instaveis (`ts`, `uuid`, `job_id`,
+`trace_id`) nem dados sensiveis.
+"""
 
 import json
 from pathlib import Path
