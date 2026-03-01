@@ -54,5 +54,6 @@ jobs:
             tests/test_decision_core_policy.py \
             tests/test_decision_core_harmonization.py \
             tests/test_decision_core_projection.py \
+            tests/test_sanitization_fuzz.py \
             tests/test_policy_engine.py \
             --noconftest
