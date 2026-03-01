@@ -50,5 +50,6 @@ jobs:
             tests/test_status_public_policy_projection.py \
             tests/test_policy_trust_harmonization.py \
             tests/test_webhook_observability.py \
+            tests/test_full_decision_flow_offline.py \
             tests/test_policy_engine.py \
             --noconftest
