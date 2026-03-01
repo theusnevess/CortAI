@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.observability.decision_audit_log import (
@@ -106,3 +107,130 @@ def test_maybe_append_respects_flag_off(monkeypatch) -> None:
 
     assert wrote is False
     assert called is False
+
+
+def test_append_skips_duplicate_inside_dedup_window(monkeypatch) -> None:
+    class DummyRow:
+        def __init__(self, **kwargs: Any) -> None:
+            self.payload = kwargs["payload"]
+            self.kwargs = kwargs
+
+    import app.observability.decision_audit_log as mod
+
+    monkeypatch.setattr(mod, "DecisionAuditLog", DummyRow)
+
+    now = datetime(2026, 3, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    async def _fake_latest(session: Any):
+        return (now - timedelta(seconds=30), "degraded", "monitor", 11)
+
+    monkeypatch.setattr(mod, "_load_latest_audit_signature", _fake_latest)
+
+    session = FakeSession()
+    policy = {
+        "version": "v0.2",
+        "state": "degraded",
+        "score": 55,
+        "decision": "monitor",
+        "signals": {"ok": True},
+    }
+
+    asyncio.run(
+        append_decision_audit(
+            session,
+            source="observability_overview",
+            request_id=None,
+            policy=policy,
+            operational_decision={"state": "degraded", "action": "monitor"},
+            as_of="2026-03-01T12:00:00Z",
+            now=now,
+        )
+    )
+
+    assert session.committed is False
+    assert session.rolled_back is False
+    assert session.added == []
+
+
+def test_append_writes_again_outside_dedup_window(monkeypatch) -> None:
+    class DummyRow:
+        def __init__(self, **kwargs: Any) -> None:
+            self.payload = kwargs["payload"]
+            self.kwargs = kwargs
+
+    import app.observability.decision_audit_log as mod
+
+    monkeypatch.setattr(mod, "DecisionAuditLog", DummyRow)
+
+    now = datetime(2026, 3, 1, 12, 2, 0, tzinfo=timezone.utc)
+
+    async def _fake_latest(session: Any):
+        return (now - timedelta(seconds=61), "degraded", "monitor", 11)
+
+    monkeypatch.setattr(mod, "_load_latest_audit_signature", _fake_latest)
+
+    session = FakeSession()
+    policy = {
+        "version": "v0.2",
+        "state": "degraded",
+        "score": 55,
+        "decision": "monitor",
+        "signals": {"ok": True},
+    }
+
+    asyncio.run(
+        append_decision_audit(
+            session,
+            source="observability_overview",
+            request_id=None,
+            policy=policy,
+            operational_decision={"state": "degraded", "action": "monitor"},
+            as_of="2026-03-01T12:02:00Z",
+            now=now,
+        )
+    )
+
+    assert session.committed is True
+    assert len(session.added) == 1
+
+
+def test_append_writes_when_fingerprint_changes_inside_window(monkeypatch) -> None:
+    class DummyRow:
+        def __init__(self, **kwargs: Any) -> None:
+            self.payload = kwargs["payload"]
+            self.kwargs = kwargs
+
+    import app.observability.decision_audit_log as mod
+
+    monkeypatch.setattr(mod, "DecisionAuditLog", DummyRow)
+
+    now = datetime(2026, 3, 1, 12, 3, 0, tzinfo=timezone.utc)
+
+    async def _fake_latest(session: Any):
+        return (now - timedelta(seconds=10), "degraded", "monitor", 11)
+
+    monkeypatch.setattr(mod, "_load_latest_audit_signature", _fake_latest)
+
+    session = FakeSession()
+    policy = {
+        "version": "v0.2",
+        "state": "action_required",
+        "score": 55,
+        "decision": "investigate_now",
+        "signals": {"ok": True},
+    }
+
+    asyncio.run(
+        append_decision_audit(
+            session,
+            source="observability_overview",
+            request_id=None,
+            policy=policy,
+            operational_decision={"state": "action_required", "action": "inspect_upstream_path"},
+            as_of="2026-03-01T12:03:00Z",
+            now=now,
+        )
+    )
+
+    assert session.committed is True
+    assert len(session.added) == 1
