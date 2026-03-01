@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Harness offline da cadeia de decisao do overview, sem HTTP nem DB."""
+
 from typing import Any
 
 from app.api.v1.endpoints.observability import (
@@ -19,6 +21,7 @@ def _make_collector_summary(
     by_error_type: dict[str, int] | None = None,
     last_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Monta o shape minimo aceito pelo Policy Engine no branch protegido."""
     return {
         "window_minutes": 15,
         "events": {"success": success, "failed": failed},
@@ -35,6 +38,7 @@ def _build_offline_response(
     jobs_queued_count: int = 0,
     guardrail_events: dict[str, int] | None = None,
 ) -> dict[str, Any]:
+    """Encadeia os helpers reais do overview para validar coerencia offline."""
     policy = derive_operational_policy(collector_summary)
     response = {
         "collector": collector_summary,
@@ -63,6 +67,7 @@ def _build_offline_response(
 
 
 def test_offline_flow_stable_monitor_keeps_shape_and_public_projection() -> None:
+    """Baseline saudavel: policy, trust e projection publica precisam alinhar."""
     response = _build_offline_response(
         collector_summary=_make_collector_summary(success=10, failed=0),
     )
@@ -97,6 +102,7 @@ def test_offline_flow_stable_monitor_keeps_shape_and_public_projection() -> None
 
 
 def test_offline_flow_degraded_inspect_harmonizes_trust_and_recommendation() -> None:
+    """Degradacao controlada deve piorar trust sem quebrar a projection publica."""
     response = _build_offline_response(
         collector_summary=_make_collector_summary(
             success=4,
@@ -128,6 +134,7 @@ def test_offline_flow_degraded_inspect_harmonizes_trust_and_recommendation() -> 
 
 
 def test_offline_flow_action_required_filters_forbidden_signal_tokens() -> None:
+    """Signals proibidos precisam ser filtrados na projection publica sanitizada."""
     response = _build_offline_response(
         collector_summary=_make_collector_summary(
             success=0,
@@ -138,6 +145,8 @@ def test_offline_flow_action_required_filters_forbidden_signal_tokens() -> None:
     )
 
     policy = dict(response["policy"])
+    # O policy atual produz signals como lista de strings; aqui injetamos leaks
+    # deliberados para validar a sanitizacao do helper usado por /status/public.
     policy["signals"] = list(policy.get("signals") or []) + [
         "source_ref=https://secret.example/?token=abc",
         "minio_path=videos-raw/file.wav",
