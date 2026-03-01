@@ -1788,3 +1788,44 @@ Garantias:
 Observabilidade:
 - falhas de envio nao impactam o endpoint publico;
 - envio registra sucesso/falha e latencia no log da aplicacao.
+
+### D+3 Webhook GO/NO-GO
+
+Objetivo:
+- rodar um freeze operacional de 72h com 1 consumidor e medir estabilidade real do webhook;
+- produzir evidencia auditavel sem depender de coleta manual em logs.
+
+Script:
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/d3_webhook_run.ps1 -DayLabel D0
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/d3_webhook_run.ps1 -DayLabel D1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/d3_webhook_run.ps1 -DayLabel D2
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/d3_webhook_run.ps1 -DayLabel D3
+```
+
+Artefatos:
+- `OUT/D3/00_env_presence.txt` (somente no `D0`)
+- `OUT/D3/01_status_public_100.csv` e `OUT/D3/02_overview.json` no baseline
+- `OUT/D3/D1_status_public_100.csv`, `OUT/D3/D2_status_public_100.csv`, `OUT/D3/D3_status_public_100.csv`
+- `OUT/D3/D1_overview.json`, `OUT/D3/D2_overview.json`, `OUT/D3/D3_overview.json`
+- `OUT/D3/D0_summary.txt`, `OUT/D3/D1_summary.txt`, `OUT/D3/D2_summary.txt`, `OUT/D3/D3_summary.txt`
+
+O que o summary consolida:
+- `status_public_5xx_count`
+- `status_public_5xx_rate`
+- `status_public_p95_ms`
+- `webhook_sent`
+- `webhook_success`
+- `webhook_error`
+- `webhook_error_rate`
+- `webhook_p95_latency_ms`
+- `webhook_last_error_status`
+- `webhook_last_error_ts`
+
+Criterio binario:
+- `GO` quando:
+  - `status_public_5xx_rate <= 0.001`
+  - `status_public_p95_ms <= 300`
+  - `webhook_error_rate < 0.01`
+  - nao houver indicio de loop (envios sem transicao real) ou falso positivo recorrente
+- `NO-GO` quando qualquer um desses limites falhar em janela recorrente de D+3.
