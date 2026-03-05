@@ -8,7 +8,7 @@ from app.data.video_metrics.precedence import decide_precedence_action
 
 
 class VideoMetricsInvariantError(ValueError):
-    """Invariant violation for video_metrics ingestion contract."""
+    """Violacao de invariante para o contrato de ingestao de video_metrics."""
 
 
 def enforce_ingestion_invariants(record: dict[str, Any]) -> dict[str, Any]:

@@ -1,1 +1,1 @@
-"""Video metrics ingestion modules."""
+"""Modulos de ingestao de metricas de video."""

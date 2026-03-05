@@ -10,7 +10,7 @@ SOURCE_PRECEDENCE = {
 
 
 class VideoMetricsPrecedenceError(ValueError):
-    """Raised when precedence cannot be resolved."""
+    """Levantado quando a precedencia nao pode ser resolvida."""
 
 
 def source_rank(source_kind: str) -> int:
@@ -21,10 +21,10 @@ def source_rank(source_kind: str) -> int:
 
 def compare_sources(new_source_kind: str, current_source_kind: str) -> int:
     """
-    Returns:
-    - 1 when new source is better
-    - 0 when equal
-    - -1 when worse
+    Retorna:
+    - 1 quando a fonte nova e melhor
+    - 0 quando e equivalente
+    - -1 quando e pior
     """
     new_rank = source_rank(new_source_kind)
     current_rank = source_rank(current_source_kind)

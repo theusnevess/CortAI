@@ -16,7 +16,7 @@ REQUIRED_FIELDS = (
 
 
 class VideoMetricsValidationError(ValueError):
-    """Contract error for video_metrics schema violations."""
+    """Erro de contrato para violacoes do schema de video_metrics."""
 
 
 def _require_non_empty_str(record: dict[str, Any], field: str) -> str:
