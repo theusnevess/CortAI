@@ -32,3 +32,9 @@ class PolicyStageNotFoundError(AttributionBuildError):
     def __init__(self, message: str = "POLICY_STAGE_NOT_FOUND") -> None:
         super().__init__(message)
 
+
+class AttributionConflictError(AttributionBuildError):
+    """Falha quando um mesmo publish_id recebe payload diferente."""
+
+    def __init__(self, message: str = "ATTRIBUTION_CONFLICT") -> None:
+        super().__init__(message)
