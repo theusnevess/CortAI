@@ -113,7 +113,9 @@ def _harmonize_policy_trust_recommendation(response: dict[str, Any]) -> None:
             trust["derived_from"] = ["policy_harmonized"]
 
     desired_action = _POLICY_DECISION_TO_RECO_ACTION.get(str(policy_decision), None)
-    if desired_action:
+    # Em estado estavel, recommendation "none" nao deve ser piorada por policy.decision.
+    should_apply_policy_action = str(policy_state) in {"degraded", "action_required"}
+    if desired_action and should_apply_policy_action:
         current_action = recommendation.get("action")
         if (not current_action) or (str(current_action) == "none"):
             recommendation["action"] = desired_action
