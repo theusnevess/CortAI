@@ -1,7 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 
+from app.observability.event_query.cursor import SeekCursor, decode_cursor, validate_cursor_filters_hash
 from app.observability.event_query.errors import (
     ForensicsBlockedByPolicyError,
     InsufficientFiltersError,
@@ -16,6 +17,7 @@ from app.observability.event_query.models import (
     QueryProfile,
     TraceRequest,
 )
+from app.observability.event_query.query_filters import build_filters_hash
 
 
 class EventQueryService:
@@ -41,6 +43,7 @@ class EventQueryService:
         *,
         profile: QueryProfile = QueryProfile.OPERATIONAL,
         writer_id: str | None = None,
+        cursor: str | SeekCursor | None = None,
     ) -> EventQueryResult:
         """Executa consulta deterministica por filtros com limite maximo."""
         if not filters.start_ts or not filters.end_ts:
@@ -59,10 +62,15 @@ class EventQueryService:
         if not self._has_required_selector(filters):
             raise InsufficientFiltersError()
 
+        filters_hash = build_filters_hash(filters)
+        if cursor is not None:
+            cursor_obj = decode_cursor(cursor) if isinstance(cursor, str) else cursor
+            validate_cursor_filters_hash(cursor_obj, filters_hash)
+
         return self.indexer.scan(filters=filters, limit=limit)
 
     def get_pipeline_trace(self, request: TraceRequest, limit: int = 500) -> PipelineTrace:
-        """Reconstrói trace de pipeline de forma determinística."""
+        """Reconstrui trace de pipeline de forma deterministica."""
         from app.observability.event_query.trace_builder import TraceBuilder
 
         return TraceBuilder(self).build_trace(request, limit=limit)
