@@ -1,17 +1,72 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+
+def parse_iso_utc(value: str) -> datetime:
+    """Converte timestamp ISO8601 para datetime UTC normalizado."""
+    normalized = value.strip().replace("Z", "+00:00")
+    dt = datetime.fromisoformat(normalized)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)
-class EventQuery:
-    """Filtro de consulta de eventos para a camada forense."""
+class EventRecord:
+    """Shape normalizado de evento para query publica."""
 
+    event_id: str
+    ts: str
+    event_type: str
+    severity: str | None = None
+    action_taken: str | None = None
+    account_id: str | None = None
+    window_id: str | None = None
+    job_id: str | None = None
+    publish_id: str | None = None
+    op_key: str | None = None
+    details: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class EventQueryFilters:
+    """Filtros canônicos de consulta; time range é obrigatório."""
+
+    start_ts: str
+    end_ts: str
     account_id: str | None = None
     window_id: str | None = None
     job_id: str | None = None
     publish_id: str | None = None
     op_key: str | None = None
     event_type: str | None = None
-    timestamp_start: str | None = None
-    timestamp_end: str | None = None
+    event_type_prefix: str | None = None
+    severity: str | None = None
+    action_taken: str | None = None
+
+    def start_dt(self) -> datetime:
+        return parse_iso_utc(self.start_ts)
+
+    def end_dt(self) -> datetime:
+        return parse_iso_utc(self.end_ts)
+
+
+@dataclass(frozen=True)
+class EventQueryStats:
+    """Contadores de saneamento e varredura da consulta."""
+
+    scanned_files: int = 0
+    scanned_lines: int = 0
+    invalid_jsonl_lines: int = 0
+    invalid_shape_lines: int = 0
+
+
+@dataclass(frozen=True)
+class EventQueryResult:
+    """Resultado deterministico da consulta de eventos."""
+
+    items: list[EventRecord] = field(default_factory=list)
+    stats: EventQueryStats = field(default_factory=EventQueryStats)
