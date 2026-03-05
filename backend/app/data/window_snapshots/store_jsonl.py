@@ -19,7 +19,10 @@ _REQUIRED_FIELDS = {
 
 
 def _canonical_payload(record: dict[str, Any]) -> str:
-    return json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    comparable = dict(record)
+    # generated_at e metadado de auditoria e nao deve quebrar idempotencia.
+    comparable.pop("generated_at", None)
+    return json.dumps(comparable, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _validate_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
