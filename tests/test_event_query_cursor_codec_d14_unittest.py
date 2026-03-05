@@ -17,12 +17,15 @@ from app.observability.event_query.cursor import (
     decode_cursor,
     encode_cursor,
     validate_cursor_filters_hash,
+    validate_cursor_signature,
 )
+from app.observability.event_query.cursor_signing import SigningPolicy
 from app.observability.event_query.errors import (
     CursorFiltersMismatchError,
     CursorInvalidEncodingError,
     CursorInvalidJSONError,
     CursorMissingFieldsError,
+    CursorSignatureInvalidError,
     CursorUnsupportedVersionError,
 )
 
@@ -81,6 +84,17 @@ class EventQueryCursorCodecD14Tests(unittest.TestCase):
         )
         with self.assertRaises(CursorFiltersMismatchError):
             validate_cursor_filters_hash(cursor, "sha256:other")
+
+    def test_validate_signature_profile_b_sem_sig_invalida(self) -> None:
+        cursor = SeekCursor(
+            v="1",
+            filters_hash="sha256:expected",
+            last=CursorLast(ts="2026-03-05T10:00:00Z", event_id="evt_001"),
+            issued_at="2026-03-05T10:01:00Z",
+            sig=None,
+        )
+        with self.assertRaises(CursorSignatureInvalidError):
+            validate_cursor_signature(cursor, SigningPolicy(enabled=True, secret=b"secret"))
 
 
 if __name__ == "__main__":

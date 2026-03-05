@@ -5,11 +5,13 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from app.observability.event_query.cursor_signing import SigningPolicy, sign_cursor_payload, verify_cursor_signature
 from app.observability.event_query.errors import (
     CursorFiltersMismatchError,
     CursorInvalidEncodingError,
     CursorInvalidJSONError,
     CursorMissingFieldsError,
+    CursorSignatureInvalidError,
     CursorUnsupportedVersionError,
 )
 from app.observability.event_query.models import parse_iso_utc
@@ -47,10 +49,23 @@ class SeekCursor:
         return payload
 
 
-def encode_cursor(cursor: SeekCursor) -> str:
+DEFAULT_SIGNING_POLICY = SigningPolicy(enabled=False, secret=b"")
+
+
+def encode_cursor(cursor: SeekCursor, signing: SigningPolicy = DEFAULT_SIGNING_POLICY) -> str:
     """Codifica cursor em JSON canonico + base64url sem padding."""
     payload = validate_cursor_payload(cursor.to_payload())
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    payload_without_sig = _payload_without_sig(payload)
+    payload_json = _canonical_json(payload_without_sig)
+
+    if signing.enabled:
+        sig = sign_cursor_payload(payload_json, signing.secret)
+        payload = dict(payload_without_sig)
+        payload["sig"] = sig
+    else:
+        payload = dict(payload_without_sig)
+
+    raw = _canonical_json(payload).encode("utf-8")
     return _b64url_encode(raw)
 
 
@@ -109,7 +124,6 @@ def validate_cursor_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(last_event_id, str) or not last_event_id:
         raise CursorMissingFieldsError()
 
-    # Valida timestamp para falhar cedo em cursores malformados.
     parse_iso_utc(issued_at)
     parse_iso_utc(last_ts)
 
@@ -126,10 +140,34 @@ def validate_cursor_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def validate_cursor_signature(cursor: SeekCursor, signing: SigningPolicy) -> None:
+    """Valida assinatura do cursor conforme policy Profile A/B."""
+    if not signing.enabled:
+        return
+
+    if not cursor.sig:
+        raise CursorSignatureInvalidError()
+
+    payload = _payload_without_sig(cursor.to_payload())
+    payload_json = _canonical_json(payload)
+    if not verify_cursor_signature(payload_json, cursor.sig, signing.secret):
+        raise CursorSignatureInvalidError()
+
+
 def validate_cursor_filters_hash(cursor: SeekCursor, current_filters_hash: str) -> None:
     """Garante bind entre cursor e filtros atuais da consulta."""
     if cursor.filters_hash != current_filters_hash:
         raise CursorFiltersMismatchError()
+
+
+def _canonical_json(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _payload_without_sig(payload: dict[str, Any]) -> dict[str, Any]:
+    copied = dict(payload)
+    copied.pop("sig", None)
+    return copied
 
 
 def _b64url_encode(data: bytes) -> str:

@@ -2,7 +2,13 @@
 
 import os
 
-from app.observability.event_query.cursor import SeekCursor, decode_cursor, validate_cursor_filters_hash
+from app.observability.event_query.cursor import (
+    SeekCursor,
+    decode_cursor,
+    validate_cursor_filters_hash,
+    validate_cursor_signature,
+)
+from app.observability.event_query.cursor_signing import SigningPolicy
 from app.observability.event_query.errors import (
     ForensicsBlockedByPolicyError,
     InsufficientFiltersError,
@@ -29,12 +35,18 @@ class EventQueryService:
         *,
         forensics_enabled: bool | None = None,
         forensics_writer_allowlist: set[str] | None = None,
+        cursor_signing_policy: SigningPolicy | None = None,
     ) -> None:
         self.indexer = indexer or EventIndexer()
         if forensics_enabled is None:
             forensics_enabled = os.getenv("FORENSICS_ENABLED", "").strip().lower() in {"1", "true", "yes"}
         self.forensics_enabled = forensics_enabled
         self.forensics_writer_allowlist = forensics_writer_allowlist or {"admin", "ci"}
+        if cursor_signing_policy is None:
+            enforcement = os.getenv("CURSOR_SIGNATURE_ENFORCEMENT", "").strip().lower() in {"1", "true", "yes"}
+            secret = os.getenv("CURSOR_SIGNATURE_SECRET", "dev-secret").encode("utf-8")
+            cursor_signing_policy = SigningPolicy(enabled=enforcement, secret=secret)
+        self.cursor_signing_policy = cursor_signing_policy
 
     def get_events(
         self,
@@ -65,6 +77,7 @@ class EventQueryService:
         filters_hash = build_filters_hash(filters)
         if cursor is not None:
             cursor_obj = decode_cursor(cursor) if isinstance(cursor, str) else cursor
+            validate_cursor_signature(cursor_obj, self.cursor_signing_policy)
             validate_cursor_filters_hash(cursor_obj, filters_hash)
 
         return self.indexer.scan(filters=filters, limit=limit)
