@@ -37,10 +37,11 @@ def _call_optional(repo: Any, method_names: tuple[str, ...], *args: Any) -> Any:
 
 
 def _must_call(repo: Any, method_names: tuple[str, ...], *args: Any) -> Any:
-    result = _call_optional(repo, method_names, *args)
-    if result is None:
-        raise AttributionBuildError(f"DEPENDENCY_METHOD_MISSING: expected one of {method_names}")
-    return result
+    for name in method_names:
+        method = getattr(repo, name, None)
+        if callable(method):
+            return method(*args)
+    raise AttributionBuildError(f"DEPENDENCY_METHOD_MISSING: expected one of {method_names}")
 
 
 def _resolve_policy_stage(
@@ -182,4 +183,3 @@ def build_attribution(publish_id: str, deps: AttributionDeps) -> dict[str, Any]:
         "generated_at": _now_utc_iso(),
     }
     return validate_content_attribution(candidate)
-
