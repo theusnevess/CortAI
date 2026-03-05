@@ -42,3 +42,10 @@ class TraceRequestInvalidError(EventQueryError):
 
     def __init__(self) -> None:
         super().__init__("TRACE_REQUEST_INVALID")
+
+
+class ForensicsBlockedByPolicyError(EventQueryError):
+    """Falha quando consulta forense nao atende policy de seguranca."""
+
+    def __init__(self) -> None:
+        super().__init__("FORENSICS_BLOCKED_BY_POLICY")

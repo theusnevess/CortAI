@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
 
 
@@ -29,6 +30,13 @@ class EventRecord:
     publish_id: str | None = None
     op_key: str | None = None
     details: dict[str, Any] | None = None
+
+
+class QueryProfile(str, Enum):
+    """Perfil de consulta para separar trilha operacional e forense."""
+
+    OPERATIONAL = "OPERATIONAL"
+    FORENSICS = "FORENSICS"
 
 
 @dataclass(frozen=True)
