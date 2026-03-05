@@ -35,3 +35,10 @@ class EventInvalidShapeError(EventQueryError):
 
 EVENT_INVALID_JSONL_LINE = "EVENT_INVALID_JSONL_LINE"
 EVENT_INVALID_SHAPE = "EVENT_INVALID_SHAPE"
+
+
+class TraceRequestInvalidError(EventQueryError):
+    """Falha de validacao de seletor para pipeline trace."""
+
+    def __init__(self) -> None:
+        super().__init__("TRACE_REQUEST_INVALID")

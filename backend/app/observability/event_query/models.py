@@ -70,3 +70,41 @@ class EventQueryResult:
 
     items: list[EventRecord] = field(default_factory=list)
     stats: EventQueryStats = field(default_factory=EventQueryStats)
+
+
+@dataclass(frozen=True)
+class TraceRequest:
+    """Parametros para reconstruir timeline de pipeline."""
+
+    job_id: str | None = None
+    publish_id: str | None = None
+    window_id: str | None = None
+    account_id: str | None = None
+    start_ts: str | None = None
+    end_ts: str | None = None
+
+
+@dataclass(frozen=True)
+class TraceSummary:
+    """Resumo deterministico de status final e causa dominante."""
+
+    final_status: str
+    dominant_family: str | None = None
+    dominant_reason_code: str | None = None
+    first_failure_event_id: str | None = None
+    last_event_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PipelineTrace:
+    """Resposta completa de trace para debug forense."""
+
+    trace_id: str
+    account_id: str | None
+    job_id: str | None
+    publish_id: str | None
+    window_id: str | None
+    time_range: dict[str, str]
+    timeline: list[EventRecord]
+    summary: TraceSummary
+    stats: dict[str, dict[str, int]]

@@ -6,7 +6,7 @@ from app.observability.event_query.errors import (
     TimeRangeRequiredError,
 )
 from app.observability.event_query.indexer import EventIndexer
-from app.observability.event_query.models import EventQueryFilters, EventQueryResult
+from app.observability.event_query.models import EventQueryFilters, EventQueryResult, PipelineTrace, TraceRequest
 
 
 class EventQueryService:
@@ -33,9 +33,11 @@ class EventQueryService:
 
         return self.indexer.scan(filters=filters, limit=limit)
 
-    def get_pipeline_trace(self, account_id: str, window_id: str):
-        """Reconstrucao de trace entra no D13.3."""
-        raise NotImplementedError
+    def get_pipeline_trace(self, request: TraceRequest, limit: int = 500) -> PipelineTrace:
+        """Reconstrói trace de pipeline de forma determinística."""
+        from app.observability.event_query.trace_builder import TraceBuilder
+
+        return TraceBuilder(self).build_trace(request, limit=limit)
 
     def _has_required_selector(self, filters: EventQueryFilters) -> bool:
         return bool(
