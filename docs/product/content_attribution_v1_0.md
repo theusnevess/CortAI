@@ -63,8 +63,6 @@ job_id
 - `window_id`
 - `policy_stage`
 - `hook_strategy`
-- `effective_duration_s`
-- `rare_fact_placement_s`
 - `human_patch_detected`
 - `views`
 - `retention_3s`
@@ -74,6 +72,8 @@ job_id
 
 ## Campos opcionais
 - `dominant_failure_reason`
+- `effective_duration_s`
+- `rare_fact_placement_s`
 - `likes`
 - `follows`
 - `rpm`

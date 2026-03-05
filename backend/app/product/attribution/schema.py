@@ -13,8 +13,6 @@ REQUIRED_FIELDS = (
     "window_id",
     "policy_stage",
     "hook_strategy",
-    "effective_duration_s",
-    "rare_fact_placement_s",
     "human_patch_detected",
     "views",
     "retention_3s",
@@ -89,14 +87,18 @@ def validate_content_attribution(record: dict[str, Any]) -> dict[str, Any]:
 
     normalized["human_patch_detected"] = bool(normalized.get("human_patch_detected"))
 
-    normalized["effective_duration_s"] = _coerce_int(normalized, "effective_duration_s", required=True)
-    if normalized["effective_duration_s"] is None or normalized["effective_duration_s"] <= 0:
+    normalized["effective_duration_s"] = _coerce_int(normalized, "effective_duration_s")
+    if normalized["effective_duration_s"] is not None and normalized["effective_duration_s"] <= 0:
         raise AttributionValidationError("ContractViolation: effective_duration_s must be > 0")
 
-    normalized["rare_fact_placement_s"] = _coerce_int(normalized, "rare_fact_placement_s", required=True)
-    if normalized["rare_fact_placement_s"] is None or normalized["rare_fact_placement_s"] < 0:
+    normalized["rare_fact_placement_s"] = _coerce_int(normalized, "rare_fact_placement_s")
+    if normalized["rare_fact_placement_s"] is not None and normalized["rare_fact_placement_s"] < 0:
         raise AttributionValidationError("ContractViolation: rare_fact_placement_s must be >= 0")
-    if normalized["rare_fact_placement_s"] > normalized["effective_duration_s"]:
+    if (
+        normalized["rare_fact_placement_s"] is not None
+        and normalized["effective_duration_s"] is not None
+        and normalized["rare_fact_placement_s"] > normalized["effective_duration_s"]
+    ):
         raise AttributionValidationError(
             "ContractViolation: rare_fact_placement_s cannot be greater than effective_duration_s"
         )
@@ -126,4 +128,3 @@ def validate_content_attribution(record: dict[str, Any]) -> dict[str, Any]:
         raise AttributionValidationError("ContractViolation: rpm must be >= 0")
 
     return normalized
-
