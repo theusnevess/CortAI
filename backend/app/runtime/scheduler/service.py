@@ -6,6 +6,8 @@ from uuid import uuid4
 
 from app.runtime.models import DistributedTask
 from app.runtime.queue import InMemoryTaskQueue
+from app.runtime.rollout.config import RolloutConfig
+from app.runtime.rollout.policy import evaluate_rollout_account
 from app.runtime.scheduler.models import ScheduleKind, SchedulePlan, SchedulerTaskRequest
 from app.runtime.scheduler.planner import build_schedule_plan
 
@@ -16,6 +18,7 @@ class SchedulerService:
 
     queue: InMemoryTaskQueue
     scheduler_id: str
+    rollout_config: RolloutConfig | None = None
 
     def plan(
         self,
@@ -23,12 +26,25 @@ class SchedulerService:
         account_ids: list[str],
         schedule_kind: ScheduleKind,
         now: datetime | None = None,
+        stage_by_account: dict[str, str] | None = None,
     ) -> SchedulePlan:
+        eligible_accounts = account_ids
+        if self.rollout_config is not None:
+            eligible_accounts = [
+                account_id
+                for account_id in account_ids
+                if evaluate_rollout_account(
+                    account_id=account_id,
+                    policy_stage=(stage_by_account or {}).get(account_id),
+                    config=self.rollout_config,
+                ).allowed
+            ]
         return build_schedule_plan(
-            account_ids=account_ids,
+            account_ids=eligible_accounts,
             schedule_kind=schedule_kind,
             scheduler_id=self.scheduler_id,
             now=now,
+            stage_by_account=stage_by_account,
         )
 
     def enqueue_plan(self, plan: SchedulePlan) -> list[dict[str, str]]:
@@ -38,6 +54,14 @@ class SchedulerService:
         return results
 
     def enqueue_if_absent(self, request: SchedulerTaskRequest) -> dict[str, str]:
+        if self.rollout_config is not None:
+            decision = evaluate_rollout_account(
+                account_id=request.account_id,
+                policy_stage=str(request.payload.get("policy_stage") or ""),
+                config=self.rollout_config,
+            )
+            if not decision.allowed:
+                return {"status": "BLOCKED", "task_id": "", "op_key": request.op_key, "reason_code": decision.reason_code}
         materialized_payload = self._materialize_payload(request)
         existing = self.queue.find_by_op_key(request.op_key)
         if existing is not None:

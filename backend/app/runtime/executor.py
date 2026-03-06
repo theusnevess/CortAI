@@ -9,6 +9,8 @@ from app.concurrency.errors import LeaseDeniedError
 from app.concurrency.idempotency import IdempotencyManager, payload_hash
 from app.concurrency.lease import LeaseManager
 from app.runtime.models import DistributedTask, TaskStatus, TaskType
+from app.runtime.rollout.config import RolloutConfig
+from app.runtime.rollout.policy import evaluate_rollout_task
 
 
 class RuntimeTemporaryError(RuntimeError):
@@ -28,6 +30,7 @@ class RuntimeExecutorDeps:
     handlers: dict[TaskType, TaskHandler]
     event_sink: EventSink | None = None
     lease_ttl_s: int = 120
+    rollout_config: RolloutConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,16 @@ def execute_task(task: DistributedTask, *, deps: RuntimeExecutorDeps, worker_id:
     """Executa uma task com lease, idempotencia e observabilidade minima."""
     handler = deps.handlers[task.task_type]
     lease_key = _lease_key_for(task)
+    if deps.rollout_config is not None:
+        decision = evaluate_rollout_task(task, config=deps.rollout_config)
+        if not decision.allowed:
+            return _finish(
+                deps,
+                task=task,
+                worker_id=worker_id,
+                status=TaskStatus.BLOCKED,
+                reason_code=decision.reason_code,
+            )
     _emit_event(
         deps,
         event_type="RUNTIME/task_started",
