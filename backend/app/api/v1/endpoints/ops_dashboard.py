@@ -19,6 +19,7 @@ from app.api.v1.schemas.ops_dashboard import (
 from app.observability.event_query.indexer import EventIndexer
 from app.observability.event_query.models import EventQueryFilters, QueryProfile
 from app.observability.event_query.query_service import EventQueryService
+from app.ops.strategy_observatory.service import StrategyObservatoryService
 from app.runtime.rollout.config import RolloutConfig, apply_runtime_rollout_overrides
 
 router = APIRouter()
@@ -93,6 +94,10 @@ def _read_rollout_report() -> dict[str, Any]:
         _out_dir() / "rollout" / "pilot_rollout_report.json",
         {"rollout_name": "pilot_batch_72h", "batch_summary": {}, "alerts": []},
     )
+
+
+def _strategy_service() -> StrategyObservatoryService:
+    return StrategyObservatoryService(base_dir=_out_dir())
 
 
 def _extract_metric(status_payload: dict[str, Any], metric_name: str) -> float | None:
@@ -225,17 +230,26 @@ def get_alerts():
 
 @router.get("/internal/operator-console", response_class=HTMLResponse)
 def get_operator_console(request: Request):
+    strategy_service = _strategy_service()
     payload = {
         "health": get_health_summary(),
         "rollout": get_rollout_status(),
         "windows": get_windows(),
         "tasks": get_tasks(),
         "alerts": get_alerts(),
+        "strategy": {
+            "patches": {"items": strategy_service.list_patches(limit=10)},
+            "impact": {"items": strategy_service.list_impact(limit=10)},
+            "timeline": {"items": strategy_service.list_timeline(limit=10)},
+        },
         "actions_base_url": "/api/v1/ops/actions",
         "events_quick_links": {
             "by_window": "/api/v1/events?time_from=2026-01-01T00:00:00Z&time_to=2099-01-01T00:00:00Z&window_id=<window_id>",
             "by_publish": "/api/v1/events?time_from=2026-01-01T00:00:00Z&time_to=2099-01-01T00:00:00Z&publish_id=<publish_id>",
             "by_job": "/api/v1/events?time_from=2026-01-01T00:00:00Z&time_to=2099-01-01T00:00:00Z&job_id=<job_id>",
+            "strategy_patches": "/api/v1/ops/strategy/patches",
+            "strategy_impact": "/api/v1/ops/strategy/impact",
+            "strategy_timeline": "/api/v1/ops/strategy/timeline",
         },
     }
     return templates.TemplateResponse(
