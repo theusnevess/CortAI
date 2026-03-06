@@ -20,6 +20,7 @@ from app.observability.event_query.errors import (
     TimeRangeRequiredError,
 )
 from app.observability.event_query.indexer import EventIndexer
+from app.observability.event_query.index_store.repo import EventIndexRepo
 from app.observability.event_query.models import (
     EventQueryFilters,
     EventQueryResult,
@@ -36,12 +37,14 @@ class EventQueryService:
     def __init__(
         self,
         indexer: EventIndexer | None = None,
+        index_repo: EventIndexRepo | None = None,
         *,
         forensics_enabled: bool | None = None,
         forensics_writer_allowlist: set[str] | None = None,
         cursor_signing_policy: SigningPolicy | None = None,
     ) -> None:
         self.indexer = indexer or EventIndexer()
+        self.index_repo = index_repo
         if forensics_enabled is None:
             forensics_enabled = os.getenv("FORENSICS_ENABLED", "").strip().lower() in {"1", "true", "yes"}
         self.forensics_enabled = forensics_enabled
@@ -89,7 +92,7 @@ class EventQueryService:
             cursor_last = (cursor_obj.last.ts, cursor_obj.last.event_id)
             query_shape_id = "WITH_CURSOR"
 
-        result = self.indexer.scan(filters=filters, limit=limit, cursor_last=cursor_last)
+        result = self._search(filters=filters, limit=limit, cursor_last=cursor_last)
 
         next_cursor = None
         if result.has_more and result.items:
@@ -111,6 +114,21 @@ class EventQueryService:
             has_more=result.has_more,
             query_shape_id=query_shape_id,
         )
+
+    def _search(
+        self,
+        *,
+        filters: EventQueryFilters,
+        limit: int,
+        cursor_last: tuple[str, str] | None,
+    ) -> EventQueryResult:
+        if self.index_repo is not None:
+            try:
+                if self.index_repo.is_available():
+                    return self.index_repo.search(filters, limit, cursor_last=cursor_last)
+            except Exception:  # noqa: BLE001
+                pass
+        return self.indexer.scan(filters=filters, limit=limit, cursor_last=cursor_last)
 
     def get_pipeline_trace(self, request: TraceRequest, limit: int = 500) -> PipelineTrace:
         """Reconstrui trace de pipeline de forma deterministica."""
