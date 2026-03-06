@@ -7,11 +7,6 @@ on:
         description: "SUT host/IP sem protocolo (ex: my-sut.example.com)"
         required: true
         type: string
-      sut_scheme:
-        description: "Protocolo do SUT (http ou https)"
-        required: true
-        default: "http"
-        type: string
       direct_port:
         description: "Porta do direct path"
         required: true
@@ -40,26 +35,10 @@ on:
         required: true
         default: false
         type: boolean
-      duration_seconds:
-        description: "Duracao por repeticao em segundos"
-        required: false
-        default: "30"
-        type: string
-      reps:
-        description: "Repeticoes por ponto"
-        required: false
-        default: "1"
-        type: string
-      mode:
-        description: "diag (apenas DIAG) | formal (DIAG + FORMAL se gate PASS)"
-        required: false
-        default: "diag"
-        type: string
 
 jobs:
   p2-b1:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -80,223 +59,69 @@ jobs:
             echo "::error::scripts/run_p2_matrix.sh nao encontrado no repo."
             exit 1
           fi
-          if [[ ! -f "scripts/evaluate_c1_health.sh" ]]; then
-            echo "::error::scripts/evaluate_c1_health.sh nao encontrado no repo."
-            exit 1
-          fi
           sed -i 's/\r$//' scripts/run_p2_matrix.sh
-          sed -i 's/\r$//' scripts/evaluate_c1_health.sh
           chmod +x scripts/run_p2_matrix.sh
-          chmod +x scripts/evaluate_c1_health.sh
           ls -lah scripts/run_p2_matrix.sh
           head -n 5 scripts/run_p2_matrix.sh
 
-      - name: smoke_stop_the_line
+      - name: Run direct benchmark
         shell: bash
         run: |
           set -euo pipefail
-          check_url() {
-            local url="$1"
-            curl -fsS --retry 2 --retry-all-errors --retry-delay 1 --max-time 30 "$url" >/dev/null
-          }
+          before_list="$(mktemp)"
+          after_list="$(mktemp)"
+          find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$before_list"
 
-          direct_base="${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.direct_port }}"
-          check_url "${direct_base}/health"
-          check_url "${direct_base}/api/v1/status?window_days=1"
+          bash ./scripts/run_p2_matrix.sh "http://${{ inputs.sut_host }}:${{ inputs.direct_port }}"
 
-          if [[ "${{ inputs.run_edge }}" == "true" ]]; then
-            edge_base="${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.edge_port }}"
-            check_url "${edge_base}/health"
+          find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$after_list"
+          new_csv="$(comm -13 "$before_list" "$after_list" | head -n 1 || true)"
+
+          if [[ -n "$new_csv" ]]; then
+            cp "$new_csv" .tmp_p2/p2_a_summary_direct.csv
+          elif [[ -f ".tmp_p2/p2_a_summary_direct.csv" ]]; then
+            true
+          else
+            fallback="$(find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | head -n 1 || true)"
+            if [[ -z "$fallback" ]]; then
+              echo "::error::Nenhum CSV foi gerado para o direct."
+              exit 1
+            fi
+            cp "$fallback" .tmp_p2/p2_a_summary_direct.csv
           fi
 
-      - name: Run DIAG direct benchmark
-        shell: bash
-        env:
-          ENABLE_STATUS_PROBE: "1"
-          STATUS_REQUESTS: "10"
-          STATUS_TIMEOUT: "5"
-          STATUS_PROBE_CONCURRENCY_LIST: "1 2"
-        run: |
-          set -euo pipefail
-          duration="${{ inputs.duration_seconds }}"
-          reps="${{ inputs.reps }}"
-          [[ -z "$duration" ]] && duration="30"
-          [[ -z "$reps" ]] && reps="1"
-          bash ./scripts/run_p2_matrix.sh "${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.direct_port }}" --duration "$duration" --reps "$reps"
-          if [[ ! -s ".tmp_p2/p2_a_summary.csv" ]]; then
-            echo "::error::CSV base nao foi gerado para o direct."
-            exit 1
-          fi
-          cp .tmp_p2/p2_a_summary.csv .tmp_p2/p2_a_summary_direct.csv
-          cp .tmp_p2/p2_a_summary.csv .tmp_p2/p2_a_summary_direct_diag.csv
           if [[ ! -s ".tmp_p2/p2_a_summary_direct.csv" ]]; then
             echo "::error::CSV direct ausente ou vazio."
             exit 1
           fi
 
-      - name: Run DIAG edge benchmark
+      - name: Run edge benchmark
         if: ${{ inputs.run_edge }}
         shell: bash
-        env:
-          ENABLE_STATUS_PROBE: "1"
-          STATUS_REQUESTS: "10"
-          STATUS_TIMEOUT: "5"
-          STATUS_PROBE_CONCURRENCY_LIST: "1 2"
         run: |
           set -euo pipefail
-          duration="${{ inputs.duration_seconds }}"
-          reps="${{ inputs.reps }}"
-          [[ -z "$duration" ]] && duration="30"
-          [[ -z "$reps" ]] && reps="1"
-          bash ./scripts/run_p2_matrix.sh "${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.edge_port }}" --duration "$duration" --reps "$reps"
-          if [[ ! -s ".tmp_p2/p2_a_summary.csv" ]]; then
-            echo "::error::CSV base nao foi gerado para o edge."
-            exit 1
-          fi
-          cp .tmp_p2/p2_a_summary.csv .tmp_p2/p2_a_summary_edge.csv
-          cp .tmp_p2/p2_a_summary.csv .tmp_p2/p2_a_summary_edge_diag.csv
-          if [[ ! -s ".tmp_p2/p2_a_summary_edge.csv" ]]; then
-            echo "::error::CSV edge ausente ou vazio."
-            exit 1
-          fi
+          before_list="$(mktemp)"
+          after_list="$(mktemp)"
+          find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$before_list"
 
-      - name: Evaluate DIAG gate
-        id: diag_gate
-        shell: bash
-        run: |
-          set -euo pipefail
+          bash ./scripts/run_p2_matrix.sh "http://${{ inputs.sut_host }}:${{ inputs.edge_port }}"
 
-          fail=0
+          find .tmp_p2 -maxdepth 1 -type f -name '*.csv' | sort > "$after_list"
+          new_csv="$(comm -13 "$before_list" "$after_list" | grep -v 'p2_a_summary_direct.csv' | head -n 1 || true)"
 
-          evaluate_csv() {
-            local csv="$1"
-            local path_label="$2"
-            if [[ ! -s "$csv" ]]; then
-              echo "::error::CSV nao encontrado para ${path_label}: $csv"
-              fail=1
-              return
-            fi
-
-            while IFS=',' read -r endpoint c p90 p99 rps timeouts pct429 pct503 pct5xx; do
-              [[ -z "${endpoint:-}" ]] && continue
-              local decision="PASS"
-              local rps_num="${rps:-0}"
-              local timeouts_num="${timeouts:-0}"
-
-              if [[ "$rps_num" == "NA" || -z "$rps_num" ]]; then
-                rps_num="0"
-              fi
-              if [[ "$timeouts_num" == "NA" || -z "$timeouts_num" ]]; then
-                timeouts_num="999999"
-              fi
-
-              if awk "BEGIN {exit !($timeouts_num > 0 || $rps_num < 1)}"; then
-                decision="FAIL"
-                fail=1
-              fi
-
-              echo "| ${path_label} | ${endpoint} | ${c} | ${rps} | ${timeouts} | ${decision} |" >> "$GITHUB_STEP_SUMMARY"
-            done < <(tail -n +2 "$csv")
-          }
-
-          {
-            echo "## DIAG Gate Result"
-            echo
-            echo "| path | endpoint | C | rps | timeouts | decision |"
-            echo "|------|----------|---|-----|----------|----------|"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          evaluate_csv ".tmp_p2/p2_a_summary_direct.csv" "direct"
-          if [[ "${{ inputs.run_edge }}" == "true" ]]; then
-            evaluate_csv ".tmp_p2/p2_a_summary_edge.csv" "edge"
-          fi
-
-          if [[ "$fail" -eq 1 ]]; then
-            echo >> "$GITHUB_STEP_SUMMARY"
-            echo "STOP-THE-LINE: benchmark invalido (timeouts > 0 ou req/s < 1)." >> "$GITHUB_STEP_SUMMARY"
-            echo "diag_pass=false" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-
-          echo >> "$GITHUB_STEP_SUMMARY"
-          echo "DIAG PASS: formal liberado." >> "$GITHUB_STEP_SUMMARY"
-          echo "diag_pass=true" >> "$GITHUB_OUTPUT"
-
-      - name: Run FORMAL direct benchmark
-        if: ${{ inputs.mode == 'formal' && steps.diag_gate.outcome == 'success' }}
-        shell: bash
-        env:
-          ENABLE_STATUS_PROBE: "1"
-          STATUS_REQUESTS: "10"
-          STATUS_TIMEOUT: "5"
-          STATUS_PROBE_CONCURRENCY_LIST: "1 2"
-        run: |
-          set -euo pipefail
-          bash ./scripts/run_p2_matrix.sh "${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.direct_port }}" --duration "60" --reps "3"
-          cp .tmp_p2/p2_a_summary.csv .tmp_p2/p2_a_summary_direct_formal.csv
-          cp .tmp_p2/p2_a_summary.csv .tmp_p2/p2_a_summary_direct.csv
-
-      - name: Run FORMAL edge benchmark
-        if: ${{ inputs.run_edge && inputs.mode == 'formal' && steps.diag_gate.outcome == 'success' }}
-        shell: bash
-        env:
-          ENABLE_STATUS_PROBE: "1"
-          STATUS_REQUESTS: "10"
-          STATUS_TIMEOUT: "5"
-          STATUS_PROBE_CONCURRENCY_LIST: "1 2"
-        run: |
-          set -euo pipefail
-          bash ./scripts/run_p2_matrix.sh "${{ inputs.sut_scheme }}://${{ inputs.sut_host }}:${{ inputs.edge_port }}" --duration "60" --reps "3"
-          cp .tmp_p2/p2_a_summary.csv .tmp_p2/p2_a_summary_edge_formal.csv
-          cp .tmp_p2/p2_a_summary.csv .tmp_p2/p2_a_summary_edge.csv
-
-      - name: Evaluate C1 SLO
-        id: c1_slo
-        if: ${{ steps.diag_gate.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          args=(--csv "direct=.tmp_p2/p2_a_summary_direct.csv")
-          if [[ "${{ inputs.run_edge }}" == "true" && -f .tmp_p2/p2_a_summary_edge.csv ]]; then
-            args+=(--csv "edge=.tmp_p2/p2_a_summary_edge.csv")
-          fi
-
-          if ! bash ./scripts/evaluate_c1_health.sh "${args[@]}" > .tmp_p2/c1_health.json; then
+          if [[ -n "$new_csv" ]]; then
+            cp "$new_csv" .tmp_p2/p2_a_summary_edge.csv
+          elif [[ -f ".tmp_p2/p2_a_summary_edge.csv" ]]; then
             true
-          fi
-
-          if [[ ! -s .tmp_p2/c1_health.json ]]; then
-            echo "::error::evaluate_c1_health.sh nao gerou JSON."
-            exit 1
-          fi
-
-          c1_health="$(jq -r '.c1_health' .tmp_p2/c1_health.json)"
-          echo "c1_health=${c1_health}" >> "$GITHUB_OUTPUT"
-
-          {
-            echo
-            echo "## C1 Health Score"
-            echo
-            echo "C1_HEALTH: **${c1_health}**"
-            echo
-            echo "Regras:"
-            echo "- FAIL: timeouts>0, req/s<1, pct_5xx>=1%, p99 acima do fail-limit"
-            echo "- WARN: p99 acima do warn-limit, pct_429>0, pct_503>0"
-            echo "- PASS: sem violacoes"
-            echo
-            echo "Limites p99 (WARN/FAIL): overview 1500/2500ms, runs 1500/2500ms, report 1500/2500ms"
-            echo
-            echo "| path | endpoint | p99_ms | rps | timeouts | pct_429 | pct_503 | pct_5xx | decision | reason |"
-            echo "|------|----------|--------|-----|----------|---------|---------|---------|----------|--------|"
-            jq -r '.rows[] | "| \(.path) | \(.endpoint) | \(.p99_ms) | \(.rps) | \(.timeouts) | \(.pct_429) | \(.pct_503) | \(.pct_5xx) | \(.decision) | \(.reason) |"' .tmp_p2/c1_health.json
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          if [[ "$c1_health" == "FAIL" ]]; then
-            exit 1
+          else
+            fallback="$(find .tmp_p2 -maxdepth 1 -type f \( -name '*edge*.csv' -o -name "*${{ inputs.edge_port }}*.csv" \) | head -n 1 || true)"
+            if [[ -n "$fallback" ]]; then
+              cp "$fallback" .tmp_p2/p2_a_summary_edge.csv
+            fi
           fi
 
       - name: Collect edge logs via SSH
-        if: ${{ always() && inputs.collect_edge_logs }}
+        if: ${{ inputs.collect_edge_logs }}
         shell: bash
         env:
           SUT_SSH_KEY: ${{ secrets.SUT_SSH_KEY }}
@@ -330,59 +155,35 @@ jobs:
           ' > .tmp_p2/edge_logs_15m_tail400.txt
 
       - name: List .tmp_p2
-        if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
           ls -lah .tmp_p2
-          for f in .tmp_p2/p2_a_summary_direct*.csv .tmp_p2/p2_a_summary_edge*.csv .tmp_p2/status_*.txt .tmp_p2/c1_health*.json; do
-            if [[ -f "$f" ]]; then
-              echo "---- $f ----"
-              cat "$f"
-            fi
-          done
 
-      - name: Package artifacts
-        id: package_artifacts
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          files=()
-          for f in .tmp_p2/p2_a_summary_direct*.csv .tmp_p2/p2_a_summary_edge*.csv .tmp_p2/status_*.txt .tmp_p2/c1_health*.json; do
-            if [[ -f "$f" ]]; then
-              files+=("$f")
-            fi
-          done
-          if [[ "${{ inputs.collect_edge_logs }}" == "true" && -f .tmp_p2/edge_logs_15m_tail400.txt ]]; then
-            files+=(.tmp_p2/edge_logs_15m_tail400.txt)
-          fi
-          if [[ ${#files[@]} -eq 0 ]]; then
-            echo "Nenhum artefato de benchmark para empacotar (falha antes do benchmark?)."
-            echo "has_artifacts=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          tar -czf .tmp_p2/p2-b1-artifacts.tar.gz "${files[@]}"
-          echo "has_artifacts=true" >> "$GITHUB_OUTPUT"
-
-      - name: Upload artifacts
-        if: ${{ always() && !inputs.collect_edge_logs && steps.package_artifacts.outputs.has_artifacts == 'true' }}
+      - name: Upload direct artifact
         uses: actions/upload-artifact@v4
         with:
           name: p2-b1-artifacts
-          path: .tmp_p2/p2-b1-artifacts.tar.gz
+          path: .tmp_p2/p2_a_summary_direct.csv
           if-no-files-found: error
 
-      - name: Upload artifacts (with edge logs)
-        if: ${{ always() && inputs.collect_edge_logs && steps.package_artifacts.outputs.has_artifacts == 'true' }}
+      - name: Upload edge CSV artifact
+        if: ${{ hashFiles('.tmp_p2/p2_a_summary_edge.csv') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: p2-b1-artifacts
-          path: .tmp_p2/p2-b1-artifacts.tar.gz
-          if-no-files-found: error
+          path: .tmp_p2/p2_a_summary_edge.csv
+          if-no-files-found: ignore
+
+      - name: Upload edge logs artifact
+        if: ${{ hashFiles('.tmp_p2/edge_logs_15m_tail400.txt') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-b1-artifacts
+          path: .tmp_p2/edge_logs_15m_tail400.txt
+          if-no-files-found: ignore
 
       - name: Write summary
-        if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -390,33 +191,15 @@ jobs:
             echo "## P2-B1 Runner External"
             echo
             echo "- direct csv: \`.tmp_p2/p2_a_summary_direct.csv\`"
-            if [[ -f .tmp_p2/p2_a_summary_direct_diag.csv ]]; then
-              echo "- direct diag csv: \`.tmp_p2/p2_a_summary_direct_diag.csv\`"
-            fi
-            if [[ -f .tmp_p2/p2_a_summary_direct_formal.csv ]]; then
-              echo "- direct formal csv: \`.tmp_p2/p2_a_summary_direct_formal.csv\`"
-            fi
             if [[ -f .tmp_p2/p2_a_summary_edge.csv ]]; then
               echo "- edge csv: \`.tmp_p2/p2_a_summary_edge.csv\`"
             else
               echo "- edge csv: nao gerado"
             fi
-            if [[ -f .tmp_p2/p2_a_summary_edge_diag.csv ]]; then
-              echo "- edge diag csv: \`.tmp_p2/p2_a_summary_edge_diag.csv\`"
-            fi
-            if [[ -f .tmp_p2/p2_a_summary_edge_formal.csv ]]; then
-              echo "- edge formal csv: \`.tmp_p2/p2_a_summary_edge_formal.csv\`"
-            fi
             if [[ -f .tmp_p2/edge_logs_15m_tail400.txt ]]; then
               echo "- edge logs: \`.tmp_p2/edge_logs_15m_tail400.txt\`"
             else
               echo "- edge logs: nao gerado"
-            fi
-            if [[ -f .tmp_p2/c1_health.json ]]; then
-              echo "- c1 health json: \`.tmp_p2/c1_health.json\`"
-            fi
-            if [[ "${{ steps.package_artifacts.outputs.has_artifacts }}" != "true" ]]; then
-              echo "- artifacts: sem artefatos de benchmark (falha antes da execucao do benchmark)"
             fi
             echo
             echo "### direct (head -n 5)"

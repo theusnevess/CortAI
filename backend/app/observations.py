@@ -132,6 +132,6 @@ def persist_observation(observation: Observation) -> None:
 
     with _jsonl_lock(OBSERVATION_LOG_PATH, exclusive=True):
         with open(OBSERVATION_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(observation.dict()) + "\n")
+            f.write(json.dumps(observation.model_dump()) + "\n")
 
     _persist_observation_postgres(observation)
