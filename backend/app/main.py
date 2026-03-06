@@ -16,6 +16,8 @@ from app.api.v1.endpoints import (
 from app.cognitive_core import run_cognitive_cycle
 from app.version import get_app_version
 from app.worker import execute_action
+from app.ops.readiness import evaluate_readiness
+from fastapi.responses import JSONResponse
 
 # --- Inicialização da Aplicação ---
 # Criando a instância principal do FastAPI.
@@ -108,6 +110,16 @@ def health_check():
     if build_payload:
         response["build"] = build_payload
     return response
+
+
+@app.get("/ready")
+def readiness_check():
+    """Readiness operacional para rollout e expansão."""
+    status = evaluate_readiness()
+    payload = status.to_dict()
+    if status.ready:
+        return payload
+    return JSONResponse(status_code=503, content=payload)
 
 # Ponto único de entrada da observação
 @app.post("/observe")
