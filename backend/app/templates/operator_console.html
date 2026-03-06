@@ -178,6 +178,95 @@
       <p><a href="{{ payload.events_quick_links.by_window }}">{{ payload.events_quick_links.by_window }}</a></p>
       <p><a href="{{ payload.events_quick_links.by_publish }}">{{ payload.events_quick_links.by_publish }}</a></p>
       <p><a href="{{ payload.events_quick_links.by_job }}">{{ payload.events_quick_links.by_job }}</a></p>
+      <p><a href="{{ payload.events_quick_links.strategy_patches }}">{{ payload.events_quick_links.strategy_patches }}</a></p>
+      <p><a href="{{ payload.events_quick_links.strategy_impact }}">{{ payload.events_quick_links.strategy_impact }}</a></p>
+      <p><a href="{{ payload.events_quick_links.strategy_timeline }}">{{ payload.events_quick_links.strategy_timeline }}</a></p>
+    </section>
+
+    <section class="card" style="margin-top:16px;">
+      <h2>Strategy Observatory / Patches</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>patch_id</th>
+            <th>account_id</th>
+            <th>window_id</th>
+            <th>stage</th>
+            <th>status</th>
+            <th>reason</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for item in payload.strategy.patches["items"] %}
+          <tr>
+            <td><code>{{ item.patch_id }}</code></td>
+            <td>{{ item.account_id }}</td>
+            <td><code>{{ item.window_id }}</code></td>
+            <td>{{ item.policy_stage }}</td>
+            <td>{{ item.status }}</td>
+            <td><code>{{ item.reason_code }}</code></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6" class="muted">Sem patches observados.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card" style="margin-top:16px;">
+      <h2>Strategy Observatory / Impact</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>patch_id</th>
+            <th>window_before</th>
+            <th>window_after</th>
+            <th>status</th>
+            <th>delta</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for item in payload.strategy.impact["items"] %}
+          <tr>
+            <td><code>{{ item.patch_id }}</code></td>
+            <td><code>{{ item.window_id_before }}</code></td>
+            <td><code>{{ item.window_id_after }}</code></td>
+            <td>{{ item.status }}</td>
+            <td><pre>{{ item.scorecard_delta | tojson(indent=2) }}</pre></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5" class="muted">Sem impacto calculado.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card" style="margin-top:16px;">
+      <h2>Strategy Observatory / Timeline</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>created_at</th>
+            <th>patch_id</th>
+            <th>window_id</th>
+            <th>status</th>
+            <th>reason</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for item in payload.strategy.timeline["items"] %}
+          <tr>
+            <td>{{ item.created_at }}</td>
+            <td><code>{{ item.patch_id }}</code></td>
+            <td><code>{{ item.window_id }}</code></td>
+            <td>{{ item.status }}</td>
+            <td><code>{{ item.reason_code }}</code></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5" class="muted">Sem timeline disponÃ­vel.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
     </section>
   </main>
   <script>
