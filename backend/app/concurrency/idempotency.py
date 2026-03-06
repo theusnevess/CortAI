@@ -84,7 +84,9 @@ class IdempotencyManager:
             if not isinstance(op_key, str) or not op_key:
                 continue
             if str(event.get("event_type", "")).startswith("IDEMPOTENCY/"):
-                state[op_key] = dict(event)
+                merged = dict(state.get(op_key, {}))
+                merged.update(event)
+                state[op_key] = merged
         return state
 
 
