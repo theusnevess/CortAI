@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Operator Console</title>
+  <style>
+    :root {
+      --bg: #f1eee6;
+      --card: #fffaf1;
+      --ink: #1f1a14;
+      --muted: #6d6254;
+      --line: #d7c8b5;
+      --accent: #9a3412;
+      --ok: #2f6b3b;
+      --warn: #a16207;
+      --critical: #b91c1c;
+    }
+    body { margin: 0; background: linear-gradient(180deg, #e7dccd 0%, var(--bg) 100%); color: var(--ink); font-family: Georgia, "Times New Roman", serif; }
+    main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    h1, h2 { margin: 0 0 12px; }
+    h1 { font-size: 2.2rem; letter-spacing: 0.02em; }
+    .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 18px; box-shadow: 0 10px 30px rgba(31, 26, 20, 0.08); }
+    .muted { color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+    th, td { text-align: left; padding: 8px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .pill { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 0.82rem; font-weight: 700; }
+    .ok { background: #dcefdc; color: var(--ok); }
+    .warn { background: #f8e8b4; color: var(--warn); }
+    .critical { background: #ffd6d6; color: var(--critical); }
+    code { background: #f5ecdf; padding: 2px 6px; border-radius: 8px; }
+    a { color: var(--accent); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Operator Console</h1>
+    <p class="muted">Superfície operacional read-only para rollout, batches, tasks e alertas.</p>
+
+    <section class="grid">
+      <article class="card">
+        <h2>Overview</h2>
+        <p><strong>Rollout:</strong> {{ "enabled" if payload.health.rollout_enabled else "disabled" }}</p>
+        <p><strong>Kill switch:</strong> {{ "enabled" if payload.health.kill_switch_enabled else "disabled" }}</p>
+        <p><strong>Scheduler:</strong> {{ payload.health.scheduler_status }}</p>
+        <p><strong>Workers:</strong> {{ payload.health.workers_status }}</p>
+        <p><strong>Critical alerts:</strong> {{ payload.health.active_critical_alerts }}</p>
+        <p><strong>/events p95:</strong> {{ payload.health.event_query_p95_ms }}</p>
+        <p><strong>Fallback rate:</strong> {{ payload.health.fallback_rate }}</p>
+      </article>
+
+      <article class="card">
+        <h2>Rollout</h2>
+        <p><strong>Name:</strong> {{ payload.rollout.rollout_name }}</p>
+        <pre>{{ payload.rollout.batch_summary | tojson(indent=2) }}</pre>
+      </article>
+    </section>
+
+    <section class="card" style="margin-top:16px;">
+      <h2>Windows / Batches</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>window_id</th>
+            <th>account_id</th>
+            <th>status</th>
+            <th>scorecard</th>
+            <th>attribution</th>
+            <th>patch</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for item in payload.windows["items"] %}
+          <tr>
+            <td><code>{{ item.window_id }}</code></td>
+            <td>{{ item.account_id }}</td>
+            <td>{{ item.status }}</td>
+            <td>{{ item.scorecard }}</td>
+            <td>{{ item.attribution }}</td>
+            <td>{{ item.patch_application }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6" class="muted">Sem batches carregados.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card" style="margin-top:16px;">
+      <h2>Tasks / Workers</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>task_id</th>
+            <th>task_type</th>
+            <th>worker_id</th>
+            <th>status</th>
+            <th>op_key</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for item in payload.tasks["items"] %}
+          <tr>
+            <td><code>{{ item.task_id }}</code></td>
+            <td>{{ item.task_type }}</td>
+            <td>{{ item.worker_id }}</td>
+            <td>{{ item.status }}</td>
+            <td><code>{{ item.op_key }}</code></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5" class="muted">Sem tasks observadas.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card" style="margin-top:16px;">
+      <h2>Alerts / SLO</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>severity</th>
+            <th>metric</th>
+            <th>reason_code</th>
+            <th>action</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for item in payload.alerts["items"] %}
+          <tr>
+            <td>
+              <span class="pill {{ item.severity|lower }}">{{ item.severity }}</span>
+            </td>
+            <td>{{ item.metric_name }}</td>
+            <td><code>{{ item.reason_code }}</code></td>
+            <td>{{ item.action }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4" class="muted">Sem alertas ativos.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card" style="margin-top:16px;">
+      <h2>Event Trace Quick Access</h2>
+      <p><a href="{{ payload.events_quick_links.by_window }}">{{ payload.events_quick_links.by_window }}</a></p>
+      <p><a href="{{ payload.events_quick_links.by_publish }}">{{ payload.events_quick_links.by_publish }}</a></p>
+      <p><a href="{{ payload.events_quick_links.by_job }}">{{ payload.events_quick_links.by_job }}</a></p>
+    </section>
+  </main>
+</body>
+</html>
