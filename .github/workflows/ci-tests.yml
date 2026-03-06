@@ -54,22 +54,22 @@ jobs:
           cat > .env << EOF
           # Database
           DB_USER=cortai_admin
-          DB_PASSWORD=cortai_secret_pass_123
+          DB_PASSWORD=${{ secrets.CORTAI_DB_PASSWORD }}
           DB_NAME=cortai_db
-          DATABASE_URL=postgresql://cortai_admin:cortai_secret_pass_123@db:5432/cortai_db
+          DATABASE_URL=postgresql://cortai_admin:${{ secrets.CORTAI_DB_PASSWORD }}@db:5432/cortai_db
           
           # Redis
           REDIS_URL=redis://redis:6379/0
           
           # MinIO (Storage)
           MINIO_ROOT_USER=ci_minio_user
-          MINIO_ROOT_PASSWORD=ci_minio_pass_123
+          MINIO_ROOT_PASSWORD=${{ secrets.CORTAI_MINIO_ROOT_PASSWORD }}
           MINIO_ENDPOINT=http://minio:9000
           MINIO_BUCKET_VIDEOS=videos-raw
           MINIO_BUCKET_CLIPS=clips-final
           
           # Security
-          SECRET_KEY=ci_placeholder_not_a_secret
+          SECRET_KEY=test_secret_key_for_ci
           ALGORITHM=HS256
           ACCESS_TOKEN_EXPIRE_MINUTES=30
           
@@ -86,14 +86,6 @@ jobs:
       - name: Run Alembic migrations
         run: |
           docker compose run --rm api alembic upgrade head
-
-      - name: Security audit (pip-audit)
-        run: |
-          # Temporary exception:
-          # GHSA-wj6h-64fc-37mp / CVE-2024-23342 (python-ecdsa)
-          # Upstream status: no fix planned.
-          # Documented in SECURITY_ACCEPTED_RISKS.md
-          docker compose run --rm api sh -lc "python -m pip install -q 'wheel>=0.46.2' pip-audit && pip-audit --ignore-vuln GHSA-wj6h-64fc-37mp"
       
       - name: Run pytest
         run: |
