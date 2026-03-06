@@ -1,14 +1,33 @@
 from datetime import datetime
 from time import perf_counter_ns
 import os
+import json
+import hmac
+import hashlib
+import asyncio
+import logging
+from copy import deepcopy
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
+import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.metrics import _emit_metrics_endpoint_timing
+from app.api.v1.endpoints.observability import _build_observability_overview_payload
 from app.db.session import engine
 from app.db.session import get_db
+from app.observability.webhook_metrics import WebhookMetrics
+from app.observability.runtime_health import (
+    build_c1_health_payload as _build_c1_health_payload,
+    classify_c1_health_row as _classify_c1_health_row,
+    clear_runtime_c1_health_cache as _clear_runtime_c1_health_cache,
+    get_runtime_c1_health_cached as _get_runtime_c1_health_cached,
+    with_c1_health_meta as _with_c1_health_meta,
+    should_include_internal_status as _should_include_c1_health,
+)
 from app.slo_contract import (
     SLO_ENDPOINT_THRESHOLDS,
     SLO_STATUS_WINDOW_DAYS_DEFAULT,
@@ -16,6 +35,28 @@ from app.slo_contract import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+_C1_HEALTH_STATUS_WINDOW_MINUTES = 15
+_PUBLIC_STATUS_VERSION = "v1"
+_PUBLIC_ACTION_MAP = {
+    "run_warmup": "inspect",
+    "reduce_force_live_burst": "monitor",
+    "inspect_upstream_path": "inspect",
+    "open_report": "monitor",
+    "monitor": "monitor",
+    "none": "none",
+}
+_PUBLIC_SIGNAL_FORBIDDEN_SUBSTRINGS = (
+    "source_ref",
+    "minio",
+    "job_id",
+    "query_key",
+    "key=",
+    "/tmp",
+    "/storage/",
+)
+_public_webhook_last_state: str | None = None
 
 
 def _new_db_stats() -> dict[str, int]:
@@ -120,8 +161,225 @@ def _read_capacity_config() -> dict:
     }
 
 
+def _read_read_api_config() -> dict:
+    """
+    Exibe configuracao declarativa do read-api para auditoria operacional.
+    """
+    enabled_raw = str(os.getenv("READ_API_ENABLED", "false")).strip().lower()
+    enabled = enabled_raw in {"1", "true", "yes", "on"}
+    base_url = os.getenv("READ_API_BASE_URL", "")
+    return {
+        "enabled": enabled,
+        "up": enabled,
+        "base_url": base_url,
+    }
+
+
+def _to_public_status_action(action: str | None) -> str:
+    normalized = str(action or "").strip().lower()
+    return _PUBLIC_ACTION_MAP.get(normalized, "inspect")
+
+
+def _extract_optional_policy_fields(panel: dict[str, Any]) -> dict[str, Any]:
+    """
+    Projeta campos opcionais e sanitizados de policy para /status/public.
+    Nunca expoe identificadores internos, paths, nem estruturas complexas.
+    """
+    policy = panel.get("policy")
+    if not isinstance(policy, dict):
+        return {}
+
+    out: dict[str, Any] = {}
+
+    state = policy.get("state")
+    decision = policy.get("decision")
+    score = policy.get("score")
+    signals = policy.get("signals")
+
+    if isinstance(state, str) and state:
+        out["decision_state"] = state
+    else:
+        legacy_state = policy.get("system_state")
+        if isinstance(legacy_state, str) and legacy_state:
+            out["decision_state"] = legacy_state
+
+    if isinstance(decision, str) and decision:
+        out["decision_action"] = decision
+
+    if isinstance(score, int):
+        out["score"] = score
+    else:
+        legacy_score = policy.get("trust_score")
+        if isinstance(legacy_score, int):
+            out["score"] = legacy_score
+
+    safe_signals: dict[str, Any] = {}
+    if isinstance(signals, dict):
+        for key, value in signals.items():
+            if not isinstance(key, str) or not key:
+                continue
+            if any(token in key.lower() for token in _PUBLIC_SIGNAL_FORBIDDEN_SUBSTRINGS):
+                continue
+            if value is None:
+                continue
+            if isinstance(value, (bool, int, float, str)):
+                safe_signals[key] = value
+                continue
+            if isinstance(value, list) and all(isinstance(item, (bool, int, float, str)) for item in value):
+                safe_signals[key] = value
+    elif isinstance(signals, list):
+        sanitized_list = [
+            item
+            for item in signals
+            if isinstance(item, str)
+            and item
+            and not any(token in item.lower() for token in _PUBLIC_SIGNAL_FORBIDDEN_SUBSTRINGS)
+        ]
+        if sanitized_list:
+            safe_signals["items"] = sanitized_list
+
+    if safe_signals:
+        out["signals"] = safe_signals
+
+    return out
+
+
+def _reset_public_webhook_state_for_tests() -> None:
+    """
+    Reset explicito do estado de transicao para testes deterministas.
+    """
+    global _public_webhook_last_state
+    _public_webhook_last_state = None
+
+
+def _public_webhook_url() -> str:
+    return str(os.getenv("STATUS_WEBHOOK_URL") or "").strip()
+
+
+def _build_public_webhook_headers(raw_body: bytes) -> dict[str, str]:
+    """
+    Monta headers do webhook com assinatura opcional por HMAC-SHA256.
+    """
+    headers = {"Content-Type": "application/json"}
+    secret = str(os.getenv("STATUS_WEBHOOK_SECRET") or "").strip()
+    if not secret:
+        return headers
+    signature = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    headers["X-Status-Signature"] = f"sha256={signature}"
+    return headers
+
+
+async def _send_public_status_webhook(url: str, payload: dict) -> None:
+    """
+    Envia webhook de status com timeout curto, sem retry no v1.
+    """
+    started_ns = perf_counter_ns()
+    raw_body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    headers = _build_public_webhook_headers(raw_body)
+    WebhookMetrics.record_attempt()
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.post(url, content=raw_body, headers=headers)
+        elapsed_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
+        if 200 <= int(response.status_code) < 300:
+            WebhookMetrics.record_success(latency_ms=int(elapsed_ms), status=int(response.status_code))
+        else:
+            WebhookMetrics.record_error(latency_ms=int(elapsed_ms), status=int(response.status_code))
+        logger.info(
+            "public_status_webhook_sent status=%s latency_ms=%s",
+            int(response.status_code),
+            int(elapsed_ms),
+        )
+    except Exception as exc:
+        elapsed_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
+        WebhookMetrics.record_error(latency_ms=int(elapsed_ms), status=None)
+        logger.warning(
+            "public_status_webhook_failed latency_ms=%s error=%s",
+            int(elapsed_ms),
+            str(exc),
+        )
+
+
+def _handle_webhook_task_done(task: asyncio.Task) -> None:
+    """
+    Consome excecao de task em background para evitar warnings silenciosos.
+    """
+    try:
+        task.result()
+    except Exception as exc:
+        logger.warning("public_status_webhook_task_exception error=%s", str(exc))
+
+
+def _maybe_trigger_public_status_webhook(payload: dict) -> None:
+    """
+    Dispara webhook apenas na transicao para action_required.
+    Nao bloqueia o request principal.
+    """
+    global _public_webhook_last_state
+    url = _public_webhook_url()
+    current_state = str(payload.get("state") or "").strip().lower()
+    previous_state = _public_webhook_last_state
+    _public_webhook_last_state = current_state
+
+    if not url:
+        return
+    if current_state != "action_required":
+        return
+    if previous_state == "action_required":
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(_send_public_status_webhook(url, payload))
+    task.add_done_callback(_handle_webhook_task_done)
+
+
+@router.get("/status/public")
+async def get_public_status(
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Endpoint publico read-only com payload sanitizado de estado operacional.
+    Reusa o builder do painel sem expor campos internos.
+    """
+    started_at = datetime.utcnow()
+    status_code = 500
+    query_fingerprint = "public_status=v1"
+    db_stats = _new_db_stats()
+    try:
+        panel = await _build_observability_overview_payload(db=db, db_stats=db_stats)
+        payload = {
+            "state": str((panel.get("trust") or {}).get("decision") or "degraded"),
+            "action": _to_public_status_action((panel.get("recommendation") or {}).get("action")),
+            "as_of": panel.get("as_of") or (datetime.utcnow().replace(microsecond=0).isoformat() + "Z"),
+            "version": _PUBLIC_STATUS_VERSION,
+        }
+        payload.update(_extract_optional_policy_fields(panel))
+        _maybe_trigger_public_status_webhook(payload)
+        status_code = 200
+        return JSONResponse(
+            status_code=200,
+            content=payload,
+            headers={"Cache-Control": "public, max-age=30"},
+        )
+    finally:
+        duration_ms = int(max(0.0, (datetime.utcnow() - started_at).total_seconds() * 1000.0))
+        _emit_metrics_endpoint_timing(
+            endpoint="/api/v1/status/public",
+            method="GET",
+            status_code=status_code,
+            duration_ms=duration_ms,
+            query_fingerprint=query_fingerprint,
+            db_us=db_stats["db_us"],
+            db_queries=db_stats["db_queries"],
+            db_pool_wait_us=db_stats["db_pool_wait_us"],
+        )
+
+
 @router.get("/status")
 async def get_status(
+    request: Request,
     window_days: int = Query(SLO_STATUS_WINDOW_DAYS_DEFAULT, ge=1),
     db: AsyncSession = Depends(get_db),
 ):
@@ -280,10 +538,16 @@ async def get_status(
             },
             # Config efetiva para correlacionar contensao C2 sem inspecao manual.
             "capacity_config": _read_capacity_config(),
+            "read_api": _read_read_api_config(),
             "read_path": {
                 "overview_freshness_seconds": None,
+                "overview_snapshot_status": "missing",
+                "overview_last_refreshed_at": None,
                 "runs_freshness_seconds": None,
+                "runs_snapshot_status": "missing",
+                "runs_last_refreshed_at": None,
                 "runs_key_count": 0,
+                "jobs_queued_count": 0,
             },
         }
         # Exibe freshness do read model para auditoria do caminho materializado.
@@ -291,28 +555,41 @@ async def get_status(
             fresh_stmt = (
                 text(
                     """
-                    SELECT EXTRACT(EPOCH FROM (NOW() - MAX(refreshed_at)))::int AS freshness_seconds
+                    SELECT
+                      EXTRACT(EPOCH FROM (NOW() - MAX(refreshed_at)))::int AS freshness_seconds,
+                      MAX(refreshed_at) AS last_refreshed_at
                     FROM metrics_overview_read_model
                     """
                 )
             )
-            freshness = (
+            row = (
                 await _execute_with_db_stats(
                     db,
                     fresh_stmt,
                     db_stats,
                 )
-            ).scalar()
-            if freshness is not None:
-                response["read_path"]["overview_freshness_seconds"] = max(0, int(freshness))
+            ).mappings().first()
+            if row is not None:
+                freshness = row.get("freshness_seconds")
+                last_refreshed_at = row.get("last_refreshed_at")
+                if freshness is not None:
+                    response["read_path"]["overview_freshness_seconds"] = max(0, int(freshness))
+                if last_refreshed_at is not None:
+                    response["read_path"]["overview_last_refreshed_at"] = last_refreshed_at.isoformat()
+                    response["read_path"]["overview_snapshot_status"] = (
+                        "fresh" if int(freshness or 0) <= 60 else "stale"
+                    )
         except Exception:
             # Em ambientes sem migration aplicada, mantem campo nulo.
             response["read_path"]["overview_freshness_seconds"] = None
+            response["read_path"]["overview_snapshot_status"] = "missing"
+            response["read_path"]["overview_last_refreshed_at"] = None
         try:
             runs_stmt = text(
                 """
                 SELECT
                   EXTRACT(EPOCH FROM (NOW() - MAX(refreshed_at)))::int AS freshness_seconds,
+                  MAX(refreshed_at) AS last_refreshed_at,
                   COUNT(*)::int AS key_count
                 FROM metrics_runs_read_model
                 """
@@ -326,15 +603,71 @@ async def get_status(
             ).mappings().first()
             if row is not None:
                 freshness = row.get("freshness_seconds")
+                last_refreshed_at = row.get("last_refreshed_at")
                 key_count = row.get("key_count")
                 if freshness is not None:
                     response["read_path"]["runs_freshness_seconds"] = max(0, int(freshness))
+                if last_refreshed_at is not None:
+                    response["read_path"]["runs_last_refreshed_at"] = last_refreshed_at.isoformat()
+                    response["read_path"]["runs_snapshot_status"] = (
+                        "fresh" if int(freshness or 0) <= 60 else "stale"
+                    )
                 if key_count is not None:
                     response["read_path"]["runs_key_count"] = max(0, int(key_count))
         except Exception:
             # Em ambientes sem migration aplicada, mantem campos default.
             response["read_path"]["runs_freshness_seconds"] = None
+            response["read_path"]["runs_snapshot_status"] = "missing"
+            response["read_path"]["runs_last_refreshed_at"] = None
             response["read_path"]["runs_key_count"] = 0
+        try:
+            jobs_stmt = text(
+                """
+                SELECT COUNT(*)::int AS queued_count
+                FROM metrics_read_refresh_jobs
+                WHERE status = 'queued' AND expires_at > NOW()
+                """
+            )
+            queued_count = (
+                await _execute_with_db_stats(
+                    db,
+                    jobs_stmt,
+                    db_stats,
+                )
+            ).scalar()
+            if queued_count is not None:
+                response["read_path"]["jobs_queued_count"] = max(0, int(queued_count))
+        except Exception:
+            response["read_path"]["jobs_queued_count"] = 0
+        if _should_include_c1_health(request):
+            try:
+                response["c1_health"] = await _get_runtime_c1_health_cached(db=db, db_stats=db_stats)
+            except Exception:
+                fallback = _build_c1_health_payload(
+                    [
+                        {
+                            "endpoint": ep,
+                            "path": "direct",
+                            "p99_ms": None,
+                            "rps": 0.0,
+                            "timeouts": 0,
+                            "pct_429": 0.0,
+                            "pct_503": 0.0,
+                            "pct_5xx": 0.0,
+                            "decision": "FAIL",
+                            "reasons": ["runtime_c1_health_unavailable"],
+                        }
+                        for ep in ("overview", "runs", "report")
+                    ],
+                    as_of=datetime.utcnow(),
+                    window_minutes=_C1_HEALTH_STATUS_WINDOW_MINUTES,
+                )
+                response["c1_health"] = _with_c1_health_meta(
+                    fallback,
+                    cached=False,
+                    cache_age_seconds=0,
+                    compute_ms=0,
+                )
         status_code = 200
         return response
     except HTTPException as e:

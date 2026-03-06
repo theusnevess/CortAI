@@ -1,18 +1,109 @@
-import os # Para operações de sistema de arquivos e variáveis de ambiente
-import uuid # Para manipulação de UUIDs
-import yt_dlp # Biblioteca para download de vídeos 
-from datetime import datetime # Manipulação de datas
-from slugify import slugify # Para criar nomes de arquivos seguros
-from app.services.storage import MinioService # Serviço de armazenamento MinIO
+import os  # Para operacoes de sistema de arquivos e variaveis de ambiente
+import re
+import socket
+import ssl
+import tempfile
+import uuid  # Para manipulacao de UUIDs
+from datetime import datetime  # Manipulacao de datas
+
+import requests
+import yt_dlp  # Biblioteca para download de videos
+from slugify import slugify  # Para criar nomes de arquivos seguros
+
+from app.agents.collector.errors import CollectorError
+from app.services.storage import MinioService  # Servico de armazenamento MinIO
+
+
+
+
+def _classify_collector_exc(exc: Exception) -> CollectorError:
+    """Classifica falhas conhecidas do coletor em um contrato estavel."""
+    msg = str(exc)
+
+    if isinstance(exc, ValueError):
+        return CollectorError(
+            "invalid_input",
+            "Entrada invalida para coleta.",
+            retryable=False,
+            cause=msg[:500],
+        )
+
+    if isinstance(exc, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in msg:
+        return CollectorError(
+            "ssl_cert_verify_failed",
+            "Falha de verificacao TLS/CA ao acessar a origem.",
+            retryable=True,
+            cause=msg[:500],
+        )
+
+    if isinstance(exc, socket.gaierror) or "getaddrinfo failed" in msg:
+        return CollectorError(
+            "dns_failed",
+            "Falha de DNS ao resolver o host da origem.",
+            retryable=True,
+            cause=msg[:500],
+        )
+
+    if isinstance(exc, (requests.Timeout, requests.ConnectTimeout, requests.ReadTimeout)) or "timed out" in msg.lower():
+        return CollectorError(
+            "timeout",
+            "Timeout ao acessar a origem.",
+            retryable=True,
+            cause=msg[:500],
+        )
+
+    match = re.search(r"\bHTTP Error (\d{3})\b", msg)
+    if match:
+        status = int(match.group(1))
+        if 400 <= status < 500:
+            error_type = "upstream_blocked" if status in (403, 429) else "http_4xx"
+            return CollectorError(
+                error_type,
+                f"Origem respondeu HTTP {status}.",
+                http_status=status,
+                retryable=status in (403, 429),
+                cause=msg[:500],
+            )
+        if 500 <= status < 600:
+            return CollectorError(
+                "http_5xx",
+                f"Origem respondeu HTTP {status}.",
+                http_status=status,
+                retryable=True,
+                cause=msg[:500],
+            )
+
+    return CollectorError(
+        "unknown",
+        "Falha desconhecida no coletor.",
+        retryable=True,
+        cause=msg[:500],
+    )
+
 
 class CollectorAgent:
     def __init__(self):
-        self.storage = MinioService()
+        self.storage = None
         # Caminho de download configurável (usa /tmp por padrão em containers)
-        self.download_path = os.getenv("COLLECTOR_DOWNLOAD_PATH", "/tmp/downloads")
+        default_download_path = os.path.join(tempfile.gettempdir(), "downloads")
+        self.download_path = os.getenv("COLLECTOR_DOWNLOAD_PATH", default_download_path)
         os.makedirs(self.download_path, exist_ok=True) # Garante que o diretório de download exista
 
     def process(self, url: str) -> dict:
+        if not isinstance(url, str) or not url.strip() or not re.match(r"^https?://", url.strip()):
+            err = _classify_collector_exc(ValueError(f"Invalid source_ref: {url!r}"))
+            return {
+                "title": None,
+                "duration": None,
+                "minio_path": None,
+                "source_type": None,
+                "metadata": {"original_url": url},
+                "error": err.to_dict(),
+            }
+
+        url = url.strip()
+        if self.storage is None:
+            self.storage = MinioService()
         print(f"⬇️ Iniciando download: {url}")
         
         # Tenta localizar o cookies.txt na pasta 'backend' relativa a este módulo
@@ -36,6 +127,11 @@ class CollectorAgent:
             'retries': 5, # Retry em caso de erros de rede
             'fragment_retries': 5,
         }
+
+        # O yt-dlp usa certifi por padrao quando disponivel. Neste runtime, o
+        # bundle valido e o store de CAs do sistema; por isso forcamos o modo
+        # no-certifi para alinhar o downloader ao mesmo trust store do requests.
+        ydl_opts['compat_opts'] = ['no-certifi']
 
         # Se temos cookies, passa para o yt-dlp para suportar vídeos privados/restritos
         if os.path.exists(cookie_file):
@@ -178,9 +274,7 @@ class CollectorAgent:
                 if use_playwright:
                     ydl_opts_audio['downloader'] = 'playwright'
                     ydl_opts_audio['downloader_args'] = {'playwright': {'timeout': 120}}
-                with yt_dlp.YoutubeDL(ydl_opts_audio) as ydl:
-                    info_dict = ydl.extract_info(url, download=True)
-                    file_path = ydl.prepare_filename(info_dict)
+                final_opts = ydl_opts_audio
             else:
                 final_opts = ydl_opts_playwright if use_playwright else ydl_opts
             # Tenta download padrão e, se falhar por "Requested format is not available", tenta formatos explícitos
@@ -263,9 +357,19 @@ class CollectorAgent:
                 "title": video_title,
                 "duration": duration,
                 "minio_path": minio_path,
-                "metadata": metadata
+                "source_type": download_type,
+                "metadata": metadata,
+                "error": None,
             }
 
-        except Exception as e:
-            print(f"❌ Erro no Agente Coletor: {e}")
-            raise e
+        except Exception as exc:
+            err = _classify_collector_exc(exc)
+            print(f"Erro no Agente Coletor ({err.error_type}): {err.message} | cause={err.cause}")
+            return {
+                "title": None,
+                "duration": None,
+                "minio_path": None,
+                "source_type": None,
+                "metadata": {"original_url": url},
+                "error": err.to_dict(),
+            }

@@ -1,3 +1,4 @@
+import os
 from fastapi import APIRouter, HTTPException, Depends # Importa dependências do FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession # Importa sessão assíncrona do SQLAlchemy
 from sqlalchemy.future import select # Função select para consultas
@@ -23,7 +24,7 @@ async def get_default_user(db: AsyncSession):
         # Se não tiver ninguém, cria o Admin
         user = User(
             email="admin@cortai.com",
-            password_hash="senha_segura_hash", # Em prod usamos hash real
+            password_hash=os.getenv("BOOTSTRAP_ADMIN_PASSWORD_HASH", "bootstrap-disabled"),
             name="Admin User"
         )
         db.add(user)

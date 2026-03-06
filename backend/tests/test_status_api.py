@@ -1,11 +1,15 @@
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 import uuid
+import asyncio
 
 import pytest
 from sqlalchemy import delete
 
 from app.db.models import MetricsEndpointDaily
+from app.api.v1.endpoints.metrics import process_read_refresh_jobs_once
+from app.api.v1.endpoints import status as status_endpoint
+from app.observability import runtime_health
 
 
 async def _ensure_metrics_endpoint_daily_table(db_session) -> None:
@@ -135,7 +139,7 @@ async def test_status_fail_on_slo_breach(client, db_session):
 
 
 @pytest.mark.anyio
-async def test_status_expoe_overview_freshness_seconds(client, seed_daily_metric):
+async def test_status_expoe_overview_freshness_seconds(client, seed_daily_metric, db_session):
     """
     Status deve expor freshness do read model do overview quando houver snapshot.
     """
@@ -149,18 +153,21 @@ async def test_status_expoe_overview_freshness_seconds(client, seed_daily_metric
         last_action_type_distribution={"write_artifact": 2},
     )
     overview = await client.get("/api/v1/metrics/overview", params={"days": 1, "force_live": "true"})
-    assert overview.status_code == 200
+    assert overview.status_code == 202
+    await process_read_refresh_jobs_once(db=db_session, limit=10)
 
     response = await client.get("/api/v1/status", params={"window_days": 7})
     assert response.status_code == 200
     payload = response.json()
     assert "read_path" in payload
     assert "overview_freshness_seconds" in payload["read_path"]
+    assert "overview_snapshot_status" in payload["read_path"]
+    assert "overview_last_refreshed_at" in payload["read_path"]
     assert payload["read_path"]["overview_freshness_seconds"] is None or payload["read_path"]["overview_freshness_seconds"] >= 0
 
 
 @pytest.mark.anyio
-async def test_status_expoe_runs_freshness_e_key_count(client, seed_observation):
+async def test_status_expoe_runs_freshness_e_key_count(client, seed_observation, db_session):
     """
     Status deve expor freshness e quantidade de chaves do runs read model.
     """
@@ -178,13 +185,455 @@ async def test_status_expoe_runs_freshness_e_key_count(client, seed_observation)
         "/api/v1/metrics/runs",
         params={"start_date": "2026-02-10", "end_date": "2026-02-10", "limit": 50, "offset": 0, "force_live": "true"},
     )
-    assert runs.status_code == 200
+    assert runs.status_code == 202
+    await process_read_refresh_jobs_once(db=db_session, limit=10)
 
     response = await client.get("/api/v1/status", params={"window_days": 7})
     assert response.status_code == 200
     payload = response.json()
     assert "read_path" in payload
     assert "runs_freshness_seconds" in payload["read_path"]
+    assert "runs_snapshot_status" in payload["read_path"]
+    assert "runs_last_refreshed_at" in payload["read_path"]
     assert "runs_key_count" in payload["read_path"]
+    assert "jobs_queued_count" in payload["read_path"]
     assert payload["read_path"]["runs_freshness_seconds"] is None or payload["read_path"]["runs_freshness_seconds"] >= 0
     assert isinstance(payload["read_path"]["runs_key_count"], int)
+
+
+@pytest.mark.anyio
+async def test_status_nao_expoe_c1_health_por_padrao(client, monkeypatch):
+    monkeypatch.delenv("EXPOSE_C1_HEALTH_STATUS", raising=False)
+    response = await client.get("/api/v1/status", params={"window_days": 7})
+    assert response.status_code == 200
+    payload = response.json()
+    assert "c1_health" not in payload
+
+
+@pytest.mark.anyio
+async def test_status_expoe_c1_health_com_env_e_header(client, seed_observation, monkeypatch):
+    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+    now = datetime.utcnow()
+    for idx in range(4):
+        await seed_observation(
+            timestamp=now - timedelta(minutes=1),
+            process_id=f"P_STATUS_C1_OV_{idx}",
+            source_outcome_id=f"outcome-status-c1-ov-{idx}",
+            facts={
+                "event_type": "metrics_endpoint_timing",
+                "endpoint": "/api/v1/metrics/overview",
+                "status_code": 200,
+                "duration_ms": 100,
+            },
+        )
+        await seed_observation(
+            timestamp=now - timedelta(minutes=1),
+            process_id=f"P_STATUS_C1_RUN_{idx}",
+            source_outcome_id=f"outcome-status-c1-run-{idx}",
+            facts={
+                "event_type": "metrics_endpoint_timing",
+                "endpoint": "/api/v1/metrics/runs",
+                "status_code": 200,
+                "duration_ms": 120,
+            },
+        )
+        await seed_observation(
+            timestamp=now - timedelta(minutes=1),
+            process_id=f"P_STATUS_C1_REP_{idx}",
+            source_outcome_id=f"outcome-status-c1-rep-{idx}",
+            facts={
+                "event_type": "metrics_endpoint_timing",
+                "endpoint": "/api/v1/observability/report",
+                "status_code": 200,
+                "duration_ms": 130,
+            },
+        )
+
+    response = await client.get(
+        "/api/v1/status",
+        params={"window_days": 7},
+        headers={"X-Internal-Status": "1"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert "c1_health" in payload
+    c1 = payload["c1_health"]
+    assert c1["enabled"] is True
+    assert c1["inputs"]["source"] == "metrics_endpoint_timing"
+    assert c1["inputs"]["window_minutes"] == 15
+    assert isinstance(c1["rows"], list)
+    assert {row["endpoint"] for row in c1["rows"]} == {"overview", "runs", "report"}
+    assert all(row["path"] == "direct" for row in c1["rows"])
+
+
+def test_c1_health_classification_pass_warn_fail():
+    row_pass = status_endpoint._classify_c1_health_row(
+        endpoint="overview",
+        p99_ms=500.0,
+        rps=2.0,
+        timeouts=0,
+        pct_429=0.0,
+        pct_503=0.0,
+        pct_5xx=0.0,
+    )
+    assert row_pass["decision"] == "PASS"
+    assert row_pass["reasons"] == []
+
+    row_warn = status_endpoint._classify_c1_health_row(
+        endpoint="runs",
+        p99_ms=1700.0,
+        rps=2.0,
+        timeouts=0,
+        pct_429=0.0,
+        pct_503=0.0,
+        pct_5xx=0.0,
+    )
+    assert row_warn["decision"] == "WARN"
+    assert "p99>warn_limit" in row_warn["reasons"]
+
+    row_fail = status_endpoint._classify_c1_health_row(
+        endpoint="report",
+        p99_ms=3000.0,
+        rps=2.0,
+        timeouts=0,
+        pct_429=0.0,
+        pct_503=0.0,
+        pct_5xx=0.0,
+    )
+    assert row_fail["decision"] == "FAIL"
+    assert "p99>fail_limit" in row_fail["reasons"]
+
+
+@pytest.mark.anyio
+async def test_status_c1_health_cache_hit_reduces_compute_calls(client, monkeypatch):
+    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+    monkeypatch.setenv("C1_HEALTH_CACHE_TTL_SECONDS", "10")
+    status_endpoint._clear_runtime_c1_health_cache()
+    calls = {"n": 0}
+
+    async def _fake_compute(**kwargs):
+        calls["n"] += 1
+        rows = [
+            {
+                "endpoint": "overview",
+                "path": "direct",
+                "p99_ms": 100.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "PASS",
+                "reasons": [],
+            },
+            {
+                "endpoint": "runs",
+                "path": "direct",
+                "p99_ms": 100.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "PASS",
+                "reasons": [],
+            },
+            {
+                "endpoint": "report",
+                "path": "direct",
+                "p99_ms": 100.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "PASS",
+                "reasons": [],
+            },
+        ]
+        return status_endpoint._build_c1_health_payload(rows, as_of=datetime.utcnow(), window_minutes=15)
+
+    monkeypatch.setattr(runtime_health, "_compute_runtime_c1_health", _fake_compute)
+
+    resp1 = await client.get("/api/v1/status", params={"window_days": 7}, headers={"X-Internal-Status": "1"})
+    resp2 = await client.get("/api/v1/status", params={"window_days": 7}, headers={"X-Internal-Status": "1"})
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    assert calls["n"] == 1
+    assert resp1.json()["c1_health"]["meta"]["cached"] is False
+    assert resp2.json()["c1_health"]["meta"]["cached"] is True
+
+
+@pytest.mark.anyio
+async def test_status_c1_health_cache_expires(client, monkeypatch):
+    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+    monkeypatch.setenv("C1_HEALTH_CACHE_TTL_SECONDS", "1")
+    status_endpoint._clear_runtime_c1_health_cache()
+    calls = {"n": 0}
+
+    async def _fake_compute(**kwargs):
+        calls["n"] += 1
+        rows = [
+            {
+                "endpoint": "overview",
+                "path": "direct",
+                "p99_ms": 100.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "PASS",
+                "reasons": [],
+            },
+            {
+                "endpoint": "runs",
+                "path": "direct",
+                "p99_ms": 100.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "PASS",
+                "reasons": [],
+            },
+            {
+                "endpoint": "report",
+                "path": "direct",
+                "p99_ms": 100.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "PASS",
+                "reasons": [],
+            },
+        ]
+        return status_endpoint._build_c1_health_payload(rows, as_of=datetime.utcnow(), window_minutes=15)
+
+    monkeypatch.setattr(runtime_health, "_compute_runtime_c1_health", _fake_compute)
+
+    resp1 = await client.get("/api/v1/status", params={"window_days": 7}, headers={"X-Internal-Status": "1"})
+    await asyncio.sleep(1.2)
+    resp2 = await client.get("/api/v1/status", params={"window_days": 7}, headers={"X-Internal-Status": "1"})
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    assert calls["n"] == 2
+    assert resp2.json()["c1_health"]["meta"]["cached"] is False
+
+
+@pytest.mark.anyio
+async def test_status_c1_health_reasons_present(client, monkeypatch):
+    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+    monkeypatch.setenv("C1_HEALTH_CACHE_TTL_SECONDS", "10")
+    status_endpoint._clear_runtime_c1_health_cache()
+
+    async def _fake_compute(**kwargs):
+        rows = [
+            {
+                "endpoint": "overview",
+                "path": "direct",
+                "p99_ms": 1200.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "PASS",
+                "reasons": [],
+            },
+            {
+                "endpoint": "runs",
+                "path": "direct",
+                "p99_ms": 1800.0,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 0.0,
+                "pct_5xx": 0.0,
+                "decision": "WARN",
+                "reasons": ["p99>warn_limit"],
+            },
+            {
+                "endpoint": "report",
+                "path": "direct",
+                "p99_ms": None,
+                "rps": 2.0,
+                "timeouts": 0,
+                "pct_429": 0.0,
+                "pct_503": 10.0,
+                "pct_5xx": 0.0,
+                "decision": "WARN",
+                "reasons": ["p99_missing"],
+            },
+        ]
+        return status_endpoint._build_c1_health_payload(rows, as_of=datetime.utcnow(), window_minutes=15)
+
+    monkeypatch.setattr(runtime_health, "_compute_runtime_c1_health", _fake_compute)
+    response = await client.get("/api/v1/status", params={"window_days": 7}, headers={"X-Internal-Status": "1"})
+    assert response.status_code == 200
+    c1 = response.json()["c1_health"]
+    assert c1["meta"]["cached"] is False
+    assert "reasons" in c1
+    assert "runs:p99>warn_limit" in c1["reasons"]
+    assert "report:p99_missing" in c1["reasons"]
+
+
+@pytest.mark.anyio
+async def test_status_public_returns_minimal_sanitized_payload(client, monkeypatch):
+    async def _fake_builder(**kwargs):
+        return {
+            "as_of": "2026-02-27T10:00:00Z",
+            "trust": {
+                "state": "yellow",
+                "decision": "degraded",
+                "message": "internal detail",
+                "derived_from": ["guardrails"],
+            },
+            "recommendation": {
+                "action": "reduce_force_live_burst",
+                "priority": "medium",
+                "message": "internal detail",
+                "derived_from": ["guardrails"],
+            },
+            "c1_health": {"score": "WARN", "rows": [], "meta": {"cached": True}},
+            "read_path": {"overview_snapshot_status": "stale"},
+            "guardrails": {"events": {"rate_limited_429": 3}},
+        }
+
+    monkeypatch.setattr(status_endpoint, "_build_observability_overview_payload", _fake_builder)
+
+    response = await client.get("/api/v1/status/public")
+    assert response.status_code == 200
+    assert response.headers.get("cache-control") == "public, max-age=30"
+
+    payload = response.json()
+    assert set(payload.keys()) == {"state", "action", "as_of", "version"}
+    assert payload["state"] == "degraded"
+    assert payload["action"] == "monitor"
+    assert payload["as_of"] == "2026-02-27T10:00:00Z"
+    assert payload["version"] == "v1"
+
+    serialized = str(payload)
+    assert "derived_from" not in serialized
+    assert "reasons" not in serialized
+    assert "meta" not in serialized
+    assert "c1_health" not in serialized
+    assert "guardrails" not in serialized
+
+
+@pytest.mark.anyio
+async def test_status_public_action_mapping_defaults_to_inspect(client, monkeypatch):
+    async def _fake_builder(**kwargs):
+        return {
+            "as_of": "2026-02-27T10:00:00Z",
+            "trust": {"decision": "action_required"},
+            "recommendation": {"action": "unknown_action"},
+        }
+
+    monkeypatch.setattr(status_endpoint, "_build_observability_overview_payload", _fake_builder)
+
+    response = await client.get("/api/v1/status/public")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "action_required"
+    assert payload["action"] == "inspect"
+
+
+@pytest.mark.anyio
+async def test_status_public_webhook_triggers_only_on_transition_to_action_required(client, monkeypatch):
+    status_endpoint._reset_public_webhook_state_for_tests()
+    monkeypatch.setenv("STATUS_WEBHOOK_URL", "https://example.com/hook")
+
+    state_box = {"state": "action_required", "action": "inspect_upstream_path"}
+
+    async def _fake_builder(**kwargs):
+        return {
+            "as_of": "2026-02-27T10:00:00Z",
+            "trust": {"decision": state_box["state"]},
+            "recommendation": {"action": state_box["action"]},
+        }
+
+    calls: list[dict] = []
+
+    async def _fake_send(url: str, payload: dict):
+        calls.append({"url": url, "payload": dict(payload)})
+
+    monkeypatch.setattr(status_endpoint, "_build_observability_overview_payload", _fake_builder)
+    monkeypatch.setattr(status_endpoint, "_send_public_status_webhook", _fake_send)
+
+    # 1) First transition into action_required -> trigger.
+    r1 = await client.get("/api/v1/status/public")
+    assert r1.status_code == 200
+    await asyncio.sleep(0.01)
+    assert len(calls) == 1
+    assert calls[0]["url"] == "https://example.com/hook"
+    assert calls[0]["payload"]["state"] == "action_required"
+    assert calls[0]["payload"]["action"] == "inspect"
+
+    # 2) Staying in action_required -> no new trigger.
+    r2 = await client.get("/api/v1/status/public")
+    assert r2.status_code == 200
+    await asyncio.sleep(0.01)
+    assert len(calls) == 1
+
+    # 3) Transition away from action_required -> no trigger.
+    state_box["state"] = "degraded"
+    state_box["action"] = "open_report"
+    r3 = await client.get("/api/v1/status/public")
+    assert r3.status_code == 200
+    await asyncio.sleep(0.01)
+    assert len(calls) == 1
+
+    # 4) Transition back to action_required -> trigger again.
+    state_box["state"] = "action_required"
+    state_box["action"] = "run_warmup"
+    r4 = await client.get("/api/v1/status/public")
+    assert r4.status_code == 200
+    await asyncio.sleep(0.01)
+    assert len(calls) == 2
+    assert calls[1]["payload"]["action"] == "inspect"
+
+
+@pytest.mark.anyio
+async def test_status_public_webhook_noop_when_disabled_or_non_action_required(client, monkeypatch):
+    status_endpoint._reset_public_webhook_state_for_tests()
+    calls: list[dict] = []
+
+    async def _fake_send(url: str, payload: dict):
+        calls.append({"url": url, "payload": dict(payload)})
+
+    # URL ausente -> no-op mesmo com action_required.
+    async def _builder_action_required(**kwargs):
+        return {
+            "as_of": "2026-02-27T10:00:00Z",
+            "trust": {"decision": "action_required"},
+            "recommendation": {"action": "inspect_upstream_path"},
+        }
+
+    monkeypatch.delenv("STATUS_WEBHOOK_URL", raising=False)
+    monkeypatch.setattr(status_endpoint, "_build_observability_overview_payload", _builder_action_required)
+    monkeypatch.setattr(status_endpoint, "_send_public_status_webhook", _fake_send)
+    r1 = await client.get("/api/v1/status/public")
+    assert r1.status_code == 200
+    await asyncio.sleep(0.01)
+    assert len(calls) == 0
+
+    # URL presente + estado nao critico -> no-op.
+    status_endpoint._reset_public_webhook_state_for_tests()
+    monkeypatch.setenv("STATUS_WEBHOOK_URL", "https://example.com/hook")
+
+    async def _builder_healthy(**kwargs):
+        return {
+            "as_of": "2026-02-27T10:00:00Z",
+            "trust": {"decision": "healthy"},
+            "recommendation": {"action": "none"},
+        }
+
+    monkeypatch.setattr(status_endpoint, "_build_observability_overview_payload", _builder_healthy)
+    r2 = await client.get("/api/v1/status/public")
+    assert r2.status_code == 200
+    await asyncio.sleep(0.01)
+    assert len(calls) == 0

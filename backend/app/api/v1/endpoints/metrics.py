@@ -3,6 +3,7 @@ import json
 import os
 import uuid
 import hashlib
+import asyncio
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -11,13 +12,15 @@ from time import perf_counter, perf_counter_ns
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from sqlalchemy import desc, func, select
+from fastapi.responses import JSONResponse
+from sqlalchemy import delete, desc, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
     CognitiveMetricsDaily,
     MetricsOverviewReadModel,
+    MetricsReadRefreshJob,
     MetricsRunsReadModel,
     ObservationRecord,
     PublishReceipt,
@@ -95,7 +98,19 @@ METRICS_OVERVIEW_READ_MODEL_ENABLED = True
 METRICS_OVERVIEW_FORCE_LIVE_COOLDOWN_SECONDS = 10
 METRICS_RUNS_READ_MODEL_ENABLED = True
 METRICS_RUNS_FORCE_LIVE_COOLDOWN_SECONDS = 10
-_metrics_overview_cache: dict[str, tuple[float, str]] = {}
+METRICS_READ_REFRESH_JOB_TTL_SECONDS = 60
+METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS = 5
+METRICS_READ_REFRESH_MAX_QUEUE_DEPTH_DEFAULT = 20
+METRICS_READ_REFRESH_MAX_RUNNING_JOBS_DEFAULT = 4
+METRICS_READ_REFRESH_MAX_QUEUE_WAIT_MS_DEFAULT = 60000
+METRICS_READ_REFRESH_MAX_EXEC_MS_DEFAULT = 60000
+METRICS_READ_REFRESH_STATUS_QUEUED = "queued"
+METRICS_READ_REFRESH_STATUS_RUNNING = "running"
+METRICS_READ_REFRESH_STATUS_DONE = "done"
+METRICS_READ_REFRESH_STATUS_FAILED = "failed"
+SAFE_ENVELOPE_LEVEL = "C1"
+ENVELOPE_REASON_THROUGHPUT_PATH = "throughput_path"
+_metrics_overview_cache: dict[str, tuple[float, str, str]] = {}
 _metrics_overview_cache_lock = Lock()
 _metrics_overview_force_live_limiter: dict[str, float] = {}
 _metrics_overview_force_live_limiter_lock = Lock()
@@ -146,6 +161,34 @@ def _parse_date(value: str | None, label: str) -> date | None:
         raise HTTPException(status_code=400, detail=f"{label} must be YYYY-MM-DD")
 
 
+def _read_refresh_max_queue_depth() -> int:
+    """
+    Limite de fila para aplicar falha rapida sob saturacao.
+    """
+    return max(1, _get_int_env("METRICS_READ_REFRESH_MAX_QUEUE_DEPTH", METRICS_READ_REFRESH_MAX_QUEUE_DEPTH_DEFAULT))
+
+
+def _read_refresh_max_running_jobs() -> int:
+    """
+    Limite de jobs em execucao para aplicar falha rapida.
+    """
+    return max(1, _get_int_env("METRICS_READ_REFRESH_MAX_RUNNING_JOBS", METRICS_READ_REFRESH_MAX_RUNNING_JOBS_DEFAULT))
+
+
+def _read_refresh_max_queue_wait_ms() -> int:
+    """
+    Tempo maximo de espera em fila antes de tratar como timeout interno.
+    """
+    return max(1, _get_int_env("METRICS_READ_REFRESH_MAX_QUEUE_WAIT_MS", METRICS_READ_REFRESH_MAX_QUEUE_WAIT_MS_DEFAULT))
+
+
+def _read_refresh_max_exec_ms() -> int:
+    """
+    Tempo maximo de execucao por job de refresh.
+    """
+    return max(1, _get_int_env("METRICS_READ_REFRESH_MAX_EXEC_MS", METRICS_READ_REFRESH_MAX_EXEC_MS_DEFAULT))
+
+
 def _overview_cache_enabled() -> bool:
     """
     Habilita cache curto somente fora de pytest.
@@ -169,10 +212,11 @@ def _build_overview_cache_key(
 
 
 def _overview_cache_key_hash(key: str) -> str:
-    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
+    # Hash utilitario (nao criptografico) para nomes curtos de cache em memoria.
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
 
 
-def _get_overview_cache(key: str) -> str | None:
+def _get_overview_cache(key: str) -> tuple[str, str] | None:
     if not _overview_cache_enabled():
         return None
     now = perf_counter()
@@ -180,14 +224,22 @@ def _get_overview_cache(key: str) -> str | None:
         payload = _metrics_overview_cache.get(key)
         if payload is None:
             return None
-        expires_at, data = payload
+        expires_at: float
+        data: str
+        etag: str
+        if len(payload) == 2:
+            # Compatibilidade com entradas antigas em memoria (antes de ETag).
+            expires_at, data = payload  # type: ignore[misc]
+            etag = ""
+        else:
+            expires_at, data, etag = payload
         if expires_at <= now:
             _metrics_overview_cache.pop(key, None)
             return None
-        return data
+        return data, etag
 
 
-def _set_overview_cache(key: str, payload_json: str) -> None:
+def _set_overview_cache(key: str, payload_json: str, etag: str) -> None:
     if not _overview_cache_enabled():
         return
     expires_at = perf_counter() + METRICS_OVERVIEW_CACHE_TTL_SECONDS
@@ -197,7 +249,7 @@ def _set_overview_cache(key: str, payload_json: str) -> None:
             oldest_key = next(iter(_metrics_overview_cache), None)
             if oldest_key is not None:
                 _metrics_overview_cache.pop(oldest_key, None)
-        _metrics_overview_cache[key] = (expires_at, payload_json)
+        _metrics_overview_cache[key] = (expires_at, payload_json, etag)
 
 
 def _consume_force_live_token(scope_key: str, cooldown_seconds: int) -> int:
@@ -222,6 +274,135 @@ def _clear_force_live_limiter() -> None:
     """
     with _metrics_overview_force_live_limiter_lock:
         _metrics_overview_force_live_limiter.clear()
+
+
+def _build_envelope_headers(*, degraded: bool, retry_after_seconds: int | None = None) -> dict[str, str]:
+    """
+    Gera headers canonicos para sinalizar envelope operacional e degradacao.
+    """
+    headers: dict[str, str] = {"X-Envelope": SAFE_ENVELOPE_LEVEL}
+    if degraded:
+        headers["X-Reason"] = ENVELOPE_REASON_THROUGHPUT_PATH
+    if retry_after_seconds is not None:
+        headers["Retry-After"] = str(max(1, int(retry_after_seconds)))
+    return headers
+
+
+def _build_snapshot_accepted_response(
+    *,
+    scope: str,
+    correlation_id: str,
+    retry_after_seconds: int,
+) -> JSONResponse:
+    """
+    Resposta 202 canonica para snapshot-first (force_live), sem expor detalhes internos do job.
+    """
+    retry_after = max(1, int(retry_after_seconds))
+    return JSONResponse(
+        status_code=202,
+        content={
+            "snapshot_status": "queued",
+            "correlation_id": str(correlation_id),
+            "scope": str(scope),
+            "retry_after_seconds": retry_after,
+        },
+        headers=_build_envelope_headers(degraded=True, retry_after_seconds=retry_after),
+    )
+
+
+def _build_force_live_rate_limited_response(
+    *,
+    scope: str,
+    retry_after_seconds: int,
+    cooldown_seconds: int,
+) -> JSONResponse:
+    """
+    Resposta 429 canonica para cooldown anti-abuso de force_live.
+    """
+    retry_after = max(1, int(retry_after_seconds))
+    cooldown = max(1, int(cooldown_seconds))
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error_type": "RateLimited",
+            "scope": str(scope),
+            "retry_after_seconds": retry_after,
+            "cooldown_seconds": cooldown,
+        },
+        headers=_build_envelope_headers(degraded=True, retry_after_seconds=retry_after),
+    )
+
+
+def _build_snapshot_missing_http_exception(
+    *,
+    scope: str,
+    retry_after_seconds: int,
+) -> HTTPException:
+    """
+    Erro 503 canonico para snapshot-first quando snapshot ainda nao existe.
+    """
+    retry_after = max(1, int(retry_after_seconds))
+    return HTTPException(
+        status_code=503,
+        detail={
+            "snapshot_status": "missing",
+            "scope": str(scope),
+            "next_action": "force_live",
+            "estimated_ready_seconds": retry_after,
+        },
+        headers=_build_envelope_headers(degraded=True, retry_after_seconds=retry_after),
+    )
+
+
+def _build_snapshot_etag(*, endpoint: str, query_key: str, refreshed_at: datetime | None) -> str:
+    """
+    Gera ETag fraco e deterministico baseado na versao do snapshot.
+    Nao inclui freshness_seconds para evitar churn de ETag a cada request.
+    """
+    refreshed_token = refreshed_at.isoformat() if isinstance(refreshed_at, datetime) else "missing"
+    # ETag fraco deterministico; SHA-256 evita achado SAST por SHA-1.
+    digest = hashlib.sha256(f"{endpoint}|{query_key}|{refreshed_token}".encode("utf-8")).hexdigest()[:16]
+    return f'W/"{digest}"'
+
+
+def _if_none_match_matches(request: Request, etag: str) -> bool:
+    """
+    Verifica match de If-None-Match para suporte a 304.
+    """
+    def _normalize_etag(value: str) -> str:
+        token = value.strip()
+        # Some proxies forward quoted ETags with escaped quotes (e.g. W/\"abc\").
+        token = token.replace('\\"', '"')
+        if token.startswith("W/") or token.startswith("w/"):
+            token = token[2:].strip()
+        if len(token) >= 2 and token[0] == '"' and token[-1] == '"':
+            token = token[1:-1]
+        return token
+
+    raw = request.headers.get("if-none-match", "").strip()
+    if not raw:
+        return False
+    if raw == "*":
+        return True
+    target = _normalize_etag(etag)
+    tokens = [_normalize_etag(token) for token in raw.split(",") if token.strip()]
+    return target in tokens
+
+
+def _build_snapshot_headers(
+    *,
+    degraded: bool,
+    etag: str | None = None,
+    retry_after_seconds: int | None = None,
+) -> dict[str, str]:
+    """
+    Agrega headers de envelope com semantica HTTP para snapshot/read-path.
+    """
+    headers = _build_envelope_headers(degraded=degraded, retry_after_seconds=retry_after_seconds)
+    headers["Cache-Control"] = "private, max-age=0"
+    if etag:
+        headers["ETag"] = etag
+    return headers
 
 
 def _new_db_stats() -> dict[str, int]:
@@ -268,6 +449,7 @@ async def _get_overview_read_model_payload(
     end: date,
     include_reasons: bool,
     include_baseline: bool,
+    db_stats: dict[str, int] | None = None,
 ) -> tuple[dict | None, datetime | None]:
     """
     Busca payload materializado por chave de consulta do overview.
@@ -283,7 +465,10 @@ async def _get_overview_read_model_payload(
         .order_by(desc(MetricsOverviewReadModel.refreshed_at))
         .limit(1)
     )
-    row = (await db.execute(stmt)).scalars().first()
+    if db_stats is None:
+        row = (await db.execute(stmt)).scalars().first()
+    else:
+        row = (await _execute_with_db_stats(db, stmt, db_stats)).scalars().first()
     if row is None or not isinstance(row.payload, dict):
         return None, None
     return row.payload, row.refreshed_at
@@ -426,6 +611,615 @@ async def _upsert_runs_read_model_payload(
     await _execute_with_db_stats(db, upsert_stmt, db_stats)
     await db.commit()
     return refreshed_at
+
+
+def _build_overview_query_key(
+    *,
+    start: date,
+    end: date,
+    include_reasons: bool,
+    include_baseline: bool,
+) -> str:
+    """
+    Serializa chave canonica de consulta do overview para fila de refresh.
+    """
+    return (
+        f"start={start.isoformat()}|end={end.isoformat()}"
+        f"|include_reasons={int(include_reasons)}|include_baseline={int(include_baseline)}"
+    )
+
+
+def _build_runs_query_key(*, start: date, end: date, limit: int, offset: int) -> str:
+    """
+    Serializa chave canonica de consulta de runs para fila de refresh.
+    """
+    return (
+        f"start={start.isoformat()}|end={end.isoformat()}"
+        f"|limit={limit}|offset={offset}"
+    )
+
+
+def _build_refresh_job_key(*, endpoint: str, query_key: str) -> str:
+    """
+    Gera identificador idempotente do job de refresh.
+    """
+    return hashlib.sha256(f"{endpoint}|{query_key}".encode("utf-8")).hexdigest()
+
+
+async def _ensure_read_refresh_jobs_table(db: AsyncSession) -> None:
+    """
+    Garante tabela de fila de refresh em ambientes sem migration aplicada.
+    """
+    conn = await db.connection()
+    await conn.run_sync(
+        lambda sync_conn: MetricsReadRefreshJob.__table__.create(bind=sync_conn, checkfirst=True)
+    )
+
+
+async def _enqueue_read_refresh_job(
+    db: AsyncSession,
+    *,
+    endpoint: str,
+    query_key: str,
+    db_stats: dict[str, int],
+    ttl_seconds: int = METRICS_READ_REFRESH_JOB_TTL_SECONDS,
+) -> tuple[str, bool, int]:
+    """
+    Enfileira job de refresh com dedupe por job_key e TTL.
+    Returns:
+        tuple(job_key, job_enqueued, retry_after_seconds)
+    """
+    await _ensure_read_refresh_jobs_table(db)
+    now = datetime.utcnow()
+    expires_at = now + timedelta(seconds=max(1, int(ttl_seconds)))
+    job_key = _build_refresh_job_key(endpoint=endpoint, query_key=query_key)
+
+    purge_stmt = (
+        delete(MetricsReadRefreshJob)
+        .where(MetricsReadRefreshJob.job_key == job_key)
+        .where(MetricsReadRefreshJob.expires_at <= now)
+    )
+    await _execute_with_db_stats(db, purge_stmt, db_stats)
+
+    insert_stmt = insert(MetricsReadRefreshJob).values(
+        id=uuid.uuid4(),
+        job_key=job_key,
+        endpoint=endpoint,
+        query_key=query_key,
+        status=METRICS_READ_REFRESH_STATUS_QUEUED,
+        created_at=now,
+        expires_at=expires_at,
+        last_error=None,
+    )
+    insert_stmt = insert_stmt.on_conflict_do_nothing(index_elements=["job_key"])
+    result = await _execute_with_db_stats(db, insert_stmt, db_stats)
+
+    # Fonte de verdade do estado ativo apos o INSERT ON CONFLICT:
+    # se houver linha queued/running vigente, retornamos a mesma correlation key sem duplicar.
+    active_job_stmt = (
+        select(MetricsReadRefreshJob.job_key)
+        .where(MetricsReadRefreshJob.job_key == job_key)
+        .where(MetricsReadRefreshJob.expires_at > now)
+        .where(
+            MetricsReadRefreshJob.status.in_(
+                [METRICS_READ_REFRESH_STATUS_QUEUED, METRICS_READ_REFRESH_STATUS_RUNNING]
+            )
+        )
+        .limit(1)
+    )
+    active_job_key = (await _execute_with_db_stats(db, active_job_stmt, db_stats)).scalar()
+    await db.commit()
+    return str(active_job_key or job_key), bool(getattr(result, "rowcount", 0)), METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
+
+
+async def _get_read_refresh_pressure(db: AsyncSession, db_stats: dict[str, int]) -> dict[str, int]:
+    """
+    Retorna sinais simples de saturacao da fila para falha rapida.
+    """
+    now = datetime.utcnow()
+    queued_stmt = (
+        select(func.count())
+        .select_from(MetricsReadRefreshJob)
+        .where(MetricsReadRefreshJob.status == METRICS_READ_REFRESH_STATUS_QUEUED)
+        .where(MetricsReadRefreshJob.expires_at > now)
+    )
+    running_stmt = (
+        select(func.count())
+        .select_from(MetricsReadRefreshJob)
+        .where(MetricsReadRefreshJob.status == METRICS_READ_REFRESH_STATUS_RUNNING)
+        .where(MetricsReadRefreshJob.expires_at > now)
+    )
+    oldest_queued_stmt = (
+        select(func.min(MetricsReadRefreshJob.created_at))
+        .where(MetricsReadRefreshJob.status == METRICS_READ_REFRESH_STATUS_QUEUED)
+        .where(MetricsReadRefreshJob.expires_at > now)
+    )
+    queued_count = int((await _execute_with_db_stats(db, queued_stmt, db_stats)).scalar() or 0)
+    running_count = int((await _execute_with_db_stats(db, running_stmt, db_stats)).scalar() or 0)
+    oldest_queued = (await _execute_with_db_stats(db, oldest_queued_stmt, db_stats)).scalar()
+    queue_wait_ms = 0
+    if isinstance(oldest_queued, datetime):
+        queue_wait_ms = max(0, int((datetime.utcnow() - oldest_queued).total_seconds() * 1000))
+    return {
+        "queue_depth": max(0, queued_count),
+        "workers_busy": max(0, running_count),
+        "queue_wait_ms": max(0, queue_wait_ms),
+    }
+
+
+def _is_read_refresh_backpressured(pressure: dict[str, int]) -> bool:
+    """
+    Define se a fila deve responder falha rapida para evitar pendurar requests.
+    """
+    return bool(
+        int(pressure.get("queue_depth", 0)) >= _read_refresh_max_queue_depth()
+        or int(pressure.get("workers_busy", 0)) >= _read_refresh_max_running_jobs()
+        or int(pressure.get("queue_wait_ms", 0)) > _read_refresh_max_queue_wait_ms()
+    )
+
+
+async def _refresh_job_exists(db: AsyncSession, *, job_key: str, db_stats: dict[str, int]) -> bool:
+    """
+    Verifica se ja existe job ativo para a mesma chave idempotente.
+    """
+    now = datetime.utcnow()
+    exists_stmt = (
+        select(func.count())
+        .select_from(MetricsReadRefreshJob)
+        .where(MetricsReadRefreshJob.job_key == job_key)
+        .where(MetricsReadRefreshJob.expires_at > now)
+        .where(
+            MetricsReadRefreshJob.status.in_(
+                [METRICS_READ_REFRESH_STATUS_QUEUED, METRICS_READ_REFRESH_STATUS_RUNNING]
+            )
+        )
+    )
+    return int((await _execute_with_db_stats(db, exists_stmt, db_stats)).scalar() or 0) > 0
+
+
+async def _get_active_refresh_job(
+    db: AsyncSession,
+    *,
+    job_key: str,
+    db_stats: dict[str, int],
+) -> tuple[str, datetime] | None:
+    """
+    Retorna (job_key, created_at) de job ativo para a mesma key, se existir.
+    Fonte de verdade em DB para cooldown/dedupe deterministico.
+    """
+    now = datetime.utcnow()
+    stmt = (
+        select(MetricsReadRefreshJob.job_key, MetricsReadRefreshJob.created_at)
+        .where(MetricsReadRefreshJob.job_key == job_key)
+        .where(MetricsReadRefreshJob.expires_at > now)
+        .where(
+            MetricsReadRefreshJob.status.in_(
+                [METRICS_READ_REFRESH_STATUS_QUEUED, METRICS_READ_REFRESH_STATUS_RUNNING]
+            )
+        )
+        .order_by(MetricsReadRefreshJob.created_at.desc())
+        .limit(1)
+    )
+    row = (await _execute_with_db_stats(db, stmt, db_stats)).first()
+    if not row:
+        return None
+    return str(row[0]), row[1]
+
+
+def _active_job_cooldown_remaining_seconds(*, created_at: datetime | None, cooldown_seconds: int) -> int:
+    """
+    Calcula cooldown restante com base no created_at do job ativo (fonte DB).
+    """
+    if not isinstance(created_at, datetime):
+        return 0
+    cooldown = max(1, int(cooldown_seconds))
+    elapsed = max(0.0, (datetime.utcnow() - created_at).total_seconds())
+    remaining = int(math.ceil(cooldown - elapsed))
+    return max(0, remaining)
+
+
+async def _build_overview_live_payload(
+    db: AsyncSession,
+    *,
+    start: date,
+    end: date,
+    include_reasons: bool,
+    include_baseline: bool,
+    db_stats: dict[str, int] | None = None,
+) -> dict:
+    """
+    Calcula payload live do overview para persistencia no read model.
+    """
+    runner = _execute_with_db_stats if db_stats is not None else None
+    stmt = (
+        select(CognitiveMetricsDaily)
+        .where(CognitiveMetricsDaily.metric_date >= start)
+        .where(CognitiveMetricsDaily.metric_date <= end)
+        .order_by(CognitiveMetricsDaily.metric_date.asc())
+    )
+    rows = (
+        (await runner(db, stmt, db_stats)).scalars().all()
+        if runner
+        else (await db.execute(stmt)).scalars().all()
+    )
+    baseline_stmt = (
+        select(CognitiveMetricsDaily)
+        .where(CognitiveMetricsDaily.metric_date >= start - timedelta(days=CES_DYNAMIC_BASELINE_WINDOW_DAYS))
+        .where(CognitiveMetricsDaily.metric_date <= end)
+        .order_by(CognitiveMetricsDaily.metric_date.asc())
+    )
+    baseline_rows = (
+        (await runner(db, baseline_stmt, db_stats)).scalars().all()
+        if runner
+        else (await db.execute(baseline_stmt)).scalars().all()
+    )
+    baseline_cache_by_date: dict[date, dict[str, dict]] = {}
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        alert_count = int(getattr(r, "alert_count", 0) or 0)
+        alerted = alert_count > 0
+        raw_reasons = getattr(r, "alert_reasons", []) or []
+        reasons = _dedup_and_sort_reasons(raw_reasons) if include_reasons else []
+        metric_date = r.metric_date
+        baseline_for_day = baseline_cache_by_date.get(metric_date)
+        if baseline_for_day is None:
+            baseline_for_day = _build_dynamic_baseline_for_date(metric_date, baseline_rows)
+            baseline_cache_by_date[metric_date] = baseline_for_day
+        item = {
+            "metric_date": metric_date.isoformat(),
+            "total_runs": r.total_runs,
+            "completed_runs": r.completed_runs,
+            "failed_runs": r.failed_runs,
+            "blocked_runs": r.blocked_runs,
+            "truncated_runs": getattr(r, "truncated_runs", 0),
+            "truncated_ratio": float(r.truncated_ratio)
+            if getattr(r, "truncated_ratio", None) is not None
+            else None,
+            "avg_actions_executed": float(r.avg_actions_executed)
+            if r.avg_actions_executed is not None
+            else None,
+            "last_action_type_distribution": r.last_action_type_distribution,
+            "latency_by_action": getattr(r, "latency_by_action", {}) or {},
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "alerted": alerted,
+            "alert_count": alert_count,
+            "alert_reasons": reasons,
+            "alert_observation_id": None,
+            "latency_dynamic_baseline_window_days": CES_DYNAMIC_BASELINE_WINDOW_DAYS,
+            "latency_dynamic_baseline": baseline_for_day,
+        }
+        if not item["alerted"]:
+            item["alert_count"] = 0
+            item["alert_reasons"] = []
+            item["alert_observation_id"] = None
+        item.update(_compute_ces_fields(item))
+        if not include_baseline:
+            item["latency_dynamic_baseline"] = {}
+        items.append(item)
+
+    summary = {
+        "total_runs": sum(item["total_runs"] for item in items),
+        "completed_runs": sum(item["completed_runs"] for item in items),
+        "failed_runs": sum(item["failed_runs"] for item in items),
+        "blocked_runs": sum(item["blocked_runs"] for item in items),
+        "truncated_runs": sum(item["truncated_runs"] for item in items),
+        "alert_days": sum(1 for item in items if item["alerted"]),
+    }
+    total_runs = summary["total_runs"]
+    if total_runs > 0:
+        summary["failed_ratio"] = round(summary["failed_runs"] / total_runs, 4)
+        summary["blocked_ratio"] = round(summary["blocked_runs"] / total_runs, 4)
+        summary["truncated_ratio"] = round(summary["truncated_runs"] / total_runs, 4)
+    else:
+        summary["failed_ratio"] = 0.0
+        summary["blocked_ratio"] = 0.0
+        summary["truncated_ratio"] = 0.0
+
+    ces_versions_summary: dict[str, dict] = {}
+    for version in (CES_V1, CES_V2, CES_V3):
+        items_with_runs = [
+            item
+            for item in items
+            if item.get("total_runs", 0) > 0
+            and isinstance(item.get("ces_versions", {}).get(version), dict)
+            and item["ces_versions"][version].get("ces") is not None
+        ]
+        weighted_runs = sum(item["total_runs"] for item in items_with_runs)
+        if weighted_runs > 0:
+            ces_versions_summary[version] = {
+                "ces": round(
+                    sum(float(item["ces_versions"][version]["ces"]) * item["total_runs"] for item in items_with_runs)
+                    / weighted_runs,
+                    2,
+                ),
+                "ces_reason": None,
+                "ces_components": {
+                    key: round(
+                        sum(
+                            float(item["ces_versions"][version]["ces_components"][key]) * item["total_runs"]
+                            for item in items_with_runs
+                        )
+                        / weighted_runs,
+                        4,
+                    )
+                    for key in ("status", "actions", "latency", "trunc")
+                },
+                "budgets_used": {},
+            }
+        else:
+            ces_versions_summary[version] = {
+                "ces": None,
+                "ces_reason": "no_runs",
+                "ces_components": {"status": None, "actions": None, "latency": None, "trunc": None},
+                "budgets_used": {},
+            }
+    default_summary = ces_versions_summary[CES_DEFAULT_VERSION]
+    summary["ces_default_version"] = CES_DEFAULT_VERSION
+    summary["ces"] = default_summary["ces"]
+    summary["ces_reason"] = default_summary["ces_reason"]
+    summary["ces_version"] = CES_DEFAULT_VERSION
+    summary["ces_components"] = default_summary["ces_components"]
+    summary["ces_versions"] = ces_versions_summary
+    summary.update(_compute_ces_window_summary(items))
+    return {"items": items, "summary": summary}
+
+
+async def _build_runs_live_payload(
+    db: AsyncSession,
+    *,
+    start: date,
+    end: date,
+    limit: int,
+    offset: int,
+    db_stats: dict[str, int] | None = None,
+) -> dict:
+    """
+    Calcula payload live de runs para persistencia no read model.
+    """
+    runner = _execute_with_db_stats if db_stats is not None else None
+    count_stmt = (
+        select(func.count(func.distinct(ObservationRecord.process_id)))
+        .where(ObservationRecord.facts["event_type"].astext == "cognitive_loop_finished")
+        .where(ObservationRecord.timestamp >= datetime.combine(start, datetime.min.time()))
+        .where(ObservationRecord.timestamp < datetime.combine(end + timedelta(days=1), datetime.min.time()))
+    )
+    total = (
+        (await runner(db, count_stmt, db_stats)).scalar() or 0
+        if runner
+        else (await db.execute(count_stmt)).scalar() or 0
+    )
+
+    stmt = (
+        select(
+            ObservationRecord.process_id,
+            ObservationRecord.observation_id,
+            ObservationRecord.timestamp,
+            ObservationRecord.facts,
+        )
+        .where(ObservationRecord.facts["event_type"].astext == "cognitive_loop_finished")
+        .where(ObservationRecord.timestamp >= datetime.combine(start, datetime.min.time()))
+        .where(ObservationRecord.timestamp < datetime.combine(end + timedelta(days=1), datetime.min.time()))
+        .order_by(desc(ObservationRecord.timestamp))
+    )
+    rows = (
+        (await runner(db, stmt, db_stats)).all()
+        if runner
+        else (await db.execute(stmt)).all()
+    )
+    latest_by_process: dict[str, tuple] = {}
+    for process_id, observation_id, ts, facts in rows:
+        if not process_id or process_id in latest_by_process:
+            continue
+        latest_by_process[process_id] = (observation_id, ts, facts if isinstance(facts, dict) else {})
+
+    deduped = [
+        {
+            "process_id": pid,
+            "observation_id": payload[0],
+            "timestamp_finished": payload[1].isoformat() if payload[1] else None,
+            "timestamp_finished_dt": payload[1],
+            "facts": payload[2],
+        }
+        for pid, payload in latest_by_process.items()
+    ]
+    deduped.sort(key=lambda item: item["timestamp_finished"] or "", reverse=True)
+    paged = deduped[offset : offset + limit]
+
+    items = []
+    for row in paged:
+        ces_payload = _compute_ces_run_fields(row["facts"], None)
+        items.append(
+            {
+                "process_id": row["process_id"],
+                "timestamp_finished": row["timestamp_finished"],
+                "pipeline_status": ces_payload["pipeline_status"],
+                "ces_run": ces_payload["ces_run"],
+                "ces_run_version": ces_payload["ces_run_version"],
+                "ces_run_reason": ces_payload["ces_run_reason"],
+                "ces_run_components": ces_payload["ces_run_components"],
+                "latency_measured": ces_payload["latency_measured"],
+                "latency_pairs_inverted": ces_payload["latency_pairs_inverted"],
+            }
+        )
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+def _parse_query_key(query_key: str) -> dict[str, str]:
+    """
+    Converte query_key canonica em dict simples para o runner.
+    """
+    parsed: dict[str, str] = {}
+    for part in str(query_key).split("|"):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        parsed[k] = v
+    return parsed
+
+
+async def _process_read_refresh_job_payload(*, db: AsyncSession, endpoint: str, query_key: str) -> None:
+    """
+    Executa refresh de snapshot para um job ja validado.
+    """
+    parts = _parse_query_key(query_key)
+    if endpoint == "/api/v1/metrics/overview":
+        start = date.fromisoformat(parts["start"])
+        end = date.fromisoformat(parts["end"])
+        include_reasons = bool(int(parts.get("include_reasons", "0")))
+        include_baseline = bool(int(parts.get("include_baseline", "0")))
+        payload = await _build_overview_live_payload(
+            db,
+            start=start,
+            end=end,
+            include_reasons=include_reasons,
+            include_baseline=include_baseline,
+        )
+        await _upsert_overview_read_model_payload(
+            db,
+            start=start,
+            end=end,
+            include_reasons=include_reasons,
+            include_baseline=include_baseline,
+            payload=payload,
+        )
+        return
+
+    if endpoint == "/api/v1/metrics/runs":
+        start = date.fromisoformat(parts["start"])
+        end = date.fromisoformat(parts["end"])
+        limit_value = int(parts["limit"])
+        offset = int(parts["offset"])
+        payload = await _build_runs_live_payload(
+            db,
+            start=start,
+            end=end,
+            limit=limit_value,
+            offset=offset,
+        )
+        await _upsert_runs_read_model_payload(
+            db,
+            start=start,
+            end=end,
+            limit=limit_value,
+            offset=offset,
+            payload=payload,
+            db_stats=_new_db_stats(),
+        )
+        return
+
+    raise ValueError(f"unknown_endpoint:{endpoint}")
+
+
+async def process_read_refresh_jobs_once(*, db: AsyncSession, limit: int = 100) -> dict[str, int]:
+    """
+    Executa lote de jobs queued e atualiza snapshots materializados.
+    """
+    await _ensure_read_refresh_jobs_table(db)
+    now = datetime.utcnow()
+    limit_value = max(0, int(limit))
+    if limit_value <= 0:
+        return {"processed": 0, "succeeded": 0, "failed": 0, "max_queue_wait_ms": 0, "max_exec_ms": 0}
+
+    claim_ids_stmt = (
+        select(MetricsReadRefreshJob.id)
+        .where(MetricsReadRefreshJob.status == METRICS_READ_REFRESH_STATUS_QUEUED)
+        .where(MetricsReadRefreshJob.expires_at > now)
+        .order_by(MetricsReadRefreshJob.created_at.asc(), MetricsReadRefreshJob.id.asc())
+        .limit(limit_value)
+        .with_for_update(skip_locked=True)
+    )
+    ids_to_claim = [row[0] for row in (await db.execute(claim_ids_stmt)).all()]
+    if not ids_to_claim:
+        await db.commit()
+        return {"processed": 0, "succeeded": 0, "failed": 0, "max_queue_wait_ms": 0, "max_exec_ms": 0}
+
+    claimed = (
+        update(MetricsReadRefreshJob)
+        .where(MetricsReadRefreshJob.id.in_(ids_to_claim))
+        .where(MetricsReadRefreshJob.status == METRICS_READ_REFRESH_STATUS_QUEUED)
+        .values(status=METRICS_READ_REFRESH_STATUS_RUNNING)
+        .returning(
+            MetricsReadRefreshJob.id,
+            MetricsReadRefreshJob.job_key,
+            MetricsReadRefreshJob.endpoint,
+            MetricsReadRefreshJob.query_key,
+            MetricsReadRefreshJob.created_at,
+        )
+    )
+    rows = (await db.execute(claimed)).all()
+    await db.commit()
+    picked = rows
+
+    processed = 0
+    succeeded = 0
+    failed = 0
+    max_queue_wait_ms_seen = 0
+    max_exec_ms_seen = 0
+    for row in picked:
+        processed += 1
+        job_id, _, endpoint, query_key, created_at = row
+        queue_wait_ms = 0
+        if isinstance(created_at, datetime):
+            queue_wait_ms = max(0, int((datetime.utcnow() - created_at).total_seconds() * 1000))
+        max_queue_wait_ms_seen = max(max_queue_wait_ms_seen, queue_wait_ms)
+
+        if queue_wait_ms > _read_refresh_max_queue_wait_ms():
+            fail_stmt = (
+                update(MetricsReadRefreshJob)
+                .where(MetricsReadRefreshJob.id == job_id)
+                .values(status=METRICS_READ_REFRESH_STATUS_FAILED, last_error="queue_wait_timeout")
+            )
+            await db.execute(fail_stmt)
+            await db.commit()
+            failed += 1
+            continue
+
+        exec_started_ns = perf_counter_ns()
+        try:
+            await asyncio.wait_for(
+                _process_read_refresh_job_payload(
+                    db=db,
+                    endpoint=endpoint,
+                    query_key=query_key,
+                ),
+                timeout=max(0.001, _read_refresh_max_exec_ms() / 1000.0),
+            )
+            exec_ms = max(0, (perf_counter_ns() - exec_started_ns) // 1_000_000)
+            max_exec_ms_seen = max(max_exec_ms_seen, int(exec_ms))
+
+            done_stmt = (
+                update(MetricsReadRefreshJob)
+                .where(MetricsReadRefreshJob.id == job_id)
+                .values(status=METRICS_READ_REFRESH_STATUS_DONE, last_error=None)
+            )
+            await db.execute(done_stmt)
+            await db.commit()
+            succeeded += 1
+        except asyncio.TimeoutError:
+            fail_stmt = (
+                update(MetricsReadRefreshJob)
+                .where(MetricsReadRefreshJob.id == job_id)
+                .values(status=METRICS_READ_REFRESH_STATUS_FAILED, last_error="exec_timeout")
+            )
+            await db.execute(fail_stmt)
+            await db.commit()
+            failed += 1
+        except Exception as exc:
+            fail_stmt = (
+                update(MetricsReadRefreshJob)
+                .where(MetricsReadRefreshJob.id == job_id)
+                .values(status=METRICS_READ_REFRESH_STATUS_FAILED, last_error=str(exc)[:500])
+            )
+            await db.execute(fail_stmt)
+            await db.commit()
+            failed += 1
+    return {
+        "processed": processed,
+        "succeeded": succeeded,
+        "failed": failed,
+        "max_queue_wait_ms": int(max_queue_wait_ms_seen),
+        "max_exec_ms": int(max_exec_ms_seen),
+    }
 
 
 def _filter_facts(facts: dict) -> dict:
@@ -583,9 +1377,14 @@ def _emit_metrics_endpoint_timing(
     cache_key_hash: str | None = None,
     overview_source: str | None = None,
     runs_source: str | None = None,
+    snapshot_status: str | None = None,
+    job_enqueued: bool | None = None,
+    job_key_hash: str | None = None,
     db_us: int = 0,
     db_queries: int = 0,
     db_pool_wait_us: int = 0,
+    queue_wait_ms: int | None = None,
+    exec_ms: int | None = None,
 ) -> None:
     """
     Emite telemetria append-only por request dos endpoints de metricas.
@@ -644,6 +1443,16 @@ def _emit_metrics_endpoint_timing(
             facts["overview_source"] = str(overview_source)
         if runs_source:
             facts["runs_source"] = str(runs_source)
+        if snapshot_status:
+            facts["snapshot_status"] = str(snapshot_status)
+        if job_enqueued is not None:
+            facts["job_enqueued"] = bool(job_enqueued)
+        if job_key_hash:
+            facts["job_key_hash"] = str(job_key_hash)
+        if queue_wait_ms is not None:
+            facts["queue_wait_ms"] = int(max(0, queue_wait_ms))
+        if exec_ms is not None:
+            facts["exec_ms"] = int(max(0, exec_ms))
         observation = Observation(
             observation_id=str(uuid.uuid4()),
             timestamp=event_ts,
@@ -1125,7 +1934,7 @@ def _sanitize_error_message(message: Any) -> str | None:
         return None
     sanitized = message
     sanitized = sanitized.replace("\\", "/")
-    for token in ("/tmp/", "storage/", "videos-raw/", ".mp4", ".wav"):
+    for token in ("/tmp/", "storage/", "videos-raw/", ".mp4", ".wav"):  # nosec B108
         if token in sanitized:
             sanitized = sanitized.replace(token, "<path>/")
     return sanitized[:500]
@@ -1321,10 +2130,7 @@ async def get_metrics_overview(
 ):
     """
     Retorna metricas diarias com resumo agregado.
-    Args:
-        days: quantidade de dias para retornar (default 7, max 365)
-        start_date: filtra metricas a partir dessa data (YYYY-MM-DD)
-        end_date: filtra metricas ate essa data (YYYY-MM-DD)
+    Em C2.2, o request path e snapshot-first: sem fallback live.
     """
     handler_start_ns = perf_counter_ns()
     started_at = perf_counter()
@@ -1332,6 +2138,12 @@ async def get_metrics_overview(
     cache_hit_flag: bool | None = None
     cache_key_hash: str | None = None
     overview_source = "live"
+    snapshot_status = "missing"
+    job_enqueued_flag: bool | None = None
+    job_key_hash: str | None = None
+    queue_wait_ms_sample: int | None = None
+    exec_ms_sample: int | None = None
+    db_stats = _new_db_stats()
     query_fingerprint = (
         f"days={days}&start_date={start_date or ''}&end_date={end_date or ''}"
         f"&include_reasons={str(include_reasons).lower()}"
@@ -1342,212 +2154,177 @@ async def get_metrics_overview(
         if days < 1 or days > 365:
             raise HTTPException(status_code=400, detail="days must be between 1 and 365")
 
-        start = _parse_date(start_date, "start_date")
-        end = _parse_date(end_date, "end_date")
+        start_d = _parse_date(start_date, "start_date")
+        end_d = _parse_date(end_date, "end_date")
 
-        if end is None:
-            end = datetime.utcnow().date()
-        if start is None:
-            start = end - timedelta(days=days - 1)
+        if end_d is None:
+            end_d = datetime.utcnow().date()
+        if start_d is None:
+            start_d = end_d - timedelta(days=days - 1)
 
-        if start > end:
+        if start_d > end_d:
             raise HTTPException(status_code=400, detail="start_date must be <= end_date")
 
         cache_key = _build_overview_cache_key(
-            start=start,
-            end=end,
+            start=start_d,
+            end=end_d,
             include_reasons=include_reasons,
             include_baseline=include_baseline,
         )
         cache_key_hash = _overview_cache_key_hash(cache_key)
-        if force_live:
-            client_host = (request.client.host if request.client else "unknown") or "unknown"
-            limiter_scope = f"overview_force_live:{client_host}:{cache_key_hash}"
-            retry_after_seconds = _consume_force_live_token(limiter_scope, METRICS_OVERVIEW_FORCE_LIVE_COOLDOWN_SECONDS)
-            if retry_after_seconds > 0:
-                raise HTTPException(
-                    status_code=429,
-                    detail={
-                        "error_type": "RateLimited",
-                        "retry_after_seconds": retry_after_seconds,
-                        "cooldown_seconds": METRICS_OVERVIEW_FORCE_LIVE_COOLDOWN_SECONDS,
-                        "scope": "overview_force_live",
-                    },
-                )
-        cache_hit_flag = False
-        if not force_live:
-            cached_payload_json = _get_overview_cache(cache_key)
-            if cached_payload_json is not None:
-                cache_hit_flag = True
-                overview_source = "cache"
-                status_code = 200
-                return Response(content=cached_payload_json, media_type="application/json", status_code=200)
-
-        await _ensure_overview_read_model_table(db)
-        if not force_live:
-            read_payload, _ = await _get_overview_read_model_payload(
-                db,
-                start=start,
-                end=end,
-                include_reasons=include_reasons,
-                include_baseline=include_baseline,
-            )
-            if read_payload is not None:
-                overview_source = "read_model"
-                status_code = 200
-                payload_json = json.dumps(read_payload, separators=(",", ":"), ensure_ascii=False)
-                _set_overview_cache(cache_key, payload_json)
-                return Response(content=payload_json, media_type="application/json", status_code=200)
-
-        stmt = (
-            select(CognitiveMetricsDaily)
-            .where(CognitiveMetricsDaily.metric_date >= start)
-            .where(CognitiveMetricsDaily.metric_date <= end)
-            .order_by(CognitiveMetricsDaily.metric_date.asc())
-        )
-        rows = (await db.execute(stmt)).scalars().all()
-        baseline_stmt = (
-            select(CognitiveMetricsDaily)
-            .where(CognitiveMetricsDaily.metric_date >= start - timedelta(days=CES_DYNAMIC_BASELINE_WINDOW_DAYS))
-            .where(CognitiveMetricsDaily.metric_date <= end)
-            .order_by(CognitiveMetricsDaily.metric_date.asc())
-        )
-        baseline_rows = (await db.execute(baseline_stmt)).scalars().all()
-        baseline_cache_by_date: dict[date, dict[str, dict]] = {}
-
-        # Overview é read-only DB-first: usa alertas já materializados no agregado diário.
-        items = []
-        for r in rows:
-            alert_count = int(getattr(r, "alert_count", 0) or 0)
-            alerted = alert_count > 0
-            raw_reasons = getattr(r, "alert_reasons", []) or []
-            reasons = _dedup_and_sort_reasons(raw_reasons) if include_reasons else []
-            metric_date = r.metric_date
-            baseline_for_day = baseline_cache_by_date.get(metric_date)
-            if baseline_for_day is None:
-                baseline_for_day = _build_dynamic_baseline_for_date(metric_date, baseline_rows)
-                baseline_cache_by_date[metric_date] = baseline_for_day
-            item = {
-                "metric_date": metric_date.isoformat(),
-                "total_runs": r.total_runs,
-                "completed_runs": r.completed_runs,
-                "failed_runs": r.failed_runs,
-                "blocked_runs": r.blocked_runs,
-                "truncated_runs": getattr(r, "truncated_runs", 0),
-                "truncated_ratio": float(r.truncated_ratio)
-                if getattr(r, "truncated_ratio", None) is not None
-                else None,
-                "avg_actions_executed": float(r.avg_actions_executed)
-                if r.avg_actions_executed is not None
-                else None,
-                "last_action_type_distribution": r.last_action_type_distribution,
-                "latency_by_action": getattr(r, "latency_by_action", {}) or {},
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-                "alerted": alerted,
-                "alert_count": alert_count,
-                "alert_reasons": reasons,
-                "alert_observation_id": None,
-                "latency_dynamic_baseline_window_days": CES_DYNAMIC_BASELINE_WINDOW_DAYS,
-                "latency_dynamic_baseline": baseline_for_day,
-            }
-            if not item["alerted"]:
-                item["alert_count"] = 0
-                item["alert_reasons"] = []
-                item["alert_observation_id"] = None
-            item.update(_compute_ces_fields(item))
-            if not include_baseline:
-                item["latency_dynamic_baseline"] = {}
-            items.append(item)
-
-        # Resumo agregado do periodo.
-        summary = {
-            "total_runs": sum(item["total_runs"] for item in items),
-            "completed_runs": sum(item["completed_runs"] for item in items),
-            "failed_runs": sum(item["failed_runs"] for item in items),
-            "blocked_runs": sum(item["blocked_runs"] for item in items),
-            "truncated_runs": sum(item["truncated_runs"] for item in items),
-            "alert_days": sum(1 for item in items if item["alerted"]),
-        }
-
-        total_runs = summary["total_runs"]
-        if total_runs > 0:
-            summary["failed_ratio"] = round(summary["failed_runs"] / total_runs, 4)
-            summary["blocked_ratio"] = round(summary["blocked_runs"] / total_runs, 4)
-            summary["truncated_ratio"] = round(summary["truncated_runs"] / total_runs, 4)
-        else:
-            summary["failed_ratio"] = 0.0
-            summary["blocked_ratio"] = 0.0
-            summary["truncated_ratio"] = 0.0
-
-        # CES agregado do periodo (media ponderada por total_runs) por versao.
-        ces_versions_summary: dict[str, dict] = {}
-        for version in (CES_V1, CES_V2, CES_V3):
-            items_with_runs = [
-                item
-                for item in items
-                if item.get("total_runs", 0) > 0
-                and isinstance(item.get("ces_versions", {}).get(version), dict)
-                and item["ces_versions"][version].get("ces") is not None
-            ]
-            weighted_runs = sum(item["total_runs"] for item in items_with_runs)
-            if weighted_runs > 0:
-                ces_versions_summary[version] = {
-                    "ces": round(
-                        sum(float(item["ces_versions"][version]["ces"]) * item["total_runs"] for item in items_with_runs)
-                        / weighted_runs,
-                        2,
-                    ),
-                    "ces_reason": None,
-                    "ces_components": {
-                        key: round(
-                            sum(
-                                float(item["ces_versions"][version]["ces_components"][key]) * item["total_runs"]
-                                for item in items_with_runs
-                            )
-                            / weighted_runs,
-                            4,
-                        )
-                        for key in ("status", "actions", "latency", "trunc")
-                    },
-                    "budgets_used": {},
-                }
-            else:
-                ces_versions_summary[version] = {
-                    "ces": None,
-                    "ces_reason": "no_runs",
-                    "ces_components": {
-                        "status": None,
-                        "actions": None,
-                        "latency": None,
-                        "trunc": None,
-                    },
-                    "budgets_used": {},
-                }
-
-        default_summary = ces_versions_summary[CES_DEFAULT_VERSION]
-        summary["ces_default_version"] = CES_DEFAULT_VERSION
-        summary["ces"] = default_summary["ces"]
-        summary["ces_reason"] = default_summary["ces_reason"]
-        summary["ces_version"] = CES_DEFAULT_VERSION
-        summary["ces_components"] = default_summary["ces_components"]
-        summary["ces_versions"] = ces_versions_summary
-        summary.update(_compute_ces_window_summary(items))
-
-        status_code = 200
-        response_payload = {"items": items, "summary": summary}
-        await _upsert_overview_read_model_payload(
-            db,
-            start=start,
-            end=end,
+        query_key = _build_overview_query_key(
+            start=start_d,
+            end=end_d,
             include_reasons=include_reasons,
             include_baseline=include_baseline,
-            payload=response_payload,
         )
-        _set_overview_cache(
-            cache_key,
-            json.dumps(response_payload, separators=(",", ":"), ensure_ascii=False),
+
+        if force_live:
+            existing_job_key = _build_refresh_job_key(endpoint="/api/v1/metrics/overview", query_key=query_key)
+            active_job = await _get_active_refresh_job(db, job_key=existing_job_key, db_stats=db_stats)
+            if active_job is not None:
+                active_job_key, active_created_at = active_job
+                cooldown_remaining = _active_job_cooldown_remaining_seconds(
+                    created_at=active_created_at,
+                    cooldown_seconds=METRICS_OVERVIEW_FORCE_LIVE_COOLDOWN_SECONDS,
+                )
+                if cooldown_remaining > 0:
+                    status_code = 429
+                    return _build_force_live_rate_limited_response(
+                        scope="overview_force_live",
+                        retry_after_seconds=cooldown_remaining,
+                        cooldown_seconds=METRICS_OVERVIEW_FORCE_LIVE_COOLDOWN_SECONDS,
+                    )
+                job_enqueued_flag = False
+                job_key_hash = active_job_key[:8]
+                status_code = 202
+                return _build_snapshot_accepted_response(
+                    scope="overview",
+                    correlation_id=job_key_hash,
+                    retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
+                )
+            pressure = await _get_read_refresh_pressure(db, db_stats)
+            queue_wait_ms_sample = int(pressure.get("queue_wait_ms", 0))
+            if _is_read_refresh_backpressured(pressure):
+                status_code = 429
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error_type": "Backpressure",
+                        "scope": "overview_force_live",
+                        "snapshot_status": "queued",
+                        "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
+                    },
+                    headers=_build_envelope_headers(
+                        degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
+                    ),
+                )
+            enqueue_started_ns = perf_counter_ns()
+            try:
+                job_key, job_enqueued, retry_after = await asyncio.wait_for(
+                    _enqueue_read_refresh_job(
+                        db,
+                        endpoint="/api/v1/metrics/overview",
+                        query_key=query_key,
+                        db_stats=db_stats,
+                    ),
+                    timeout=max(0.001, _read_refresh_max_queue_wait_ms() / 1000.0),
+                )
+            except asyncio.TimeoutError:
+                await db.rollback()
+                status_code = 503
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error_type": "QueueTimeout",
+                        "scope": "overview_force_live",
+                        "snapshot_status": "queued",
+                        "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
+                    },
+                    headers=_build_envelope_headers(
+                        degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
+                    ),
+                )
+            exec_ms_sample = int(max(0, (perf_counter_ns() - enqueue_started_ns) // 1_000_000))
+            job_enqueued_flag = job_enqueued
+            job_key_hash = job_key[:8]
+            status_code = 202
+            return _build_snapshot_accepted_response(
+                scope="overview",
+                correlation_id=job_key_hash,
+                retry_after_seconds=retry_after,
+            )
+
+        cache_hit_flag = False
+        cached_payload = _get_overview_cache(cache_key)
+        if cached_payload is not None:
+            cached_payload_json, cached_etag = cached_payload
+            cache_hit_flag = True
+            overview_source = "cache"
+            snapshot_status = "fresh"
+            response_headers = _build_snapshot_headers(
+                degraded=False,
+                etag=cached_etag if cached_etag else None,
+            )
+            if cached_etag and _if_none_match_matches(request, cached_etag):
+                status_code = 304
+                return Response(status_code=304, headers=response_headers)
+            status_code = 200
+            return Response(
+                content=cached_payload_json,
+                media_type="application/json",
+                status_code=200,
+                headers=response_headers,
+            )
+
+        await _ensure_overview_read_model_table(db)
+        read_payload, read_refreshed_at = await _get_overview_read_model_payload(
+            db,
+            start=start_d,
+            end=end_d,
+            include_reasons=include_reasons,
+            include_baseline=include_baseline,
+            db_stats=db_stats,
         )
-        return response_payload
+        if read_payload is None:
+            snapshot_status = "missing"
+            raise _build_snapshot_missing_http_exception(
+                scope="overview",
+                retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
+            )
+
+        overview_source = "read_model"
+        age_seconds = 0
+        if isinstance(read_refreshed_at, datetime):
+            age_seconds = max(0, int((datetime.utcnow() - read_refreshed_at).total_seconds()))
+        snapshot_status = "fresh" if age_seconds <= METRICS_READ_REFRESH_JOB_TTL_SECONDS else "stale"
+        snapshot_etag = _build_snapshot_etag(
+            endpoint="/api/v1/metrics/overview",
+            query_key=query_key,
+            refreshed_at=read_refreshed_at,
+        )
+        response_headers = _build_snapshot_headers(
+            degraded=(snapshot_status != "fresh"),
+            etag=snapshot_etag,
+        )
+        if _if_none_match_matches(request, snapshot_etag):
+            status_code = 304
+            return Response(status_code=304, headers=response_headers)
+
+        response_payload = dict(read_payload)
+        response_payload["snapshot_status"] = snapshot_status
+        response_payload["last_refreshed_at"] = read_refreshed_at.isoformat() if read_refreshed_at else None
+        response_payload["freshness_seconds"] = age_seconds
+
+        status_code = 200
+        payload_json = json.dumps(response_payload, separators=(",", ":"), ensure_ascii=False)
+        _set_overview_cache(cache_key, payload_json, snapshot_etag)
+        return Response(
+            content=payload_json,
+            media_type="application/json",
+            status_code=200,
+            headers=response_headers,
+        )
     except HTTPException as exc:
         status_code = exc.status_code
         raise
@@ -1575,6 +2352,14 @@ async def get_metrics_overview(
             cache_hit=cache_hit_flag,
             cache_key_hash=cache_key_hash,
             overview_source=overview_source,
+            snapshot_status=snapshot_status,
+            job_enqueued=job_enqueued_flag,
+            job_key_hash=job_key_hash,
+            db_us=db_stats["db_us"],
+            db_queries=db_stats["db_queries"],
+            db_pool_wait_us=db_stats["db_pool_wait_us"],
+            queue_wait_ms=queue_wait_ms_sample,
+            exec_ms=exec_ms_sample,
         )
 
 
@@ -1662,24 +2447,29 @@ async def get_runs(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Retorna runs por process_id deduplicados pelo ultimo cognitive_loop_finished no range.
+    Retorna runs por process_id deduplicados via snapshot materializado (C2.2).
     """
     handler_start_ns = perf_counter_ns()
     started_at = perf_counter()
     status_code = 500
     query_fingerprint = f"limit={limit}&offset={offset}&range=unknown"
     runs_source = "live"
+    snapshot_status = "missing"
+    job_enqueued_flag: bool | None = None
+    job_key_hash: str | None = None
+    queue_wait_ms_sample: int | None = None
+    exec_ms_sample: int | None = None
     db_stats = _new_db_stats()
     try:
-        start = _parse_date(start_date, "start_date")
-        end = _parse_date(end_date, "end_date")
+        start_d = _parse_date(start_date, "start_date")
+        end_d = _parse_date(end_date, "end_date")
 
-        if end is None:
-            end = datetime.utcnow().date()
-        if start is None:
-            start = end - timedelta(days=7)
+        if end_d is None:
+            end_d = datetime.utcnow().date()
+        if start_d is None:
+            start_d = end_d - timedelta(days=7)
 
-        if start > end:
+        if start_d > end_d:
             raise HTTPException(status_code=400, detail="start_date must be <= end_date")
 
         if limit > METRICS_RUNS_LIMIT_MAX:
@@ -1692,7 +2482,7 @@ async def get_runs(
                 },
             )
 
-        range_days = (end - start).days + 1
+        range_days = (end_d - start_d).days + 1
         if range_days > METRICS_RUNS_RANGE_MAX_DAYS:
             raise HTTPException(
                 status_code=400,
@@ -1703,124 +2493,129 @@ async def get_runs(
                 },
             )
 
-        query_fingerprint = _build_runs_query_fingerprint(limit, offset, start, end)
+        query_fingerprint = _build_runs_query_fingerprint(limit, offset, start_d, end_d)
+        query_key = _build_runs_query_key(start=start_d, end=end_d, limit=limit, offset=offset)
         await _ensure_runs_read_model_table(db)
+
         if force_live:
-            last_refresh = await _get_runs_read_model_refreshed_at(
-                db,
-                start=start,
-                end=end,
-                limit=limit,
-                offset=offset,
-                db_stats=db_stats,
-            )
-            retry_after_seconds = 0
-            if isinstance(last_refresh, datetime):
-                elapsed = (datetime.utcnow() - last_refresh).total_seconds()
-                remaining = METRICS_RUNS_FORCE_LIVE_COOLDOWN_SECONDS - elapsed
-                if remaining > 0:
-                    retry_after_seconds = max(1, int(math.ceil(remaining)))
-            if retry_after_seconds:
-                raise HTTPException(
-                    status_code=429,
-                    detail={
-                        "error_type": "RateLimited",
-                        "retry_after_seconds": retry_after_seconds,
-                        "cooldown_seconds": METRICS_RUNS_FORCE_LIVE_COOLDOWN_SECONDS,
-                        "scope": "runs_force_live",
-                    },
+            existing_job_key = _build_refresh_job_key(endpoint="/api/v1/metrics/runs", query_key=query_key)
+            active_job = await _get_active_refresh_job(db, job_key=existing_job_key, db_stats=db_stats)
+            if active_job is not None:
+                active_job_key, active_created_at = active_job
+                cooldown_remaining = _active_job_cooldown_remaining_seconds(
+                    created_at=active_created_at,
+                    cooldown_seconds=METRICS_RUNS_FORCE_LIVE_COOLDOWN_SECONDS,
                 )
-        else:
-            read_payload, _ = await _get_runs_read_model_payload(
-                db,
-                start=start,
-                end=end,
-                limit=limit,
-                offset=offset,
-                db_stats=db_stats,
-            )
-            if read_payload is not None:
-                runs_source = "read_model"
-                status_code = 200
-                return read_payload
-
-        count_stmt = (
-            select(func.count(func.distinct(ObservationRecord.process_id)))
-            .where(ObservationRecord.facts["event_type"].astext == "cognitive_loop_finished")
-            .where(ObservationRecord.timestamp >= datetime.combine(start, datetime.min.time()))
-            .where(ObservationRecord.timestamp < datetime.combine(end + timedelta(days=1), datetime.min.time()))
-        )
-        total = (await _execute_with_db_stats(db, count_stmt, db_stats)).scalar() or 0
-
-        stmt = (
-            select(
-                ObservationRecord.process_id,
-                ObservationRecord.observation_id,
-                ObservationRecord.timestamp,
-                ObservationRecord.facts,
-            )
-            .where(ObservationRecord.facts["event_type"].astext == "cognitive_loop_finished")
-            .where(ObservationRecord.timestamp >= datetime.combine(start, datetime.min.time()))
-            .where(ObservationRecord.timestamp < datetime.combine(end + timedelta(days=1), datetime.min.time()))
-            .order_by(desc(ObservationRecord.timestamp))
-        )
-        rows = (await _execute_with_db_stats(db, stmt, db_stats)).all()
-
-        latest_by_process: dict[str, tuple] = {}
-        for process_id, observation_id, ts, facts in rows:
-            if not process_id or process_id in latest_by_process:
-                continue
-            latest_by_process[process_id] = (observation_id, ts, facts if isinstance(facts, dict) else {})
-
-        deduped = [
-            {
-                "process_id": pid,
-                "observation_id": payload[0],
-                "timestamp_finished": payload[1].isoformat() if payload[1] else None,
-                "timestamp_finished_dt": payload[1],
-                "facts": payload[2],
-            }
-            for pid, payload in latest_by_process.items()
-        ]
-
-        deduped.sort(key=lambda item: item["timestamp_finished"] or "", reverse=True)
-        paged = deduped[offset : offset + limit]
-
-        items = []
-        for row in paged:
-            # List endpoint permanece lean: sem calculo de latencia run-level pesada.
-            ces_payload = _compute_ces_run_fields(row["facts"], None)
-            items.append(
-                {
-                    "process_id": row["process_id"],
-                    "timestamp_finished": row["timestamp_finished"],
-                    "pipeline_status": ces_payload["pipeline_status"],
-                    "ces_run": ces_payload["ces_run"],
-                    "ces_run_version": ces_payload["ces_run_version"],
-                    "ces_run_reason": ces_payload["ces_run_reason"],
-                    "ces_run_components": ces_payload["ces_run_components"],
-                    "latency_measured": ces_payload["latency_measured"],
-                    "latency_pairs_inverted": ces_payload["latency_pairs_inverted"],
-                }
+                if cooldown_remaining > 0:
+                    status_code = 429
+                    return _build_force_live_rate_limited_response(
+                        scope="runs_force_live",
+                        retry_after_seconds=cooldown_remaining,
+                        cooldown_seconds=METRICS_RUNS_FORCE_LIVE_COOLDOWN_SECONDS,
+                    )
+                job_enqueued_flag = False
+                job_key_hash = active_job_key[:8]
+                status_code = 202
+                return _build_snapshot_accepted_response(
+                    scope="runs",
+                    correlation_id=job_key_hash,
+                    retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
+                )
+            pressure = await _get_read_refresh_pressure(db, db_stats)
+            queue_wait_ms_sample = int(pressure.get("queue_wait_ms", 0))
+            if _is_read_refresh_backpressured(pressure):
+                status_code = 429
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error_type": "Backpressure",
+                        "scope": "runs_force_live",
+                        "snapshot_status": "queued",
+                        "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
+                    },
+                    headers=_build_envelope_headers(
+                        degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
+                    ),
+                )
+            enqueue_started_ns = perf_counter_ns()
+            try:
+                job_key, job_enqueued, retry_after = await asyncio.wait_for(
+                    _enqueue_read_refresh_job(
+                        db,
+                        endpoint="/api/v1/metrics/runs",
+                        query_key=query_key,
+                        db_stats=db_stats,
+                    ),
+                    timeout=max(0.001, _read_refresh_max_queue_wait_ms() / 1000.0),
+                )
+            except asyncio.TimeoutError:
+                await db.rollback()
+                status_code = 503
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error_type": "QueueTimeout",
+                        "scope": "runs_force_live",
+                        "snapshot_status": "queued",
+                        "retry_after_seconds": METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
+                    },
+                    headers=_build_envelope_headers(
+                        degraded=True, retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS
+                    ),
+                )
+            exec_ms_sample = int(max(0, (perf_counter_ns() - enqueue_started_ns) // 1_000_000))
+            job_enqueued_flag = job_enqueued
+            job_key_hash = job_key[:8]
+            status_code = 202
+            return _build_snapshot_accepted_response(
+                scope="runs",
+                correlation_id=job_key_hash,
+                retry_after_seconds=retry_after,
             )
 
-        response_payload = {
-            "items": items,
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-        }
-        await _upsert_runs_read_model_payload(
+        read_payload, refreshed_at = await _get_runs_read_model_payload(
             db,
-            start=start,
-            end=end,
+            start=start_d,
+            end=end_d,
             limit=limit,
             offset=offset,
-            payload=response_payload,
             db_stats=db_stats,
         )
+        if read_payload is None:
+            snapshot_status = "missing"
+            raise _build_snapshot_missing_http_exception(
+                scope="runs",
+                retry_after_seconds=METRICS_READ_REFRESH_JOB_RETRY_AFTER_SECONDS,
+            )
+
+        runs_source = "read_model"
+        age_seconds = 0
+        if isinstance(refreshed_at, datetime):
+            age_seconds = max(0, int((datetime.utcnow() - refreshed_at).total_seconds()))
+        snapshot_status = "fresh" if age_seconds <= METRICS_READ_REFRESH_JOB_TTL_SECONDS else "stale"
+        snapshot_etag = _build_snapshot_etag(
+            endpoint="/api/v1/metrics/runs",
+            query_key=query_key,
+            refreshed_at=refreshed_at,
+        )
+        response_headers = _build_snapshot_headers(
+            degraded=(snapshot_status != "fresh"),
+            etag=snapshot_etag,
+        )
+        if _if_none_match_matches(request, snapshot_etag):
+            status_code = 304
+            return Response(status_code=304, headers=response_headers)
+
+        payload = dict(read_payload)
+        payload["snapshot_status"] = snapshot_status
+        payload["last_refreshed_at"] = refreshed_at.isoformat() if refreshed_at else None
+        payload["freshness_seconds"] = age_seconds
         status_code = 200
-        return response_payload
+        return JSONResponse(
+            status_code=200,
+            content=payload,
+            headers=response_headers,
+        )
     except HTTPException as exc:
         status_code = exc.status_code
         raise
@@ -1846,9 +2641,14 @@ async def get_runs(
             server_total_us=server_total_us,
             query_fingerprint=query_fingerprint,
             runs_source=runs_source,
+            snapshot_status=snapshot_status,
+            job_enqueued=job_enqueued_flag,
+            job_key_hash=job_key_hash,
             db_us=db_stats["db_us"],
             db_queries=db_stats["db_queries"],
             db_pool_wait_us=db_stats["db_pool_wait_us"],
+            queue_wait_ms=queue_wait_ms_sample,
+            exec_ms=exec_ms_sample,
         )
 
 

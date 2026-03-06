@@ -334,7 +334,7 @@ def _to_endpoint_slug(endpoint: str) -> str:
 def _aggregate_metrics_endpoint_daily_and_alerts(
     session,
     metric_date: date,
-    rows: list[ObservationRecord],
+    rows_facts: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
     Agrega p50/p95/p99 e error_rate por endpoint e emite alertas SLO idempotentes.
@@ -343,8 +343,9 @@ def _aggregate_metrics_endpoint_daily_and_alerts(
         return []
 
     timings_by_endpoint: dict[str, list[dict[str, int]]] = defaultdict(list)
-    for row in rows:
-        facts = row.facts if isinstance(row.facts, dict) else {}
+    for facts in rows_facts:
+        if not isinstance(facts, dict):
+            continue
         if facts.get("event_type") != METRICS_ENDPOINT_TIMING_EVENT:
             continue
         endpoint = str(facts.get("endpoint") or "").strip()
@@ -482,6 +483,11 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
             .filter(ObservationRecord.timestamp < end_dt)
             .all()
         )
+        # Materializa facts para evitar acesso a instancias ORM apos commits.
+        rows_facts: list[dict[str, Any]] = [
+            row.facts if isinstance(row.facts, dict) else {}
+            for row in rows
+        ]
 
         loop_finished = [
             row
@@ -826,7 +832,7 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
             existing.alert_count = payload["alert_count"]
             existing.alert_reasons = payload["alert_reasons"]
         session.commit()
-        endpoint_daily_rows = _aggregate_metrics_endpoint_daily_and_alerts(session, metric_date, rows)
+        endpoint_daily_rows = _aggregate_metrics_endpoint_daily_and_alerts(session, metric_date, rows_facts)
         payload["metrics_endpoint_daily"] = endpoint_daily_rows
         return payload
     finally:

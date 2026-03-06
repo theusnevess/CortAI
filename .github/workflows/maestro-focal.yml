@@ -1,0 +1,54 @@
+name: maestro_focal
+
+on:
+  pull_request:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  maestro_focal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install deps (minimal)
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Compileall (stop-the-line)
+        working-directory: backend
+        run: |
+          python -m compileall -q \
+            app/maestro \
+            app/agents/adapters/audio_extractor_adapter.py \
+            app/api/v1/endpoints/internal_maestro.py
+
+      - name: Pytest focal (no conftest / no DB)
+        working-directory: backend
+        run: |
+          python -m pytest -q \
+            tests/test_maestro_orchestrator.py \
+            tests/test_internal_maestro_api.py \
+            tests/test_audio_extractor_adapter.py \
+            tests/test_operational_decision_projection.py \
+            tests/test_policy_bridge.py \
+            tests/test_policy_decision.py \
+            tests/test_status_public_policy_projection.py \
+            tests/test_policy_trust_harmonization.py \
+            tests/test_webhook_observability.py \
+            tests/test_policy_engine.py \
+            --noconftest

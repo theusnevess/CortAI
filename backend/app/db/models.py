@@ -237,6 +237,23 @@ class MetricsRunsReadModel(Base):
     )
 
 
+class MetricsReadRefreshJob(Base):
+    __tablename__ = "metrics_read_refresh_jobs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_key = Column(String, nullable=False, unique=True, index=True)
+    endpoint = Column(String, nullable=False, index=True)
+    query_key = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="queued", index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    last_error = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_metrics_read_refresh_jobs_status_expires_at", "status", "expires_at"),
+    )
+
+
 # --- Tabela de Recibos de Publicacao ---
 class PublishReceipt(Base):
     __tablename__ = "publish_receipts"
@@ -265,4 +282,27 @@ class PublishReceipt(Base):
         Index("ix_publish_receipts_process_id", "process_id"),
         Index("ix_publish_receipts_manifest_decision_id", "manifest_decision_id"),
         Index("ix_publish_receipts_created_at", "created_at"),
+    )
+
+
+class MaestroJobModel(Base):
+    __tablename__ = "maestro_jobs"
+
+    job_id = Column(String, primary_key=True)
+    source_ref = Column(String, nullable=False)
+
+    status = Column(String, nullable=False)
+    step = Column(String, nullable=True)
+    error = Column(Text, nullable=True)
+
+    started_at = Column(DateTime, nullable=False)
+    finished_at = Column(DateTime, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+
+    demo_mode = Column(Boolean, nullable=False, default=False)
+    step_durations_json = Column(JSONB, nullable=True, default=dict)
+
+    __table_args__ = (
+        Index("ix_maestro_jobs_status", "status"),
+        Index("ix_maestro_jobs_started_at", "started_at"),
     )

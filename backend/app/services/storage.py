@@ -46,9 +46,15 @@ class MinioService:
             minio_endpoint = f"{minio_host}:{minio_port}"
             secure_flag = os.getenv("MINIO_SECURE", "false").lower() in ["1", "true", "yes"]
 
-        # Credenciais do MinIO vindas do .env
-        access_key = os.getenv("MINIO_ROOT_USER", "minioadmin")
-        secret_key = os.getenv("MINIO_ROOT_PASSWORD", "minioadmin123")
+        # Credenciais do MinIO devem vir do ambiente.
+        # Evita defaults hardcoded sensiveis no codigo.
+        access_key = os.getenv("MINIO_ROOT_USER")
+        secret_key = os.getenv("MINIO_ROOT_PASSWORD")
+        if not access_key or not secret_key:
+            raise RuntimeError(
+                "Missing MINIO_ROOT_USER/MINIO_ROOT_PASSWORD. "
+                "Set env vars explicitly (dev via .env/compose override)."
+            )
 
         # Instancia o cliente MinIO com as respectivas credenciais 
         self.client = Minio(

@@ -12,6 +12,7 @@ from app.cognitive_metrics import aggregate_daily_metrics_for_date
 import os
 import uuid
 import json
+import tempfile
 from contextlib import contextmanager # Importa contextmanager para criar gerenciadores de contexto personalizados
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine # create_engine para criar engine de DB
@@ -287,7 +288,7 @@ def process_video_task(video_id: str, url: str):
 
             # Segmentar o vídeo
             storage = MinioService()
-            temp_dir = "/tmp"
+            temp_dir = tempfile.gettempdir()
             os.makedirs(temp_dir, exist_ok=True)
             local_file_path = os.path.join(temp_dir, f"{video_id}.mp4")
             object_name = video.file_path.split('/', 1)[1]

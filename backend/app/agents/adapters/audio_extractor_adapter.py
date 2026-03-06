@@ -1,72 +1,130 @@
-import subprocess
+from __future__ import annotations
+
+import os
+import subprocess  # nosec B404
+import tempfile
 import uuid
 from pathlib import Path
 
+from app.agents.collector.utils import parse_minio_path
 from app.services.storage import MinioService
+
+DEFAULT_AUDIO_BUCKET = os.getenv("MINIO_BUCKET_AUDIO", "audio-raw")
+TMP_DIR = Path(tempfile.gettempdir()) / "cortai" / "audio_extractor"
 
 
 class AudioExtractorAdapter:
-    def process(self, state: dict, payload: dict | None = None) -> dict:
-        """
-        Extraí o áudio de um vídeo usando FFmpeg. O caminho do vídeo deve ser fornecido em payload.raw_video_minio_path. O áudio extraído é salvo localmente e seu caminho é adicionado ao estado. O formato do
-        áudio pode ser especificado em payload.audio_format (padrão: "wav").
-        Args:
-            state (dict): O estado atual do agente.
-            payload (dict | None): O payload contendo os parâmetros necessários.
-        Returns:
-            dict: O estado atualizado com o caminho do áudio extraído.
-        Raises:
-            ValueError: Se o campo raw_video_minio_path estiver ausente ou inválido.
-            OSError: Se o FFmpeg falhar ao processar o vídeo.
-        """
+    """
+    Normaliza a midia do pipeline em audio local e em MinIO.
 
-        # Se o payload não for fornecido, tente obter do estado
+    Contrato v0.1:
+    - aceita exatamente um dos modos:
+      - payload.raw_video_minio_path
+      - payload.audio_minio_path
+    - sempre retorna um state completo com os campos necessarios para os
+      proximos steps do Maestro, mesmo sob `state.clear()`.
+    """
+
+    def process(self, state: dict, payload: dict | None = None) -> dict:
         payload = payload or state.get("_action", {}).get("payload", {})
         raw_video_minio_path = payload.get("raw_video_minio_path")
-        if not isinstance(raw_video_minio_path, str) or not raw_video_minio_path:
-            raise ValueError("MissingField: payload.raw_video_minio_path")
+        audio_minio_path = payload.get("audio_minio_path")
 
-        audio_format = payload.get("audio_format", "wav")
-        if audio_format not in ("wav", "mp3"):
-            raise ValueError("InvalidField: payload.audio_format")
+        if bool(raw_video_minio_path) == bool(audio_minio_path):
+            raise ValueError(
+                "ContractViolation: audio_extractor requires exactly one of "
+                "raw_video_minio_path or audio_minio_path"
+            )
 
-        # Determina o nome do objeto no Minio a partir do caminho fornecido. 
-        # O caminho pode ser no formato "bucket/object" ou apenas "object". 
-        # Se for no formato "bucket/object", o bucket é extraído e o prefixo é removido para obter o nome do objeto. 
-        # Se for apenas "object", o nome do objeto é usado diretamente.
-        object_name = raw_video_minio_path
-        if "/" in raw_video_minio_path:
-            bucket = raw_video_minio_path.split("/", 1)[0]
-            prefix = f"{bucket}/"
-            if raw_video_minio_path.startswith(prefix):
-                object_name = raw_video_minio_path[len(prefix):]
+        job_id = state.get("job_id")
+        input_ref = state.get("input_ref")
+        artifacts = dict(state.get("artifacts") or {})
+        TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-        ext = Path(raw_video_minio_path).suffix or ".mp4"
-        video_local_path = Path("/tmp") / f"cortai_{uuid.uuid4()}{ext}"
-        audio_local_path = Path("/tmp") / f"cortai_{uuid.uuid4()}.{audio_format}"
+        if isinstance(raw_video_minio_path, str) and raw_video_minio_path:
+            artifacts["raw_video_minio_path"] = raw_video_minio_path
+            audio_local_path, audio_minio_path = self._extract_from_raw_video(
+                raw_video_minio_path, TMP_DIR
+            )
+        elif isinstance(audio_minio_path, str) and audio_minio_path:
+            audio_local_path = self._download_audio_to_tmp(audio_minio_path, TMP_DIR)
+        else:
+            raise ValueError("ContractViolation: invalid payload values for audio_extractor")
 
-        MinioService().download_file(object_name, str(video_local_path))
+        artifacts["audio_ready"] = True
+        artifacts["audio_local_path"] = audio_local_path
+        artifacts["audio_minio_path"] = audio_minio_path
 
-        # Extraí o áudio usando FFmpeg
+        out_state = {
+            "job_id": job_id,
+            "input_ref": input_ref,
+            "source_type": "audio",
+            "audio_local_path": audio_local_path,
+            "audio_minio_path": audio_minio_path,
+            "artifacts": artifacts,
+        }
+        if artifacts.get("raw_video_minio_path"):
+            out_state["raw_video_minio_path"] = artifacts["raw_video_minio_path"]
+        return out_state
+
+    def _extract_from_raw_video(
+        self, raw_video_minio_path: str, tmp_dir: Path
+    ) -> tuple[str, str]:
+        local_video_path = self._download_to_tmp(raw_video_minio_path, tmp_dir)
+        audio_local_path = self._extract_wav(local_video_path)
+        audio_minio_path = self._upload_audio(audio_local_path)
+        return audio_local_path, audio_minio_path
+
+    def _download_audio_to_tmp(self, audio_minio_path: str, tmp_dir: Path) -> str:
+        return self._download_to_tmp(audio_minio_path, tmp_dir, suffix=".wav")
+
+    def _download_to_tmp(
+        self, minio_path: str, tmp_dir: Path, suffix: str | None = None
+    ) -> str:
+        parsed = parse_minio_path(minio_path)
+        src_storage = MinioService()
+        src_storage.bucket_name = parsed.bucket
+        src_storage._ensure_bucket_exists()
+
+        file_suffix = suffix or Path(parsed.key).suffix or ".bin"
+        local_path = tmp_dir / f"{uuid.uuid4()}{file_suffix}"
+        src_storage.download_file(parsed.key, str(local_path))
+        if not local_path.exists():
+            raise RuntimeError("AudioExtractorError: download did not produce local file")
+        return str(local_path)
+
+    def _extract_wav(self, local_video_path: str) -> str:
+        audio_local_path = TMP_DIR / f"{uuid.uuid4()}.wav"
         cmd = [
             "ffmpeg",
             "-y",
             "-i",
-            str(video_local_path),
+            str(local_video_path),
             "-vn",
+            "-acodec",
+            "pcm_s16le",
             "-ac",
             "1",
             "-ar",
             "16000",
             str(audio_local_path),
         ]
-        proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        proc = subprocess.run(  # nosec B603
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
         if proc.returncode != 0:
             msg = (proc.stderr or proc.stdout or "").strip()
-            raise OSError(f"FFmpegFailed: {msg}")
+            raise OSError(f"FFmpegFailed: {msg[:500]}")
+        if not audio_local_path.exists():
+            raise RuntimeError("AudioExtractorError: ffmpeg did not produce wav")
+        return str(audio_local_path)
 
-        state["audio_local_path"] = str(audio_local_path)
-        state.setdefault("artifacts", {})
-        state["artifacts"]["audio_ready"] = True
-        state["artifacts"]["audio_local_path"] = state["audio_local_path"]
-        return state
+    def _upload_audio(self, audio_local_path: str) -> str:
+        storage = MinioService()
+        storage.bucket_name = DEFAULT_AUDIO_BUCKET
+        storage._ensure_bucket_exists()
+        object_name = f"{uuid.uuid4()}.wav"
+        return storage.upload_file(audio_local_path, object_name)

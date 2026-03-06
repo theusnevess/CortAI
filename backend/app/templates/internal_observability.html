@@ -1,0 +1,382 @@
+﻿<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Operational Insights</title>
+  <style>
+    :root { --bg:#0b0f14; --fg:#e8eef7; --mut:#9fb0c3; --card:#121924; --line:#223044; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); color:var(--fg); }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 20px; }
+    .row { display:flex; gap: 12px; flex-wrap: wrap; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius: 12px; padding: 14px; }
+    .h1 { font-size: 18px; margin:0 0 10px 0; }
+    .mut { color:var(--mut); font-size: 12px; }
+    .kv { display:flex; gap:12px; flex-wrap:wrap; }
+    .kv > div { min-width: 160px; }
+    .banner { border-radius: 14px; padding: 14px; border:1px solid var(--line); }
+    .b-green { background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.35); }
+    .b-yellow { background: rgba(234,179,8,0.12); border-color: rgba(234,179,8,0.35); }
+    .b-red { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.35); }
+    .pill { display:inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; border:1px solid var(--line); margin-right: 8px; }
+    .pill-green { border-color: rgba(34,197,94,0.5); }
+    .pill-yellow { border-color: rgba(234,179,8,0.5); }
+    .pill-red { border-color: rgba(239,68,68,0.5); }
+    table { width:100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; }
+    .d-PASS { color: rgb(134,239,172); }
+    .d-WARN { color: rgb(253,224,71); }
+    .d-FAIL { color: rgb(252,165,165); }
+    code { background: rgba(148,163,184,0.12); padding: 2px 6px; border-radius: 6px; }
+    .small { font-size: 12px; }
+    .ov-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 12px 0 16px 0;
+    }
+    .ov-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      user-select: none;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      font-size: 12px;
+      opacity: 0.92;
+    }
+    .ov-toggle input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      accent-color: #2ecc71;
+      cursor: pointer;
+    }
+    .ov-pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(255,255,255,0.06);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      white-space: nowrap;
+    }
+    .ov-pill.is-on {
+      border-color: rgba(46, 204, 113, 0.35);
+      background: rgba(46, 204, 113, 0.12);
+    }
+    .ov-pill.is-off {
+      border-color: rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.05);
+      opacity: 0.85;
+    }
+  </style>
+</head>
+<body data-demo-enabled="{% if demo and demo.get('enabled') %}1{% else %}0{% endif %}">
+  <div class="wrap">
+    {% set demo_enabled = demo and demo.get("enabled") %}
+    {% if demo_enabled %}
+    <div class="banner b-yellow" style="margin-bottom:10px;">
+      <strong>Modo de Demonstracao</strong>
+      <span class="mut"> - cenario: {{ demo.get("label") or demo.get("scenario") }}</span>
+    </div>
+    {% endif %}
+    <div class="ov-toolbar">
+      <label class="ov-toggle" for="ov-auto-refresh">
+        <input id="ov-auto-refresh" type="checkbox" {% if demo_enabled %}disabled{% endif %} />
+        <span>Auto-refresh</span>
+      </label>
+      <span id="ov-auto-refresh-indicator" class="ov-pill is-off">Auto-refresh OFF</span>
+    </div>
+
+    <div id="ov-panel-root">
+    {% set trust = panel.get("trust", {}) %}
+    {% set rec = panel.get("recommendation", {}) %}
+    {% set overall = panel.get("overall", {}) %}
+    {% set c1 = panel.get("c1_health", {}) %}
+    {% set read_path = panel.get("read_path", {}) %}
+    {% set guardrails = panel.get("guardrails", {}) %}
+    {% set trust_state = trust.get("state", "yellow") %}
+    {% set rec_action = rec.get("action", "none") %}
+    {% set rec_message = rec.get("message", "—") %}
+    {% if rec_action == "reduce_force_live_burst" %}
+      {% set rec_message = "Chamadas demais em pouco tempo. Bloqueio temporario ativo. Aguarde alguns segundos e tente de novo." %}
+    {% endif %}
+    {% if trust_state == "red" %}
+      {% set trust_hint = "Urgente: acao necessaria agora." %}
+    {% elif trust_state == "yellow" %}
+      {% set trust_hint = "Atencao: sistema degradado, acompanhe e verifique." %}
+    {% else %}
+      {% set trust_hint = "Estavel: nenhuma acao necessaria no momento." %}
+    {% endif %}
+
+    <div class="banner {% if trust_state == 'green' %}b-green{% elif trust_state == 'red' %}b-red{% else %}b-yellow{% endif %}">
+      <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+        <div>
+          <span class="pill {% if trust_state == 'green' %}pill-green{% elif trust_state == 'red' %}pill-red{% else %}pill-yellow{% endif %}">
+            TRUST: {{ trust.get("state","?")|upper }}
+          </span>
+          <span class="pill">
+            DECISION: {{ trust.get("decision","?") }}
+          </span>
+          <div class="h1" style="margin-top:10px;">
+            {{ trust.get("message","(no message)") }}
+          </div>
+          <div class="mut" style="margin-top:4px;">
+            {{ trust_hint }}
+          </div>
+          <div class="mut">
+            derived_from: {{ (trust.get("derived_from", [])|join(", ")) if trust.get("derived_from") else "â€”" }}
+          </div>
+        </div>
+        <div class="card" style="min-width: 320px;">
+          <div class="mut">Recommendation (Proxima acao)</div>
+          <div style="margin-top:6px;">
+            <strong>{{ rec.get("action","none") }}</strong>
+            <span class="mut">({{ rec.get("priority","low") }})</span>
+          </div>
+          <div class="small" style="margin-top:8px;">
+            {{ rec_message }}
+          </div>
+          <div class="mut" style="margin-top:8px;">
+            derived_from: {{ (rec.get("derived_from", [])|join(", ")) if rec.get("derived_from") else "â€”" }}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:12px;">
+      <div class="card" style="flex: 1 1 420px;">
+        <div class="h1">System Snapshot</div>
+        <div class="kv">
+          <div>
+            <div class="mut">as_of</div>
+            <div><code>{{ panel.get("as_of","â€”") }}</code></div>
+          </div>
+          <div>
+            <div class="mut">panel_version</div>
+            <div><code>{{ panel.get("panel_version","v1") }}</code></div>
+          </div>
+          <div>
+            <div class="mut">overall.score</div>
+            <div><strong>{{ overall.get("score","?") }}</strong></div>
+          </div>
+          <div>
+            <div class="mut">overall.decision</div>
+            <div><strong>{{ overall.get("decision","?") }}</strong></div>
+          </div>
+        </div>
+        <div class="mut" style="margin-top:10px;">
+          overall.reasons: {{ (overall.get("reasons", [])|join(", ")) if overall.get("reasons") else "â€”" }}
+        </div>
+      </div>
+
+      <div class="card" style="flex: 1 1 420px;">
+        <div class="h1">Read Path</div>
+        <div class="kv">
+          <div>
+            <div class="mut">overview</div>
+            <div>
+              <strong>{{ read_path.get("overview_snapshot_status","?") }}</strong>
+              <span class="mut">({{ read_path.get("overview_freshness_seconds","â€”") }}s)</span>
+            </div>
+          </div>
+          <div>
+            <div class="mut">runs</div>
+            <div>
+              <strong>{{ read_path.get("runs_snapshot_status","?") }}</strong>
+              <span class="mut">({{ read_path.get("runs_freshness_seconds","â€”") }}s)</span>
+            </div>
+          </div>
+          <div>
+            <div class="mut">runs_key_count</div>
+            <div><strong>{{ read_path.get("runs_key_count","â€”") }}</strong></div>
+          </div>
+          <div>
+            <div class="mut">jobs_queued_count</div>
+            <div><strong>{{ read_path.get("jobs_queued_count","â€”") }}</strong></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px;">
+      <div class="h1">C1 Health</div>
+      <div class="mut">
+        score: <strong>{{ c1.get("score","?") }}</strong>
+        Â· version: <code>{{ c1.get("version","â€”") }}</code>
+        {% if c1.get("meta") %}
+          Â· cached: <code>{{ c1.get("meta",{}).get("cached","â€”") }}</code>
+          Â· age: <code>{{ c1.get("meta",{}).get("cache_age_seconds","â€”") }}s</code>
+          Â· compute: <code>{{ c1.get("meta",{}).get("compute_ms","â€”") }}ms</code>
+        {% endif %}
+      </div>
+
+      <table style="margin-top:10px;">
+        <thead>
+          <tr>
+            <th>path</th>
+            <th>endpoint</th>
+            <th>decision</th>
+            <th>p99_ms</th>
+            <th>rps</th>
+            <th>reasons</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for row in c1.get("rows", []) %}
+          <tr>
+            <td>{{ row.get("path","â€”") }}</td>
+            <td>{{ row.get("endpoint","â€”") }}</td>
+            {% set d = row.get("decision","â€”") %}
+            <td class="d-{{ d }}">{{ d }}</td>
+            <td>{{ row.get("p99_ms","â€”") }}</td>
+            <td>{{ row.get("rps","â€”") }}</td>
+            <td class="mut">{{ (row.get("reasons", [])|join(", ")) if row.get("reasons") else "â€”" }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-top:12px;">
+      <div class="h1">Guardrails (last {{ guardrails.get("window_minutes",15) }} min)</div>
+      <div class="kv">
+        <div>
+          <div class="mut">202 accepted</div>
+          <div><strong>{{ guardrails.get("events",{}).get("accepted_202",0) }}</strong></div>
+        </div>
+        <div>
+          <div class="mut">429 rate_limited</div>
+          <div><strong>{{ guardrails.get("events",{}).get("rate_limited_429",0) }}</strong></div>
+        </div>
+        <div>
+          <div class="mut">503 snapshot_missing</div>
+          <div><strong>{{ guardrails.get("events",{}).get("snapshot_missing_503",0) }}</strong></div>
+        </div>
+      </div>
+
+      <div class="mut" style="margin-top:10px;">last_events (max 5)</div>
+      <ul class="small">
+        {% for ev in guardrails.get("last_events", []) %}
+          <li>
+            <code>{{ ev.get("ts","â€”") }}</code>
+            Â· <strong>{{ ev.get("endpoint","â€”") }}</strong>
+            â†’ <strong>{{ ev.get("status_code","â€”") }}</strong>
+            {% if ev.get("scope") %} Â· scope=<code>{{ ev.get("scope") }}</code>{% endif %}
+            {% if ev.get("snapshot_status") %} Â· snapshot_status=<code>{{ ev.get("snapshot_status") }}</code>{% endif %}
+          </li>
+        {% else %}
+          <li class="mut">â€”</li>
+        {% endfor %}
+      </ul>
+    </div>
+
+    <div class="mut" style="margin-top:12px;">
+      Dica rapida: 429 = limite temporario (nao e queda). Stale = dados podem estar atrasados, com sistema ativo.
+    </div>
+    <div class="mut" style="margin-top:6px;">
+      Internal UI (MVP). Gate required. No history. No external auth.
+    </div>
+    </div>
+  </div>
+  <script>
+  ;(() => {
+    const TOGGLE_ID = "ov-auto-refresh";
+    const INDICATOR_ID = "ov-auto-refresh-indicator";
+    const PANEL_ROOT_ID = "ov-panel-root";
+    const INTERVAL_MS = 10000;
+
+    let timer = null;
+    let inFlight = false;
+
+    const toggle = document.getElementById(TOGGLE_ID);
+    const indicator = document.getElementById(INDICATOR_ID);
+    let panelRoot = document.getElementById(PANEL_ROOT_ID);
+
+    if (!toggle || !panelRoot) return;
+    const isDemo = document.body.getAttribute("data-demo-enabled") === "1";
+
+    function setIndicator(isOn) {
+      if (!indicator) return;
+      if (isOn) {
+        indicator.textContent = "Auto-refresh ON (10s)";
+        indicator.classList.remove("is-off");
+        indicator.classList.add("is-on");
+      } else {
+        indicator.textContent = "Auto-refresh OFF";
+        indicator.classList.remove("is-on");
+        indicator.classList.add("is-off");
+      }
+    }
+
+    async function refreshOnce() {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const res = await fetch(window.location.href, {
+          method: "GET",
+          cache: "no-store",
+          headers: {
+            "X-Requested-With": "ov-auto-refresh",
+            "X-Internal-Status": "1",
+          },
+        });
+        if (!res.ok) return;
+
+        const html = await res.text();
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const nextRoot = doc.getElementById(PANEL_ROOT_ID);
+        if (!nextRoot) return;
+
+        panelRoot.replaceWith(nextRoot);
+        panelRoot = document.getElementById(PANEL_ROOT_ID);
+        if (!panelRoot) return;
+      } catch (_) {
+        // Silent fallback by design for the UI-only refresh helper.
+      } finally {
+        inFlight = false;
+      }
+    }
+
+    function startTimer() {
+      if (timer) return;
+      timer = window.setInterval(refreshOnce, INTERVAL_MS);
+      refreshOnce();
+    }
+
+    function stopTimer() {
+      if (!timer) return;
+      window.clearInterval(timer);
+      timer = null;
+    }
+
+    toggle.checked = false;
+    setIndicator(false);
+    if (isDemo) {
+      toggle.disabled = true;
+      return;
+    }
+
+    toggle.addEventListener("change", () => {
+      const on = Boolean(toggle.checked);
+      setIndicator(on);
+      if (on) startTimer();
+      else stopTimer();
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (!toggle.checked) return;
+      if (document.hidden) stopTimer();
+      else startTimer();
+    });
+
+    window.addEventListener("beforeunload", stopTimer);
+  })();
+  </script>
+</body>
+</html>
+
+
+

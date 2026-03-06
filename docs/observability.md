@@ -41,6 +41,148 @@ Reasons canonicamente suportados:
 - `failed_ratio`
 - `ces_regression:CES_v1`
 
+### collector_run
+Fonte: adaptador do coletor (`CollectorAdapter`) com persistencia best-effort em `observations`.
+
+Objetivo:
+- registrar sucesso ou falha classificada do coletor sem abrir query nova no request path;
+- reduzir debug manual de problemas como URL invalida, `HTTP 4xx/5xx`, `timeout`, `DNS` e `TLS/CA`.
+
+Fatos obrigatorios:
+- `event_type` (`collector_run`)
+- `status` (`success` | `failed`)
+- `duration_ms`
+- `source_ref` (sanitizado)
+- `job_id` (quando existir)
+- `source_type` (`audio` | `video` | `null`)
+- `error_type` (`invalid_input` | `http_4xx` | `http_5xx` | `ssl_cert_verify_failed` | `dns_failed` | `timeout` | `upstream_blocked` | `unknown` | `null`)
+- `retryable`
+
+Fatos opcionais:
+- `http_status`
+- `minio_bucket`
+- `minio_key_prefix`
+
+Regras de sanitizacao:
+- remover query params sensiveis de `source_ref` (`token`, `sig`, `signature`, `key`, `auth`, `access_token`);
+- nunca persistir a chave completa do MinIO;
+- `minio_key_prefix` deve ser apenas o prefixo truncado da key (maximo 32 chars).
+
+Exemplo de sucesso:
+```json
+{
+  "event_type": "collector_run",
+  "status": "success",
+  "source_type": "audio",
+  "duration_ms": 842,
+  "error_type": null,
+  "http_status": null,
+  "retryable": false,
+  "job_id": "job-123",
+  "source_ref": "http://localhost:8001/smoke-assets/audio_1s.wav",
+  "minio_bucket": "videos-raw",
+  "minio_key_prefix": "smoke/audio_1s.wav"
+}
+```
+
+Exemplo de falha:
+```json
+{
+  "event_type": "collector_run",
+  "status": "failed",
+  "source_type": null,
+  "duration_ms": 119,
+  "error_type": "http_4xx",
+  "http_status": 404,
+  "retryable": false,
+  "job_id": "job-404",
+  "source_ref": "https://example.com/video.mp4",
+  "minio_bucket": null,
+  "minio_key_prefix": null
+}
+```
+
+## Recheck Maestro
+
+Objetivo:
+- validar o slice de orquestracao do Maestro com stop-the-line;
+- gerar evidencia auditavel em `OUT/`;
+- terminar em `GO` ou `NO-GO` com exit code coerente.
+
+Pre-requisitos:
+- Docker daemon ativo;
+- Compose com `cortai_api`, `cortai_edge`, `cortai_db` e `cortai_minio` em execucao;
+- endpoints internos expostos no `api`;
+- gate interno habilitado para o header `X-Internal-Status: 1`.
+
+Comando unico:
+```powershell
+.\scripts\recheck_maestro.ps1
+```
+
+Wrapper curto:
+```cmd
+scripts\recheck_maestro.cmd
+```
+
+Artefatos gerados:
+- `OUT/00_maestro_precheck.txt`
+- `OUT/01_maestro_gates_http.txt`
+- `OUT/02_maestro_migration.txt`
+- `OUT/03_maestro_pytest_focal.txt`
+- `OUT/04_maestro_demo_smoke.txt`
+- `OUT/05_maestro_real_failed_smoke.txt`
+- `OUT/06_maestro_contract_v03.txt`
+- `OUT/07_maestro_invariants.txt`
+- `OUT/08_maestro_no_leak.txt`
+- `OUT/09_maestro_logs.txt`
+- `OUT/RECHECK_MAESTRO_TOTAL.md`
+- `OUT/RECHECK_MAESTRO_SUMMARY.md`
+
+Interpretacao:
+- qualquer falha em uma secao stop-the-line encerra o script com `NO-GO`;
+- migration e validada dentro do container `cortai_api`, que e o ambiente correto para o runtime do Maestro;
+- `GO` exige gates, migration, testes focais, smoke demo, smoke real failed-controlado, persistencia, no-leak e logs.
+
+## CI Strategy
+
+### maestro_focal (GitHub Actions)
+
+Objetivo:
+- regressao rapida do nucleo Maestro (v0.3)
+
+Escopo:
+- `compileall` (stop-the-line)
+- pytest focal:
+  - `tests/test_maestro_orchestrator.py`
+  - `tests/test_internal_maestro_api.py`
+  - `tests/test_audio_extractor_adapter.py`
+- sem Docker
+- sem Compose
+- sem DB
+
+Tempo esperado:
+- menor que 1 minuto
+
+### recheck_maestro.ps1 (Local / Operacional)
+
+Objetivo:
+- auditoria completa do runtime Maestro
+
+Inclui:
+- gates HTTP
+- migration no container correto
+- smoke demo
+- smoke real failed-controlado
+- contrato v0.3
+- invariantes
+- no-leak
+- logs
+- evidencia em `OUT/`
+
+Critério:
+- `GO` / `NO-GO` explicito
+
 ## Saida do pipeline
 
 `write_artifact` gera um manifest deterministico em `storage/agent_output/<decision_id>.json` com:
@@ -979,56 +1121,711 @@ Para fechar PR de P2-C:
 Gate estrutural (fora do DoD do PR, obrigatorio para promover envelope):
 - Rodar P2-B1 com runner externo e atualizar decisao estrutural
 
-### P2-C.1 (execucao minima C1) - status
+### P2-C2.2 (async snapshot-first)
 
-Implementado no read-path de `/api/v1/metrics/overview`:
-- tabela `metrics_overview_read_model` para snapshot por chave de consulta (`start_date/end_date/include_*`)
-- leitura preferencial via read model (com `force_live=true` para refresh explicito)
-- persistencia do snapshot com `refreshed_at` para auditoria de freshness
-- emissao de `overview_source` em `metrics_endpoint_timing` (`live|read_model|cache`)
-- exposicao de `read_path.overview_freshness_seconds` em `/api/v1/status`
-- guardrail anti-abuso para `force_live=true` (cooldown deterministico de 10s por escopo)
+Objetivo:
+- remover agregacao live do request path de `/api/v1/metrics/overview` e `/api/v1/metrics/runs`.
 
-Contrato do guardrail (`force_live=true`):
-- quando em cooldown, retorna HTTP `429`
-- payload `detail`:
-  - `error_type="RateLimited"`
-  - `retry_after_seconds`
-  - `cooldown_seconds`
-  - `scope="overview_force_live"`
+Contrato C2.2:
+- `force_live=true` nao calcula no request.
+- `force_live=true` retorna HTTP `202 Accepted` e enfileira refresh idempotente.
+- request normal (sem `force_live`) le somente snapshot do read model.
+- sem snapshot, retorna HTTP `503` com erro deterministico `SnapshotMissing`.
 
-Exemplo de erro:
+Fila de refresh:
+- tabela `metrics_read_refresh_jobs` com `job_key` unico por (`endpoint`, `query_key`).
+- enqueue com `INSERT ... ON CONFLICT DO NOTHING` e TTL (`expires_at`).
+- `job_key = sha256(endpoint + query_key_canonica)`.
+- runner minimo: `python scripts/run_read_refresh_jobs.py --limit 100`.
+
+Payload esperado para `force_live=true`:
+```json
+{
+  "snapshot_status": "queued",
+  "correlation_id": "<job_key_hash>",
+  "scope": "overview",
+  "retry_after_seconds": 5
+}
+```
+
+Notas:
+- `correlation_id` = hash seguro do job (`job_key_hash`), sem expor `query_key`.
+- `scope` canonico: `overview` ou `runs`.
+
+Headers canonicos de envelope/degradacao:
+- `X-Envelope: C1`
+- `X-Reason: throughput_path` (quando degradado)
+- `Retry-After: <segundos>` para respostas `202 Accepted` e `503 SnapshotMissing`
+
+Cache de edge (P2-D2, SLO-aware delivery):
+- aplicado apenas em `GET /api/v1/metrics/overview` e `GET /api/v1/metrics/runs`
+- bypass canonico: `force_live=true` (`proxy_cache_bypass`/`proxy_no_cache`)
+- TTLs no edge:
+  - `200`: `10s`
+  - `503 SnapshotMissing`: `1s` (amortecer thundering herd)
+  - `202` e `429`: `0s` (nao cachear)
+- stale policy: `stale-while-revalidate` com `proxy_cache_background_update on`
+- header diagnostico no edge: `X-Edge-Cache: HIT|MISS|BYPASS|EXPIRED`
+
+Revalidacao HTTP (P2-D3):
+- backend (`overview`/`runs`) expõe `ETag` deterministico por versao de snapshot.
+- requests com `If-None-Match` retornam `304 Not Modified` quando o snapshot nao mudou.
+- edge ativa `proxy_cache_revalidate on` para aproveitar revalidacao condicional no upstream.
+- `ETag` nao e emitido em `202 Accepted` nem em `503 SnapshotMissing`.
+
+Erro deterministico sem snapshot:
 ```json
 {
   "detail": {
-    "error_type": "RateLimited",
-    "retry_after_seconds": 7,
-    "cooldown_seconds": 10,
-    "scope": "overview_force_live"
+    "snapshot_status": "missing",
+    "scope": "overview",
+    "next_action": "force_live",
+    "estimated_ready_seconds": 5
   }
 }
 ```
 
-Invariantes preservados:
-- contrato publico de `/api/v1/metrics/overview` mantido
-- sem alteracao de shape em `/health` e `/observability/report`
-- hard checks operacionais seguem validos (`timeouts=0`, `bad_duration=0`, `path_leaks_30d=0`)
+Notas:
+- `scope` canonico: `overview` ou `runs`.
+- `Retry-After` usa a mesma fonte de `estimated_ready_seconds`.
 
-### P2-C.2.1 (execucao minima) - runs read-path
+### Happy path (snapshot-first) - 503 -> 202 -> runner -> 200
 
-Implementado no read-path de `GET /api/v1/metrics/runs`:
-- tabela `metrics_runs_read_model` para snapshot por chave (`start_date/end_date/limit/offset`)
-- leitura preferencial via read model no modo default
-- `force_live=true` para refresh explicito do snapshot
-- telemetria `runs_source` em `metrics_endpoint_timing` (`live|read_model|cache`)
+```bash
+# 1) GET normal (snapshot ausente -> 503)
+curl -sS "http://localhost:8000/api/v1/metrics/overview?days=7"
+curl -sS "http://localhost:8000/api/v1/metrics/runs?start_date=2026-02-13&end_date=2026-02-20&limit=50&offset=0"
+
+# 2) Enfileira refresh (202 queued + correlation_id)
+curl -sS "http://localhost:8000/api/v1/metrics/overview?days=7&force_live=true"
+curl -sS "http://localhost:8000/api/v1/metrics/runs?start_date=2026-02-13&end_date=2026-02-20&limit=50&offset=0&force_live=true"
+
+# 3) Processa fila de refresh (runner)
+python scripts/run_read_refresh_jobs.py --limit 100
+
+# 4) GET normal (200 com snapshot)
+curl -sS "http://localhost:8000/api/v1/metrics/overview?days=7"
+curl -sS "http://localhost:8000/api/v1/metrics/runs?start_date=2026-02-13&end_date=2026-02-20&limit=50&offset=0"
+```
+
+Exemplo `503 SnapshotMissing` (overview/runs):
+```json
+{"detail":{"snapshot_status":"missing","scope":"overview","next_action":"force_live","estimated_ready_seconds":5}}
+```
+
+Exemplo `202 Accepted` (overview/runs):
+```json
+{"snapshot_status":"queued","correlation_id":"a1b2c3d4","scope":"overview","retry_after_seconds":5}
+```
+
+Exemplo `429 RateLimited` (cooldown anti-abuso de `force_live`):
+```json
+{"error_type":"RateLimited","scope":"overview_force_live","retry_after_seconds":5,"cooldown_seconds":10}
+```
+
+Headers:
+- `X-Envelope: C1`
+- `Retry-After: <mesmo valor de retry_after_seconds>`
+
+Nota operacional:
+- repita o `GET` (ou consulte `/api/v1/status`) ate `freshness_seconds ~ 0` ou ate a resposta virar `200`.
+
+### Warm-up opcional no deploy (read-path)
+
+Quando usar:
+- apos deploy/restart para reduzir `503 SnapshotMissing` nas primeiras chamadas.
+
+Host (usa edge + runner no container `cortai_api`):
+```bash
+bash scripts/warmup_read_path.sh
+```
+
+Dentro do container da API (sem depender de `curl`):
+```bash
+docker exec -i cortai_api sh -lc "cd /app && bash scripts/warmup_read_path.sh"
+```
+
+Saida esperada (resumo):
+- `overview_get_http=200`
+- `runs_get_http=200`
+- `overview_snapshot_status` / `runs_snapshot_status`
+- `*_freshness_seconds`
+- `jobs_queued_count=0`
+
+Status/read-path:
 - `GET /api/v1/status` expoe:
+  - `read_path.overview_snapshot_status`
+  - `read_path.overview_last_refreshed_at`
+  - `read_path.overview_freshness_seconds`
+  - `read_path.runs_snapshot_status`
+  - `read_path.runs_last_refreshed_at`
   - `read_path.runs_freshness_seconds`
   - `read_path.runs_key_count`
+  - `read_path.jobs_queued_count`
 
-Guardrail de `force_live=true` em runs:
-- cooldown deterministico com HTTP `429`
-- payload `detail`:
-  - `error_type="RateLimited"`
-  - `retry_after_seconds`
-  - `cooldown_seconds`
-  - `scope="runs_force_live"`
+Telemetria:
+- `metrics_endpoint_timing` mantem `db_us`, `db_queries`, `db_pool_wait_us`, `queue_us`, `server_total_us`.
+- adiciona `snapshot_status`.
+- para `202`, adiciona `job_enqueued` e `job_key_hash`.
+- `overview_source` e `runs_source` continuam para auditoria do read-path.
+
+Invariantes preservados:
+- `bad_duration=0`
+- `path_leaks_30d=0`
+- `db_pool_wait_us=0` no steady-state observado
+
+### Refresh jobs hardening (1 job/key + atomic claim)
+
+Garantias operacionais:
+- no maximo `1` job ativo por `job_key` (`queued` ou `running`);
+- burst de `force_live` para a mesma key nao duplica job ativo (dedupe por `job_key`);
+- runner faz claim atomico (`queued -> running`) antes de processar, evitando processamento duplicado quando dois runners executam em paralelo.
+
+Escopo:
+- hardening de confiabilidade do pipeline `metrics_read_refresh_jobs`;
+- sem mudanca de contrato publico dos endpoints.
+
+Evidencia:
+- testes de concorrencia cobrem dedupe de enqueue e claim atomico entre dois runners.
+
+### P2-C2.3 (split leve do read-path)
+
+Objetivo:
+- isolar throughput de leitura em processo dedicado (`read_api`) sem alterar logica de endpoint.
+
+Wiring:
+- novo app: `app.read_main:app` com routers read-only:
+  - `/api/v1/metrics/*`
+  - `/api/v1/observability/report`
+  - `/api/v1/status`
+  - `/health`
+- novo servico compose: `read_api` (porta host `8002`).
+- edge roteia:
+  - `/api/v1/metrics/*` -> `cortai_read_api`
+  - `/api/v1/observability/report` -> `cortai_read_api`
+  - `/api/v1/status` e `/health` -> `cortai_read_api`
+  - restante -> `cortai_api`
+
+Status operacional:
+- `/api/v1/status` inclui bloco `read_api`:
+  - `enabled`
+  - `up`
+  - `base_url`
+
+### Nota de anomalia (db_us)
+
+Em janelas longas, pode aparecer `db_us` alto em `metrics_endpoint_timing` sem reproduzir em SQL:
+- amostras pontuais mostraram `db_us` alto em `/metrics/runs` e `/observability/report`;
+- `EXPLAIN (ANALYZE, BUFFERS)` das queries equivalentes permaneceu sub-ms;
+- pivots curtos voltaram para `p95_db_us` em poucos ms, com `db_pool_wait_us=0`.
+
+Regra operacional:
+- nao tratar `db_us` alto isolado como `SQL slow` sem repetibilidade em rodada curta + `EXPLAIN`.
+- priorizar correlacao com `rt/uct/uht` no edge para diagnostico de TTFB/infra-path.
+
+### P2-D Branch B (fail-fast/backpressure)
+
+Objetivo:
+- eliminar request pendurado ate timeout de cliente sob saturacao de fila/worker.
+
+Flags de controle:
+- `METRICS_READ_REFRESH_MAX_QUEUE_DEPTH` (default `20`)
+- `METRICS_READ_REFRESH_MAX_RUNNING_JOBS` (default `4`)
+- `METRICS_READ_REFRESH_MAX_QUEUE_WAIT_MS` (default `1500`)
+- `METRICS_READ_REFRESH_MAX_EXEC_MS` (default `5000`)
+
+Comportamento:
+- `force_live=true` em `overview/runs`:
+  - `429 Backpressure` quando fila/worker passam do limite.
+  - `503 QueueTimeout` quando enfileiramento excede `max_queue_wait_ms`.
+- worker de refresh:
+  - marca `failed` com `queue_wait_timeout` quando job envelhece na fila.
+  - marca `failed` com `exec_timeout` quando execucao excede `max_exec_ms`.
+
+Telemetria:
+- `metrics_endpoint_timing` inclui `queue_wait_ms` e `exec_ms` no caminho de `force_live`.
+
+Seguranca:
+- resposta de erro continua minima/deterministica.
+- sem vazamento de paths internos.
+
+### Envelope v2.0 (declaracao estrutural final)
+
+Fonte de verdade:
+- `P2-B1` com runner externo (GitHub Actions), fora do host do SUT.
+
+Decisao:
+- `safe_envelope_v2.0` (estrutural) = `C1`.
+- `C2` falha no SLO atual e fica classificado como `infra-bound` no ambiente atual.
+
+Leitura consolidada:
+- nao ha evidencia de gargalo dominante em `DB`, `pool`, `SQL` ou `handler`;
+- o limitante observado esta no infra-path/latencia externa (runner/rede/tunel/camada de entrega).
+
+### Regra de validade de benchmark (stop-the-line)
+
+Uma rodada externa nao pode ser usada para promover envelope quando qualquer endpoint apresentar:
+- `timeouts > 0`; ou
+- `req/s < 1`.
+
+Nesses casos:
+- tratar a rodada como invalida para promocao;
+- nao continuar tuning de app/edge com base nela;
+- corrigir primeiro o ambiente de execucao (runner/rede/tunel/infra-path).
+
+### SLO C1 (operacional)
+
+Escopo:
+- usado para classificacao operacional de rodadas validas em `C1` (runner externo/workflow).
+
+Nivel A (confiabilidade / stop-the-line):
+- `timeouts == 0`
+- `req/s >= 1`
+- `pct_5xx < 1%`
+
+Nivel B (latencia operacional C1):
+- `p99_overview <= 1500ms`
+- `p99_runs <= 1500ms`
+- `p99_report <= 1500ms`
+
+Aplicacao no workflow:
+- `p2_b1_runner_external.yml` avalia `C1` por endpoint (direct e edge, quando habilitado);
+- escreve tabela `endpoint | p99 | rps | timeouts | pct_5xx | PASS/FAIL` no Step Summary;
+- falha o job (`exit != 0`) quando qualquer limite de Nivel A ou Nivel B e violado.
+
+### C1 Health Score (PASS/WARN/FAIL)
+
+Objetivo:
+- transformar a leitura de `C1` em classificacao automatica, sem interpretacao manual de CSV.
+
+Fonte de verdade:
+- `scripts/evaluate_c1_health.sh` (engine) + `p2_b1_runner_external.yml` (orquestracao).
+
+Entradas:
+- CSV(s) do `run_p2_matrix.sh` (`direct` e opcionalmente `edge`);
+- apenas linhas `C=1` sao consideradas para o score.
+
+Regras por endpoint:
+- `FAIL` se qualquer condicao ocorrer:
+  - `timeouts > 0`
+  - `req/s < 1`
+  - `pct_5xx >= 1%`
+  - `p99 > fail_limit` do endpoint
+- `WARN` (se nao houver `FAIL`) quando:
+  - `p99 > warn_limit` do endpoint
+  - `pct_429 > 0`
+  - `pct_503 > 0`
+- `PASS` caso contrario.
+
+Thresholds atuais (`WARN` / `FAIL`):
+- `overview`: `1500ms / 2500ms`
+- `runs`: `1500ms / 2500ms`
+- `report`: `1500ms / 2500ms`
+
+Score final:
+- se qualquer endpoint = `FAIL` -> `C1_HEALTH=FAIL`
+- senao, se qualquer endpoint = `WARN` -> `C1_HEALTH=WARN`
+- senao -> `C1_HEALTH=PASS`
+
+Comportamento no workflow:
+- o Step Summary mostra `C1_HEALTH` + tabela por endpoint (`p99`, `rps`, `timeouts`, `%429/%503/%5xx`, `decision`, `reason`);
+- o job falha apenas quando `C1_HEALTH=FAIL`;
+- `c1_health.json` e preservado como artefato para auditoria.
+
+Exemplo (trecho de `c1_health.json`):
+```json
+{
+  "c1_health": "WARN",
+  "rows": [
+    {
+      "path": "direct",
+      "endpoint": "overview",
+      "decision": "WARN",
+      "reason": "pct_503>0"
+    }
+  ]
+}
+```
+
+Runbook curto:
+- `FAIL`: parar benchmark formal / promocao e corrigir ambiente (`rede`, `runner`, `tunel`, `infra-path`).
+- `WARN`: pode seguir, mas registrar `reason` no resultado e tratar como degradacao controlada.
+- `PASS`: rodada valida para leitura operacional de `C1`.
+
+### Runtime C1 Health Score (restricted)
+
+Objetivo:
+- expor uma leitura operacional de `C1` em `/api/v1/status` sem depender do workflow, com gate restrito.
+
+Gate de exposicao (MVP):
+- `EXPOSE_C1_HEALTH_STATUS=1` (env; default `0`)
+- header `X-Internal-Status: 1`
+- sem gate autorizado, `/status` continua igual (sem campo `c1_health`).
+
+Cache (v1.1):
+- cache em memoria por processo com TTL curto (`C1_HEALTH_CACHE_TTL_SECONDS`, default `10s`);
+- chave fixa (janela fixa de `15m`);
+- best effort (nao compartilha estado entre workers/processos).
+
+Fonte / janela:
+- `metrics_endpoint_timing` (runtime local)
+- janela fixa de `15` minutos (`inputs.window_minutes=15`)
+- `path` reportado como `direct` no MVP (sem inferencia de edge no request path)
+
+Regras:
+- mesmas regras/thresholds do `C1 Health Score` (workflow), com `timeouts=0` no runtime por limitacao da fonte (`metrics_endpoint_timing` nao observa timeout do cliente).
+- `reasons` consolidados no topo (`endpoint:reason`) para leitura rapida de operador.
+- `meta` informa se a resposta veio de cache e o custo do ultimo calculo (`compute_ms`).
+
+Exemplo (trecho):
+```json
+{
+  "c1_health": {
+    "enabled": true,
+    "score": "WARN",
+    "inputs": {
+      "window_minutes": 15,
+      "source": "metrics_endpoint_timing"
+    },
+    "rows": [
+      {
+        "endpoint": "overview",
+        "path": "direct",
+        "decision": "WARN",
+        "reasons": ["pct_503>0"]
+      }
+    ],
+    "reasons": ["overview:pct_503>0"],
+    "meta": {
+      "cached": true,
+      "cache_age_seconds": 3,
+      "compute_ms": 8,
+      "stale": false
+    }
+  }
+}
+```
+
+### Operational Insights Panel (MVP)
+
+Endpoint:
+- `GET /api/v1/observability/overview`
+
+Gate (restrito):
+- requer `EXPOSE_C1_HEALTH_STATUS=1` no processo;
+- requer header `X-Internal-Status: 1`;
+- sem gate autorizado: `404`.
+
+Entrega (MVP):
+- `overall` (`score`, `decision`, `reasons`);
+- `c1_health` (mesma logica do runtime C1 Health Score);
+- `read_path` (freshness/status + `jobs_queued_count`);
+- `guardrails` (counts `202/429/503` + ultimos `5` eventos).
+
+Nao e:
+- historico de health;
+- exporter/Prometheus;
+- substituto do `/api/v1/observability/report`;
+- UI.
+
+Exemplos:
+```bash
+# Sem gate (esperado: 404)
+curl -i http://localhost:8000/api/v1/observability/overview
+
+# Com gate (esperado: 200)
+curl -sS -H "X-Internal-Status: 1" http://localhost:8000/api/v1/observability/overview
+```
+
+Exemplo (trecho):
+```json
+{
+  "panel_version": "v1",
+  "overall": { "score": "WARN", "decision": "degraded", "reasons": ["overview:pct_503>0"] },
+  "guardrails": {
+    "window_minutes": 15,
+    "events": { "accepted_202": 1, "rate_limited_429": 1, "snapshot_missing_503": 0 },
+    "last_events": [{ "endpoint": "/api/v1/metrics/overview", "status_code": 429 }]
+  }
+}
+```
+
+### Collector no Operational Insights (v0.1)
+
+Objetivo:
+- expor um resumo operacional do coletor na mesma janela curta do painel (`15m`);
+- facilitar leitura rapida de sucesso/falha do coletor sem abrir dashboard novo;
+- nao altera `trust` nem `recommendation` nesta versao.
+
+Fonte:
+- `observations`
+- filtro: `facts.event_type = "collector_run"`
+
+Shape:
+```json
+{
+  "collector": {
+    "window_minutes": 15,
+    "events": {
+      "success": 3,
+      "failed": 1
+    },
+    "by_error_type": {
+      "http_4xx": 1
+    },
+    "last_events": [
+      {
+        "ts": "2026-02-28T18:00:00Z",
+        "status": "failed",
+        "error_type": "http_4xx",
+        "http_status": 404,
+        "retryable": false,
+        "job_id": "job-404"
+      }
+    ]
+  }
+}
+```
+
+Regras:
+- `events` agrega apenas `success` e `failed`;
+- `by_error_type` agrupa falhas por `error_type`;
+- `last_events` e limitado aos `5` eventos mais recentes;
+- `source_ref`, `minio_path` e qualquer campo sensivel nao entram no payload do overview;
+- em caso de falha na agregacao, o painel retorna `"collector": null` (best-effort).
+
+Notas de performance:
+- janela fixa de `15m`;
+- `last_events` limitado a `5`;
+- objetivo: endpoint leve e previsivel (nao virar mini-report).
+
+### Trust Banner (Product Signal)
+
+Objetivo:
+- expor um sinal de primeira linha ("posso confiar agora?") para UI/automacao, derivado do payload ja calculado do Insights Panel.
+
+Regras (MVP):
+- `red` / `action_required`: `c1_health=FAIL` ou `read_path.overview_snapshot_status=missing` ou `guardrails.snapshot_missing_503>0`;
+- `yellow` / `degraded`: `c1_health=WARN` ou `read_path.overview_snapshot_status=stale` ou `guardrails.rate_limited_429>=3`;
+- `green` / `healthy`: demais casos.
+
+Precedencia:
+- `red > yellow > green` (ex.: `WARN` + `snapshot missing` => `red`).
+
+Exemplo (trecho):
+```json
+{
+  "trust": {
+    "state": "yellow",
+    "decision": "degraded",
+    "message": "Read-path stale but system responsive",
+    "derived_from": ["read_path"]
+  }
+}
+```
+
+Notas:
+- nao substitui monitoramento / historico;
+- derivado de `c1_health` + `read_path` + `guardrails`;
+- custo `O(1)` no request path (sem queries adicionais).
+
+### Action Recommendation (MVP)
+
+Objetivo:
+- transformar sinal operacional (`trust`) em acao recomendada, de forma deterministica e sem query adicional.
+
+Contrato (campo `recommendation` no painel):
+```json
+{
+  "recommendation": {
+    "action": "run_warmup | monitor | investigate_read_path | reduce_force_live_burst | inspect_upstream_path | open_report | none",
+    "priority": "low | medium | high",
+    "message": "string curta e deterministica",
+    "derived_from": ["trust" | "read_path" | "guardrails" | "c1_health"]
+  }
+}
+```
+
+Regras + precedencia (MVP):
+1. `overview_snapshot_status=missing` -> `run_warmup` (`high`)
+2. `jobs_queued_count>0` -> `monitor` (`medium`)
+3. `guardrails.snapshot_missing_503>0` -> `run_warmup` (`high`)
+4. `guardrails.rate_limited_429>0` -> `reduce_force_live_burst` (`medium`)
+5. `trust=red` -> `inspect_upstream_path` (`high`)
+6. `trust=yellow` -> `open_report` (`medium`)
+7. caso saudavel -> `none` (`low`)
+
+Exemplo (snapshot missing -> warm-up):
+```json
+{
+  "recommendation": {
+    "action": "run_warmup",
+    "priority": "high",
+    "message": "Snapshots ausentes - execute warm-up do read-path.",
+    "derived_from": ["read_path"]
+  }
+}
+```
+
+Exemplo (healthy -> none):
+```json
+{
+  "recommendation": {
+    "action": "none",
+    "priority": "low",
+    "message": "Nenhuma acao necessaria.",
+    "derived_from": ["trust"]
+  }
+}
+```
+
+Notas:
+- derivado de `trust` + `read_path` + `guardrails` + `c1_health`;
+- precedencia e deterministica (early-return) e coberta por testes;
+- custo `O(1)` no request path (sem queries adicionais).
+
+### Internal Observability UI (MVP)
+
+Objetivo:
+- visualizar o `Operational Insights Panel` em `3-5s` para uso interno (operador/founder/dev), sem adicionar logica nova no backend.
+
+Acesso:
+- rota: `GET /internal/observability`
+- gate: `EXPOSE_C1_HEALTH_STATUS=1`
+- header obrigatorio: `X-Internal-Status: 1`
+- sem gate autorizado: `404` (reduz descoberta)
+
+O que a pagina mostra:
+- `TRUST` (banner grande com `trust.message`)
+- `Recommendation` (`action`, `priority`, `message`)
+- `C1 Health` (linhas por endpoint com `decision`, `p99`, `rps`)
+- `Read Path` (`overview/runs snapshot_status`, `freshness`, `jobs_queued_count`)
+- `Guardrails` (counts `202/429/503` + `last_events`)
+
+Notas de seguranca:
+- `Cache-Control: no-store`
+- endpoint interno; nao substitui monitoramento externo
+- usa o mesmo gate restrito do painel JSON (sem auth publica adicional no MVP)
+
+Notas tecnicas:
+- render server-side (template HTML simples)
+- reusa o mesmo builder do painel JSON (`/api/v1/observability/overview`)
+- sem query nova e sem fetch HTTP interno
+
+Teste rapido:
+```bash
+# sem header -> 404
+curl -i http://localhost:8000/internal/observability
+
+# com gate+header -> 200 HTML
+curl -i -H "X-Internal-Status: 1" http://localhost:8000/internal/observability
+
+# suite focada
+pytest -q tests/test_internal_observability_ui.py
+```
+
+### Webhook action_required (v1)
+
+Objetivo:
+- permitir integracao externa reativa quando o estado publico transiciona para:
+  - `state == "action_required"`
+- sem alterar o contrato publico de `GET /api/v1/status/public`.
+
+Escopo (v1):
+- disparo apenas em transicao para `action_required`;
+- fire-and-forget (nao bloqueia request publico);
+- timeout fixo de `2s`;
+- sem retry automatico;
+- sem fila ou worker dedicado;
+- ativacao opcional por ENV.
+
+Ativacao (ENV):
+- `STATUS_WEBHOOK_URL=<https://seu-endpoint>`
+- `STATUS_WEBHOOK_SECRET=<opcional>`
+
+Regras:
+- sem `STATUS_WEBHOOK_URL`: webhook desativado (no-op);
+- com `STATUS_WEBHOOK_SECRET`: envia assinatura HMAC SHA256 no header.
+
+Payload enviado (POST JSON):
+```json
+{
+  "state": "action_required",
+  "action": "inspect",
+  "as_of": "2025-01-01T12:00:00Z",
+  "version": "v1"
+}
+```
+
+Assinatura opcional:
+- header: `X-Status-Signature: sha256=<hex_digest>`
+- calculo: `HMAC_SHA256(secret, raw_body)`
+
+Responsabilidades do consumidor:
+- validar assinatura;
+- validar idempotencia;
+- aplicar rate limiting proprio.
+
+Regra de disparo (anti-spam):
+- somente em transicao real:
+  - `previous_state != "action_required"`
+  - `current_state == "action_required"`
+
+Nao-objetivos (v1):
+- retry automatico;
+- backoff exponencial;
+- persistencia de eventos;
+- garantia de entrega;
+- multi-webhook;
+- webhook para outros estados.
+
+Garantias:
+- nao altera latencia de `/api/v1/status/public`;
+- nao altera contrato publico;
+- nao introduz query nova;
+- nao introduz infra nova.
+
+Observabilidade:
+- falhas de envio nao impactam o endpoint publico;
+- envio registra sucesso/falha e latencia no log da aplicacao.
+
+### D+3 Webhook GO/NO-GO
+
+Objetivo:
+- rodar um freeze operacional de 72h com 1 consumidor e medir estabilidade real do webhook;
+- produzir evidencia auditavel sem depender de coleta manual em logs.
+
+Script:
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/d3_webhook_run.ps1 -DayLabel D0
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/d3_webhook_run.ps1 -DayLabel D1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/d3_webhook_run.ps1 -DayLabel D2
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/d3_webhook_run.ps1 -DayLabel D3
+```
+
+Artefatos:
+- `OUT/D3/00_env_presence.txt` (somente no `D0`)
+- `OUT/D3/01_status_public_100.csv` e `OUT/D3/02_overview.json` no baseline
+- `OUT/D3/D1_status_public_100.csv`, `OUT/D3/D2_status_public_100.csv`, `OUT/D3/D3_status_public_100.csv`
+- `OUT/D3/D1_overview.json`, `OUT/D3/D2_overview.json`, `OUT/D3/D3_overview.json`
+- `OUT/D3/D0_summary.txt`, `OUT/D3/D1_summary.txt`, `OUT/D3/D2_summary.txt`, `OUT/D3/D3_summary.txt`
+
+O que o summary consolida:
+- `status_public_5xx_count`
+- `status_public_5xx_rate`
+- `status_public_p95_ms`
+- `webhook_sent`
+- `webhook_success`
+- `webhook_error`
+- `webhook_error_rate`
+- `webhook_p95_latency_ms`
+- `webhook_last_error_status`
+- `webhook_last_error_ts`
+
+Criterio binario:
+- `GO` quando:
+  - `status_public_5xx_rate <= 0.001`
+  - `status_public_p95_ms <= 300`
+  - `webhook_error_rate < 0.01`
+  - nao houver indicio de loop (envios sem transicao real) ou falso positivo recorrente
+- `NO-GO` quando qualquer um desses limites falhar em janela recorrente de D+3.

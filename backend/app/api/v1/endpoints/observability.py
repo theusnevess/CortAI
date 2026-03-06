@@ -1,13 +1,19 @@
 import os
 from datetime import datetime
 from time import monotonic, perf_counter_ns
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.metrics import CES_DEFAULT_VERSION, _emit_metrics_endpoint_timing
 from app.db.session import get_db
+from app.observability.collector_summary import get_collector_summary
+from app.observability.policy_engine import derive_operational_policy, derive_policy_bridge
+from app.observability.runtime_health import get_runtime_c1_health_cached, should_include_internal_status
+from app.observability.webhook_metrics import WebhookMetrics
 from app.version import get_app_version
 
 router = APIRouter()
@@ -27,6 +33,25 @@ REPORT_WORST_RUNS_LIMIT_MAX = 200
 REPORT_WORST_RUNS_WINDOW_DAYS_MAX = 7
 REPORT_ALEMBIC_CACHE_TTL_SECONDS = 60
 REPORT_PATH_LEAKS_CACHE_TTL_SECONDS = 30
+
+_TRUST_DECISION_RANK: dict[str, int] = {"healthy": 0, "degraded": 1, "action_required": 2}
+_TRUST_STATE_RANK: dict[str, int] = {"green": 0, "yellow": 1, "red": 2}
+_POLICY_STATE_RANK: dict[str, int] = {"stable": 0, "degraded": 1, "action_required": 2}
+_POLICY_STATE_TO_TRUST_DECISION: dict[str, str] = {
+    "stable": "healthy",
+    "degraded": "degraded",
+    "action_required": "action_required",
+}
+_POLICY_STATE_TO_TRUST_STATE: dict[str, str] = {
+    "stable": "green",
+    "degraded": "yellow",
+    "action_required": "red",
+}
+_POLICY_DECISION_TO_RECO_ACTION: dict[str, str] = {
+    "monitor": "monitor",
+    "inspect": "open_report",
+    "investigate_now": "inspect_upstream_path",
+}
 
 
 _alembic_head_cache: dict[str, object] = {"value": None, "expires_at": 0.0}
@@ -48,6 +73,56 @@ def _is_cache_valid(cache: dict[str, object]) -> bool:
     if os.getenv("PYTEST_CURRENT_TEST"):
         return False
     return monotonic() < float(cache.get("expires_at", 0.0))
+
+
+def _rank(mapping: dict[str, int], value: str | None) -> int:
+    if not value:
+        return -1
+    return mapping.get(str(value), -1)
+
+
+def _harmonize_policy_trust_recommendation(response: dict[str, Any]) -> None:
+    """
+    Harmonizacao conservadora do overview.
+
+    Regras:
+    - `policy.state` pode piorar `trust.state`/`trust.decision`, nunca melhorar.
+    - `policy.decision` so preenche `recommendation.action` quando ela estiver
+      ausente ou for `none`.
+    """
+    policy = response.get("policy") or {}
+    trust = response.get("trust") or {}
+    recommendation = response.get("recommendation") or {}
+
+    policy_state = policy.get("state")
+    policy_decision = policy.get("decision")
+
+    desired_trust_decision = _POLICY_STATE_TO_TRUST_DECISION.get(str(policy_state), None)
+    desired_trust_state = _POLICY_STATE_TO_TRUST_STATE.get(str(policy_state), None)
+
+    if desired_trust_decision:
+        current = trust.get("decision")
+        if _rank(_TRUST_DECISION_RANK, desired_trust_decision) > _rank(_TRUST_DECISION_RANK, current):
+            trust["decision"] = desired_trust_decision
+            trust["derived_from"] = ["policy_harmonized"]
+
+    if desired_trust_state:
+        current = trust.get("state")
+        if _rank(_TRUST_STATE_RANK, desired_trust_state) > _rank(_TRUST_STATE_RANK, current):
+            trust["state"] = desired_trust_state
+            trust["derived_from"] = ["policy_harmonized"]
+
+    desired_action = _POLICY_DECISION_TO_RECO_ACTION.get(str(policy_decision), None)
+    # Em estado estavel, recommendation "none" nao deve ser piorada por policy.decision.
+    should_apply_policy_action = str(policy_state) in {"degraded", "action_required"}
+    if desired_action and should_apply_policy_action:
+        current_action = recommendation.get("action")
+        if (not current_action) or (str(current_action) == "none"):
+            recommendation["action"] = desired_action
+            recommendation["derived_from"] = ["policy_harmonized"]
+
+    response["trust"] = trust
+    response["recommendation"] = recommendation
 
 
 def _set_cache(cache: dict[str, object], value: object, ttl_seconds: int) -> None:
@@ -170,6 +245,397 @@ def _build_slo_daily_summary(items: list[dict]) -> list[dict]:
     return summary
 
 
+def _map_panel_decision_from_score(score: str) -> str:
+    normalized = str(score or "").upper()
+    if normalized == "FAIL":
+        return "action_required"
+    if normalized == "WARN":
+        return "degraded"
+    return "healthy"
+
+
+def _derive_trust_banner(
+    *,
+    overall: dict,
+    read_path: dict,
+    guardrails: dict,
+) -> dict:
+    """
+    Deriva um sinal de confianca de produto (MVP) sem consultas extras.
+
+    Regras:
+    - RED se houver falha operacional clara (health FAIL, snapshot missing, 503 recente).
+    - YELLOW se houver degradacao controlada (health WARN, snapshot stale, excesso de 429).
+    - GREEN quando health PASS + read-path fresh + guardrails criticos zerados.
+    """
+    overall_score = str(overall.get("score", "FAIL")).upper()
+    overview_snapshot_status = str(read_path.get("overview_snapshot_status") or "missing").lower()
+    guardrail_events = dict(guardrails.get("events") or {})
+    snapshot_missing_503 = int(guardrail_events.get("snapshot_missing_503") or 0)
+    rate_limited_429 = int(guardrail_events.get("rate_limited_429") or 0)
+
+    derived_from: list[str] = []
+
+    # RED: operador deve agir; prioriza sinais de indisponibilidade/erro de snapshot.
+    if overall_score == "FAIL":
+        return {
+            "state": "red",
+            "decision": "action_required",
+            "message": "Saude operacional falhou. Acao necessaria.",
+            "derived_from": ["c1_health"],
+        }
+    if overview_snapshot_status == "missing":
+        return {
+            "state": "red",
+            "decision": "action_required",
+            "message": "Snapshot ausente. Execute warm-up para restaurar dados.",
+            "derived_from": ["read_path"],
+        }
+    if snapshot_missing_503 > 0:
+        return {
+            "state": "red",
+            "decision": "action_required",
+            "message": "Eventos de snapshot missing observados. Execute warm-up.",
+            "derived_from": ["guardrails"],
+        }
+
+    # YELLOW: sistema responde, mas ha sinal de degradacao que merece atencao.
+    if overall_score == "WARN":
+        derived_from.append("c1_health")
+    if overview_snapshot_status == "stale":
+        derived_from.append("read_path")
+    if rate_limited_429 >= 3:
+        derived_from.append("guardrails")
+    if derived_from:
+        message = "Sinais de degradacao observados."
+        if "read_path" in derived_from and overall_score == "PASS":
+            message = "Dados possivelmente desatualizados. Verifique atualizacao recente."
+        elif "guardrails" in derived_from and overall_score == "PASS":
+            message = "Muitas solicitacoes recentes. Reduza chamadas force_live."
+        return {
+            "state": "yellow",
+            "decision": "degraded",
+            "message": message,
+            "derived_from": derived_from,
+        }
+
+    # GREEN: health PASS, overview fresh e sem guardrails criticos recentes.
+    return {
+        "state": "green",
+        "decision": "healthy",
+        "message": "Sistema saudavel e responsivo.",
+        "derived_from": ["c1_health", "read_path", "guardrails"],
+    }
+
+
+_ALLOWED_RECOMMENDATION_ACTIONS = {
+    "run_warmup",
+    "monitor",
+    "investigate_read_path",
+    "reduce_force_live_burst",
+    "inspect_upstream_path",
+    "open_report",
+    "none",
+}
+
+
+def _derive_action_recommendation(
+    *,
+    trust: dict,
+    read_path: dict,
+    guardrails: dict,
+    c1_health: dict,
+) -> dict:
+    """
+    Deriva recomendacao de acao (MVP) a partir do payload do painel, sem queries extras.
+
+    Precedencia (early-return, auditavel):
+    1. snapshot missing (read_path)
+    2. jobs queued (read_path)
+    3. snapshot_missing_503 recente (guardrails)
+    4. rate_limited_429 recente (guardrails)
+    5. trust red por health FAIL/rps<1 (c1_health/trust)
+    6. fallback de diagnostico (open_report)
+    7. none (green)
+    """
+    trust_state = str(trust.get("state") or "red").lower()
+    trust_decision = str(trust.get("decision") or "action_required").lower()
+    trust_reasons = [str(r) for r in (trust.get("derived_from") or [])]
+    overall_reasons = [str(r) for r in (c1_health.get("reasons") or [])]
+
+    overview_snapshot_status = str(read_path.get("overview_snapshot_status") or "missing").lower()
+    jobs_queued_count = int(read_path.get("jobs_queued_count") or 0)
+
+    guardrail_events = dict(guardrails.get("events") or {})
+    snapshot_missing_503 = int(guardrail_events.get("snapshot_missing_503") or 0)
+    rate_limited_429 = int(guardrail_events.get("rate_limited_429") or 0)
+
+    # 1) Snapshot ausente: acao imediata e deterministica de recuperacao.
+    if overview_snapshot_status == "missing":
+        recommendation = {
+            "action": "run_warmup",
+            "priority": "high",
+            "message": "Snapshot ausente. Execute warm-up do read-path agora.",
+            "derived_from": ["read_path"],
+        }
+    # 2) Jobs em fila: sistema ja reagiu; operador deve monitorar conclusao.
+    elif jobs_queued_count > 0:
+        recommendation = {
+            "action": "monitor",
+            "priority": "medium",
+            "message": "Atualizacao em andamento. Monitore a fila e aguarde concluir.",
+            "derived_from": ["read_path"],
+        }
+    # 3) Eventos 503 recentes: indica churn de snapshot e exige acao no read-path.
+    elif snapshot_missing_503 > 0:
+        recommendation = {
+            "action": "run_warmup",
+            "priority": "high",
+            "message": "Snapshot missing recente. Execute warm-up do read-path.",
+            "derived_from": ["guardrails"],
+        }
+    # 4) Eventos 429 recentes: reduzir burst de force_live e manter degradacao controlada.
+    elif rate_limited_429 > 0:
+        recommendation = {
+            "action": "reduce_force_live_burst",
+            "priority": "medium",
+            "message": "Muitas solicitacoes recentes. Aguarde ou reduza chamadas force_live.",
+            "derived_from": ["guardrails"],
+        }
+    # 5) Trust red por falha operacional (tipicamente rps<1) sem sinais de snapshot/fila.
+    elif trust_state == "red" and trust_decision == "action_required":
+        recommendation = {
+            "action": "inspect_upstream_path",
+            "priority": "high",
+            "message": "Saude operacional falhou. Verifique upstream e caminho de infra.",
+            "derived_from": ["trust", "c1_health"],
+        }
+    # 6) Fallback para casos degradados nao classificados (ex.: WARN por p99).
+    elif trust_state == "yellow":
+        recommendation = {
+            "action": "open_report",
+            "priority": "medium",
+            "message": "Degradacao detectada. Abra o report para diagnostico.",
+            "derived_from": ["trust", "c1_health"],
+        }
+    # 7) Estado saudavel: sem acao necessaria.
+    else:
+        recommendation = {
+            "action": "none",
+            "priority": "low",
+            "message": "Sistema saudavel. Nenhuma acao necessaria.",
+            "derived_from": ["trust"],
+        }
+
+    # Normaliza derived_from e valida enum para evitar drift silencioso.
+    recommendation["derived_from"] = [str(x) for x in recommendation.get("derived_from", []) if str(x)]
+    if not recommendation["derived_from"]:
+        recommendation["derived_from"] = ["trust"]
+    if str(recommendation.get("action")) not in _ALLOWED_RECOMMENDATION_ACTIONS:
+        recommendation["action"] = "open_report"
+        recommendation["priority"] = "medium"
+        recommendation["message"] = "Recomendacao invalida. Abra o report para diagnostico."
+        recommendation["derived_from"] = ["trust"]
+    # Mantem hook para futuras regras sem mudar o contrato atual.
+    if overall_reasons and recommendation["action"] == "none":
+        recommendation["derived_from"] = ["trust"]
+    return recommendation
+
+
+def _project_operational_decision(policy: dict[str, Any] | None) -> dict[str, Any] | None:
+    """
+    Projeta um bloco read-only a partir de `policy` sem recalcular regra alguma.
+    """
+    if not isinstance(policy, dict):
+        return None
+    return {
+        "version": policy.get("version"),
+        "score": policy.get("score"),
+        "state": policy.get("state"),
+        "decision": policy.get("decision"),
+        "signals": policy.get("signals"),
+    }
+
+
+async def _get_guardrails_summary(
+    db: AsyncSession,
+    db_stats: dict[str, int],
+    *,
+    window_minutes: int = 15,
+    last_events_limit: int = 5,
+) -> dict:
+    """
+    Resume guardrails recentes (202/429/503) a partir de metrics_endpoint_timing.
+    Mantem custo previsivel em 2 queries leves: agregacao + ultimos eventos.
+    """
+    endpoint_paths = [
+        "/api/v1/metrics/overview",
+        "/api/v1/metrics/runs",
+        "/api/v1/observability/report",
+    ]
+    counts_row = (
+        await _execute_with_db_stats(
+            db,
+            text(
+                """
+                SELECT
+                  SUM(CASE WHEN (facts->>'status_code')::int = 202 THEN 1 ELSE 0 END)::int AS accepted_202,
+                  SUM(CASE WHEN (facts->>'status_code')::int = 429 THEN 1 ELSE 0 END)::int AS rate_limited_429,
+                  SUM(CASE WHEN (facts->>'status_code')::int = 503 THEN 1 ELSE 0 END)::int AS snapshot_missing_503
+                FROM observations
+                WHERE facts->>'event_type' = 'metrics_endpoint_timing'
+                  AND timestamp >= NOW() - make_interval(mins => :window_minutes)
+                  AND facts->>'endpoint' IN (:endpoint_overview, :endpoint_runs, :endpoint_report)
+                  AND (facts->>'status_code') IN ('202', '429', '503')
+                """
+            ),
+            db_stats,
+            {
+                "window_minutes": int(window_minutes),
+                "endpoint_overview": endpoint_paths[0],
+                "endpoint_runs": endpoint_paths[1],
+                "endpoint_report": endpoint_paths[2],
+            },
+        )
+    ).mappings().first()
+
+    last_rows = (
+        await _execute_with_db_stats(
+            db,
+            text(
+                """
+                SELECT
+                  timestamp,
+                  facts->>'endpoint' AS endpoint,
+                  (facts->>'status_code')::int AS status_code,
+                  COALESCE(NULLIF(facts->>'scope', ''), NULL) AS scope,
+                  COALESCE(NULLIF(facts->>'snapshot_status', ''), NULL) AS snapshot_status
+                FROM observations
+                WHERE facts->>'event_type' = 'metrics_endpoint_timing'
+                  AND timestamp >= NOW() - make_interval(mins => :window_minutes)
+                  AND facts->>'endpoint' IN (:endpoint_overview, :endpoint_runs, :endpoint_report)
+                  AND (facts->>'status_code') IN ('202', '429', '503')
+                ORDER BY timestamp DESC
+                LIMIT :limit_rows
+                """
+            ),
+            db_stats,
+            {
+                "window_minutes": int(window_minutes),
+                "limit_rows": int(last_events_limit),
+                "endpoint_overview": endpoint_paths[0],
+                "endpoint_runs": endpoint_paths[1],
+                "endpoint_report": endpoint_paths[2],
+            },
+        )
+    ).mappings().all()
+
+    events = {
+        "accepted_202": int((counts_row or {}).get("accepted_202") or 0),
+        "rate_limited_429": int((counts_row or {}).get("rate_limited_429") or 0),
+        "snapshot_missing_503": int((counts_row or {}).get("snapshot_missing_503") or 0),
+    }
+    last_events = [
+        {
+            "ts": r["timestamp"].isoformat() if r.get("timestamp") else None,
+            "endpoint": r.get("endpoint"),
+            "status_code": int(r["status_code"]) if r.get("status_code") is not None else None,
+            "scope": r.get("scope"),
+            "snapshot_status": r.get("snapshot_status"),
+        }
+        for r in last_rows
+    ]
+    return {
+        "window_minutes": int(window_minutes),
+        "events": events,
+        "last_events": last_events,
+    }
+
+
+async def _get_read_path_compact(
+    db: AsyncSession,
+    db_stats: dict[str, int],
+) -> dict:
+    """
+    Retorna bloco enxuto de read_path em 1 query (subqueries) para manter custo previsivel.
+    """
+    defaults = {
+        "overview_freshness_seconds": None,
+        "overview_snapshot_status": "missing",
+        "overview_last_refreshed_at": None,
+        "runs_freshness_seconds": None,
+        "runs_snapshot_status": "missing",
+        "runs_last_refreshed_at": None,
+        "runs_key_count": 0,
+        "jobs_queued_count": 0,
+    }
+    try:
+        row = (
+            await _execute_with_db_stats(
+                db,
+                text(
+                    """
+                    WITH overview AS (
+                      SELECT
+                        EXTRACT(EPOCH FROM (NOW() - MAX(refreshed_at)))::int AS freshness_seconds,
+                        MAX(refreshed_at) AS last_refreshed_at
+                      FROM metrics_overview_read_model
+                    ),
+                    runs AS (
+                      SELECT
+                        EXTRACT(EPOCH FROM (NOW() - MAX(refreshed_at)))::int AS freshness_seconds,
+                        MAX(refreshed_at) AS last_refreshed_at,
+                        COUNT(*)::int AS key_count
+                      FROM metrics_runs_read_model
+                    ),
+                    jobs AS (
+                      SELECT COUNT(*)::int AS queued_count
+                      FROM metrics_read_refresh_jobs
+                      WHERE status = 'queued' AND expires_at > NOW()
+                    )
+                    SELECT
+                      overview.freshness_seconds AS overview_freshness_seconds,
+                      overview.last_refreshed_at AS overview_last_refreshed_at,
+                      runs.freshness_seconds AS runs_freshness_seconds,
+                      runs.last_refreshed_at AS runs_last_refreshed_at,
+                      runs.key_count AS runs_key_count,
+                      jobs.queued_count AS jobs_queued_count
+                    FROM overview
+                    CROSS JOIN runs
+                    CROSS JOIN jobs
+                    """
+                ),
+                db_stats,
+            )
+        ).mappings().first()
+        if row is None:
+            return defaults
+        overview_freshness = row.get("overview_freshness_seconds")
+        runs_freshness = row.get("runs_freshness_seconds")
+        overview_last = row.get("overview_last_refreshed_at")
+        runs_last = row.get("runs_last_refreshed_at")
+        runs_key_count = int(row.get("runs_key_count") or 0)
+        jobs_queued_count = int(row.get("jobs_queued_count") or 0)
+        return {
+            "overview_freshness_seconds": None if overview_freshness is None else max(0, int(overview_freshness)),
+            "overview_snapshot_status": (
+                "missing"
+                if overview_last is None
+                else ("fresh" if int(overview_freshness or 0) <= 60 else "stale")
+            ),
+            "overview_last_refreshed_at": overview_last.isoformat() if overview_last else None,
+            "runs_freshness_seconds": None if runs_freshness is None else max(0, int(runs_freshness)),
+            "runs_snapshot_status": (
+                "missing" if runs_last is None else ("fresh" if int(runs_freshness or 0) <= 60 else "stale")
+            ),
+            "runs_last_refreshed_at": runs_last.isoformat() if runs_last else None,
+            "runs_key_count": max(0, runs_key_count),
+            "jobs_queued_count": max(0, jobs_queued_count),
+        }
+    except DBAPIError:
+        return defaults
+
+
 def _validate_report_params(
     *,
     window_days: int,
@@ -242,6 +708,118 @@ def _status_from_checks(checks: list[dict], runs_worst_empty: bool) -> str:
     if runs_worst_empty:
         return "WARN"
     return "PASS"
+
+
+async def _build_observability_overview_payload(
+    *,
+    db: AsyncSession,
+    db_stats: dict[str, int],
+) -> dict:
+    """
+    Monta o payload do Operational Insights Panel (MVP).
+
+    Esta funcao centraliza o builder para reuso por:
+    - endpoint JSON (`/api/v1/observability/overview`)
+    - UI interna (`/internal/observability`)
+
+    Nao faz checagem de gate. O chamador decide a exposicao.
+    """
+    c1_health = await get_runtime_c1_health_cached(db=db, db_stats=db_stats)
+    read_path = await _get_read_path_compact(db=db, db_stats=db_stats)
+    guardrails = await _get_guardrails_summary(db=db, db_stats=db_stats, window_minutes=15, last_events_limit=5)
+    try:
+        collector = await get_collector_summary(
+            db=db,
+            db_stats=db_stats,
+            execute_with_db_stats=_execute_with_db_stats,
+            window_minutes=15,
+            last_events_limit=5,
+        )
+    except Exception:
+        collector = None
+
+    score = str(c1_health.get("score", "FAIL"))
+    response = {
+        "as_of": c1_health.get("as_of") or (datetime.utcnow().replace(microsecond=0).isoformat() + "Z"),
+        "panel_version": "v1",
+        "source": {
+            "c1_health": "runtime_status",
+            "guardrails": "metrics_endpoint_timing",
+            "window_minutes": int((c1_health.get("inputs") or {}).get("window_minutes") or 15),
+        },
+        "overall": {
+            "score": score,
+            "decision": _map_panel_decision_from_score(score),
+            "reasons": list(c1_health.get("reasons") or []),
+        },
+        "c1_health": c1_health,
+        "read_path": read_path,
+        "guardrails": guardrails,
+        "collector": collector,
+    }
+    response["policy"] = derive_operational_policy(collector)
+    response["operational_decision"] = _project_operational_decision(response.get("policy"))
+    try:
+        response["policy_bridge"] = derive_policy_bridge(
+            collector,
+            as_of=response.get("as_of"),
+        )
+    except Exception:
+        response["policy_bridge"] = None
+    # Trust Banner e derivado do payload ja montado (O(1), sem consultas extras).
+    response["trust"] = _derive_trust_banner(
+        overall=response["overall"],
+        read_path=response["read_path"],
+        guardrails=response["guardrails"],
+    )
+    # Recommendation e derivada de trust/read_path/guardrails/c1_health (tambem O(1)).
+    response["recommendation"] = _derive_action_recommendation(
+        trust=response["trust"],
+        read_path=response["read_path"],
+        guardrails=response["guardrails"],
+        c1_health=response["c1_health"],
+    )
+    webhook_url = str(os.getenv("STATUS_WEBHOOK_URL") or "").strip()
+    response["webhook"] = WebhookMetrics.snapshot() if webhook_url else None
+    _harmonize_policy_trust_recommendation(response)
+    return response
+
+
+@router.get("/overview")
+async def get_observability_overview(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Painel operacional enxuto (MVP) para consumo interno: c1_health + read_path + overall.
+    Gate restrito por env + header. Nao substitui o /report.
+    """
+    started_at = datetime.utcnow()
+    status_code = 500
+    query_fingerprint = "panel_version=v1&window=15m"
+    db_stats = _new_db_stats()
+    try:
+        if not should_include_internal_status(request):
+            status_code = 404
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        response = await _build_observability_overview_payload(db=db, db_stats=db_stats)
+        status_code = 200
+        return response
+    except HTTPException:
+        raise
+    finally:
+        duration_ms = int((datetime.utcnow() - started_at).total_seconds() * 1000)
+        _emit_metrics_endpoint_timing(
+            endpoint="/api/v1/observability/overview",
+            method="GET",
+            status_code=status_code,
+            duration_ms=duration_ms,
+            query_fingerprint=query_fingerprint,
+            db_us=db_stats["db_us"],
+            db_queries=db_stats["db_queries"],
+            db_pool_wait_us=db_stats["db_pool_wait_us"],
+        )
 
 
 @router.get("/report")
