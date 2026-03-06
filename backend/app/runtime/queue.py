@@ -77,3 +77,10 @@ class InMemoryTaskQueue:
     def pending_count(self) -> int:
         with self._lock:
             return sum(1 for task in self._tasks.values() if task.status == TaskStatus.PENDING)
+
+    def find_by_op_key(self, op_key: str) -> DistributedTask | None:
+        with self._lock:
+            for task in self._tasks.values():
+                if task.op_key == op_key:
+                    return task
+        return None
