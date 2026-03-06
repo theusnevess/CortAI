@@ -10,6 +10,7 @@ from app.api.v1.errors.events_query_errors import map_event_query_error
 from app.api.v1.schemas.events_query import ErrorResponse, EventsQueryResponse
 from app.observability.event_query.errors import InsufficientFiltersError, LimitOutOfRangeError, TimeRangeRequiredError
 from app.observability.event_query.indexer import EventIndexer
+from app.observability.event_query.index_store.repo import EventIndexRepo
 from app.observability.event_query.models import EventQueryFilters, EventRecord, QueryProfile
 from app.observability.event_query.query_service import EventQueryService
 
@@ -19,7 +20,8 @@ router = APIRouter()
 def _build_service() -> EventQueryService:
     base_dir = Path(os.getenv("EVENT_QUERY_BASE_DIR", "OUT"))
     indexer = EventIndexer(base_dir=base_dir)
-    return EventQueryService(indexer=indexer)
+    index_repo = EventIndexRepo(base_dir / "index" / "event_index.sqlite3")
+    return EventQueryService(indexer=indexer, index_repo=index_repo)
 
 
 def _has_strong_selector(filters: EventQueryFilters) -> bool:
