@@ -22,6 +22,7 @@ class EventRecord:
     event_id: str
     ts: str
     event_type: str
+    writer_id: str | None = None
     severity: str | None = None
     action_taken: str | None = None
     account_id: str | None = None

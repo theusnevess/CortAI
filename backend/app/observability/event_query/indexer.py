@@ -79,6 +79,7 @@ class EventIndexer:
             event_id=event_id,
             ts=ts,
             event_type=event_type,
+            writer_id=raw.get("writer_id") if isinstance(raw.get("writer_id"), str) else None,
             severity=raw.get("severity") if isinstance(raw.get("severity"), str) else None,
             action_taken=raw.get("action_taken") if isinstance(raw.get("action_taken"), str) else None,
             account_id=raw.get("account_id") if isinstance(raw.get("account_id"), str) else None,
