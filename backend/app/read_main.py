@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.endpoints import metrics, observability, status, internal_observability_ui, ops_dashboard
 from app.version import get_app_version
+from app.ops.readiness import evaluate_readiness
+from fastapi.responses import JSONResponse
 
 # App dedicado ao read-path para isolar throughput de leitura.
 app = FastAPI(
@@ -77,4 +79,14 @@ def health_check():
     if build_payload:
         payload["build"] = build_payload
     return payload
+
+
+@app.get("/ready")
+def readiness_check():
+    """Readiness operacional do processo dedicado de leitura."""
+    status = evaluate_readiness()
+    payload = status.to_dict()
+    if status.ready:
+        return payload
+    return JSONResponse(status_code=503, content=payload)
 
