@@ -52,16 +52,16 @@ jobs:
           cat > .env << EOF
           # Database
           DB_USER=cortai_admin
-          DB_PASSWORD=cortai_secret_pass_123
+          DB_PASSWORD=${{ secrets.CORTAI_DB_PASSWORD }}
           DB_NAME=cortai_db
-          DATABASE_URL=postgresql://cortai_admin:cortai_secret_pass_123@db:5432/cortai_db
+          DATABASE_URL=postgresql://cortai_admin:${{ secrets.CORTAI_DB_PASSWORD }}@db:5432/cortai_db
           
           # Redis
           REDIS_URL=redis://redis:6379/0
           
           # MinIO (Storage)
-          MINIO_ROOT_USER=minioadmin
-          MINIO_ROOT_PASSWORD=minioadmin123
+          MINIO_ROOT_USER=ci_minio_user
+          MINIO_ROOT_PASSWORD=${{ secrets.CORTAI_MINIO_ROOT_PASSWORD }}
           MINIO_ENDPOINT=http://minio:9000
           MINIO_BUCKET_VIDEOS=videos-raw
           MINIO_BUCKET_CLIPS=clips-final
