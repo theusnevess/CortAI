@@ -16,6 +16,7 @@ from app.observability.event_query.errors import (
     ForensicsBlockedByPolicyError,
     InsufficientFiltersError,
     LimitOutOfRangeError,
+    TimeRangeInvalidError,
     TimeRangeRequiredError,
 )
 from app.observability.event_query.indexer import EventIndexer
@@ -67,7 +68,7 @@ class EventQueryService:
         start_dt = filters.start_dt()
         end_dt = filters.end_dt()
         if end_dt <= start_dt:
-            raise TimeRangeRequiredError()
+            raise TimeRangeInvalidError()
 
         if limit < 1 or limit > 500:
             raise LimitOutOfRangeError()

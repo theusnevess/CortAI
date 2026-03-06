@@ -14,6 +14,13 @@ class TimeRangeRequiredError(EventQueryError):
         super().__init__("TIME_RANGE_REQUIRED")
 
 
+class TimeRangeInvalidError(EventQueryError):
+    """Falha quando o intervalo de tempo informado e invalido."""
+
+    def __init__(self) -> None:
+        super().__init__("TIME_RANGE_INVALID")
+
+
 class InsufficientFiltersError(EventQueryError):
     """Falha anti-scan quando nao ha seletor suficiente alem do tempo."""
 

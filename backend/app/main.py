@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     metrics,
     observability,
     status,
+    events,
     internal_observability_ui,
     internal_maestro,
 )
@@ -57,6 +58,7 @@ async def capture_asgi_entry_time(request: Request, call_next):
 app.include_router(videos.router, prefix="/api/v1/videos", tags=["videos"])
 app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])
 app.include_router(observability.router, prefix="/api/v1/observability", tags=["observability"])
+app.include_router(events.router, prefix="/api/v1/events", tags=["events"])
 app.include_router(status.router, prefix="/api/v1", tags=["status"])
 app.include_router(internal_observability_ui.router)
 app.include_router(internal_maestro.router)
