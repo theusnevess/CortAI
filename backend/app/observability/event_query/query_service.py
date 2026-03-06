@@ -21,6 +21,7 @@ from app.observability.event_query.errors import (
 )
 from app.observability.event_query.indexer import EventIndexer
 from app.observability.event_query.index_store.repo import EventIndexRepo
+from app.observability.hot_store.repo import HotStoreRepo
 from app.observability.event_query.models import (
     EventQueryFilters,
     EventQueryResult,
@@ -37,6 +38,7 @@ class EventQueryService:
     def __init__(
         self,
         indexer: EventIndexer | None = None,
+        hot_store_repo: HotStoreRepo | None = None,
         index_repo: EventIndexRepo | None = None,
         *,
         forensics_enabled: bool | None = None,
@@ -44,6 +46,7 @@ class EventQueryService:
         cursor_signing_policy: SigningPolicy | None = None,
     ) -> None:
         self.indexer = indexer or EventIndexer()
+        self.hot_store_repo = hot_store_repo
         self.index_repo = index_repo
         if forensics_enabled is None:
             forensics_enabled = os.getenv("FORENSICS_ENABLED", "").strip().lower() in {"1", "true", "yes"}
@@ -122,6 +125,12 @@ class EventQueryService:
         limit: int,
         cursor_last: tuple[str, str] | None,
     ) -> EventQueryResult:
+        if self.hot_store_repo is not None:
+            try:
+                if self.hot_store_repo.is_available():
+                    return self.hot_store_repo.search(filters, limit, cursor_last=cursor_last)
+            except Exception:  # noqa: BLE001
+                pass
         if self.index_repo is not None:
             try:
                 if self.index_repo.is_available():

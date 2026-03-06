@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from app.observability.event_query.index_store.writer import EventIndexWriter
 from app.observability.event_query.indexer import EventIndexer
-from app.observability.event_query.models import EventRecord
+from app.observability.hot_store.writer import HotStoreWriter
 from app.observability.event_append.errors import EventAppendJsonlError
 
 
@@ -20,6 +20,8 @@ class AppendResult:
     index_error: str | None
     source_file: str
     source_line: int
+    hot_store_written: bool = False
+    hot_store_error: str | None = None
 
 
 JsonlStore = Callable[[dict[str, Any], Path], tuple[str, int]]
@@ -31,6 +33,10 @@ def default_event_path() -> Path:
 
 def default_event_index_writer() -> EventIndexWriter:
     return EventIndexWriter(Path("OUT/index/event_index.sqlite3"))
+
+
+def default_hot_store_writer() -> HotStoreWriter:
+    return HotStoreWriter(Path("OUT/hot_store/events_hot.sqlite3"))
 
 
 def append_jsonl_event(event: dict[str, Any], path: Path) -> tuple[str, int]:
@@ -57,6 +63,7 @@ def append_event(
     path: Path | None = None,
     jsonl_store: JsonlStore | None = None,
     index_writer: EventIndexWriter | None = None,
+    hot_store_writer: HotStoreWriter | None = None,
 ) -> AppendResult:
     """Persiste o evento no log canonico e tenta indexacao write-through."""
     target_path = path or default_event_path()
@@ -70,6 +77,8 @@ def append_event(
             jsonl_written=True,
             index_written=False,
             index_error="EVENT_INVALID_SHAPE",
+            hot_store_written=False,
+            hot_store_error="EVENT_INVALID_SHAPE",
             source_file=source_file,
             source_line=source_line,
         )
@@ -83,10 +92,21 @@ def append_event(
         index_written = False
         index_error = str(exc) or exc.__class__.__name__
 
+    hot_writer = hot_store_writer or default_hot_store_writer()
+    try:
+        hot_status = hot_writer.write(parsed)
+        hot_store_written = hot_status in {"WRITTEN", "NOOP"}
+        hot_store_error = None
+    except Exception as exc:  # noqa: BLE001
+        hot_store_written = False
+        hot_store_error = str(exc) or exc.__class__.__name__
+
     return AppendResult(
         jsonl_written=True,
         index_written=index_written,
         index_error=index_error,
+        hot_store_written=hot_store_written,
+        hot_store_error=hot_store_error,
         source_file=source_file,
         source_line=source_line,
     )
