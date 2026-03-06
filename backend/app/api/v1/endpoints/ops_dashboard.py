@@ -19,6 +19,7 @@ from app.api.v1.schemas.ops_dashboard import (
 from app.observability.event_query.indexer import EventIndexer
 from app.observability.event_query.models import EventQueryFilters, QueryProfile
 from app.observability.event_query.query_service import EventQueryService
+from app.runtime.rollout.config import RolloutConfig, apply_runtime_rollout_overrides
 
 router = APIRouter()
 
@@ -54,7 +55,37 @@ def _read_slo_status() -> dict[str, Any]:
 
 
 def _read_alerts() -> list[dict[str, Any]]:
-    return _load_jsonl(_out_dir() / "ops" / "alerts.jsonl")
+    alerts = _load_jsonl(_out_dir() / "ops" / "alerts.jsonl")
+    acknowledgements = {
+        item.get("alert_code"): item
+        for item in _load_jsonl(_out_dir() / "ops" / "alert_acknowledgements.jsonl")
+        if item.get("alert_code")
+    }
+    merged: list[dict[str, Any]] = []
+    for alert in alerts:
+        current = dict(alert)
+        ack = acknowledgements.get(alert.get("alert_code"))
+        if ack:
+            current["acknowledged"] = True
+            current["acknowledged_by"] = ack.get("operator_id")
+            current["acknowledged_at"] = ack.get("acknowledged_at")
+            current["acknowledge_reason"] = ack.get("reason")
+        else:
+            current["acknowledged"] = False
+        merged.append(current)
+    return merged
+
+
+def _env_flag(name: str) -> bool:
+    return bool(os.getenv(name, "false").strip().lower() in {"1", "true", "yes"})
+
+
+def _read_rollout_control() -> dict[str, Any]:
+    config = apply_runtime_rollout_overrides(RolloutConfig(enabled=_env_flag("ROLL_OUT_ENABLED")), base_dir=_out_dir())
+    return {
+        "rollout_enabled": config.enabled,
+        "kill_switch_enabled": config.kill_switch_enabled,
+    }
 
 
 def _read_rollout_report() -> dict[str, Any]:
@@ -152,8 +183,9 @@ def get_health_summary():
     slo_status = _read_slo_status()
     alerts = _read_alerts()
     criticals = [item for item in alerts if str(item.get("severity")).upper() == "CRITICAL"]
-    rollout_enabled = bool(os.getenv("ROLL_OUT_ENABLED", "false").strip().lower() in {"1", "true", "yes"})
-    kill_switch_enabled = bool(os.getenv("ROLL_OUT_KILL_SWITCH", "false").strip().lower() in {"1", "true", "yes"})
+    rollout_control = _read_rollout_control()
+    rollout_enabled = rollout_control["rollout_enabled"]
+    kill_switch_enabled = rollout_control["kill_switch_enabled"]
     return {
         "rollout_enabled": rollout_enabled,
         "kill_switch_enabled": kill_switch_enabled,
@@ -199,6 +231,7 @@ def get_operator_console(request: Request):
         "windows": get_windows(),
         "tasks": get_tasks(),
         "alerts": get_alerts(),
+        "actions_base_url": "/api/v1/ops/actions",
         "events_quick_links": {
             "by_window": "/api/v1/events?time_from=2026-01-01T00:00:00Z&time_to=2099-01-01T00:00:00Z&window_id=<window_id>",
             "by_publish": "/api/v1/events?time_from=2026-01-01T00:00:00Z&time_to=2099-01-01T00:00:00Z&publish_id=<publish_id>",

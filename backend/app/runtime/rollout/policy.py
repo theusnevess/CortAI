@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.runtime.models import DistributedTask
-from app.runtime.rollout.config import RolloutConfig
+from app.runtime.rollout.config import RolloutConfig, apply_runtime_rollout_overrides
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,7 @@ def evaluate_rollout_account(
     policy_stage: str | None,
     config: RolloutConfig,
 ) -> RolloutDecision:
+    config = apply_runtime_rollout_overrides(config)
     if not config.enabled:
         return RolloutDecision(False, "ROLLOUT_DISABLED")
     if config.kill_switch_enabled:
