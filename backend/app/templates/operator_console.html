@@ -29,6 +29,10 @@
     .ok { background: #dcefdc; color: var(--ok); }
     .warn { background: #f8e8b4; color: var(--warn); }
     .critical { background: #ffd6d6; color: var(--critical); }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .actions button { border: 0; border-radius: 999px; padding: 8px 14px; background: #1f1a14; color: #fffaf1; cursor: pointer; }
+    .actions input { border: 1px solid var(--line); border-radius: 10px; padding: 8px; min-width: 220px; background: #fffdf8; }
+    .feedback { margin-top: 8px; font-size: 0.9rem; color: var(--muted); white-space: pre-wrap; }
     code { background: #f5ecdf; padding: 2px 6px; border-radius: 8px; }
     a { color: var(--accent); text-decoration: none; }
   </style>
@@ -54,6 +58,14 @@
         <h2>Rollout</h2>
         <p><strong>Name:</strong> {{ payload.rollout.rollout_name }}</p>
         <pre>{{ payload.rollout.batch_summary | tojson(indent=2) }}</pre>
+        <div class="actions">
+          <input id="operator-id" placeholder="operator_id" value="operator_console" />
+          <input id="rollout-reason" placeholder="reason" />
+          <button onclick="runAction('pause-rollout', {operator_id: valueOf('operator-id'), reason: valueOf('rollout-reason')})">Pause rollout</button>
+          <button onclick="runAction('resume-rollout', {operator_id: valueOf('operator-id'), reason: valueOf('rollout-reason')})">Resume rollout</button>
+          <button onclick="runAction('rebuild-event-index', {operator_id: valueOf('operator-id'), reason: valueOf('rollout-reason')})">Rebuild event index</button>
+        </div>
+        <div id="rollout-feedback" class="feedback"></div>
       </article>
     </section>
 
@@ -97,6 +109,7 @@
             <th>worker_id</th>
             <th>status</th>
             <th>op_key</th>
+            <th>action</th>
           </tr>
         </thead>
         <tbody>
@@ -107,12 +120,20 @@
             <td>{{ item.worker_id }}</td>
             <td>{{ item.status }}</td>
             <td><code>{{ item.op_key }}</code></td>
+            <td>
+              {% if item.status in ["FAILED", "BLOCKED", "NOOP"] %}
+              <button onclick='requeueTask({{ item | tojson }})'>Requeue</button>
+              {% else %}
+              <span class="muted">n/a</span>
+              {% endif %}
+            </td>
           </tr>
         {% else %}
-          <tr><td colspan="5" class="muted">Sem tasks observadas.</td></tr>
+          <tr><td colspan="6" class="muted">Sem tasks observadas.</td></tr>
         {% endfor %}
         </tbody>
       </table>
+      <div id="task-feedback" class="feedback"></div>
     </section>
 
     <section class="card" style="margin-top:16px;">
@@ -124,6 +145,7 @@
             <th>metric</th>
             <th>reason_code</th>
             <th>action</th>
+            <th>ack</th>
           </tr>
         </thead>
         <tbody>
@@ -135,12 +157,20 @@
             <td>{{ item.metric_name }}</td>
             <td><code>{{ item.reason_code }}</code></td>
             <td>{{ item.action }}</td>
+            <td>
+              {% if item.acknowledged %}
+              <span class="muted">ack by {{ item.acknowledged_by }}</span>
+              {% else %}
+              <button onclick="ackAlert('{{ item.alert_code }}')">Acknowledge</button>
+              {% endif %}
+            </td>
           </tr>
         {% else %}
-          <tr><td colspan="4" class="muted">Sem alertas ativos.</td></tr>
+          <tr><td colspan="5" class="muted">Sem alertas ativos.</td></tr>
         {% endfor %}
         </tbody>
       </table>
+      <div id="alert-feedback" class="feedback"></div>
     </section>
 
     <section class="card" style="margin-top:16px;">
@@ -150,5 +180,51 @@
       <p><a href="{{ payload.events_quick_links.by_job }}">{{ payload.events_quick_links.by_job }}</a></p>
     </section>
   </main>
+  <script>
+    const actionsBase = "{{ payload.actions_base_url }}";
+
+    function valueOf(id) {
+      return document.getElementById(id).value;
+    }
+
+    async function runAction(action, payload, feedbackId = "rollout-feedback") {
+      const feedback = document.getElementById(feedbackId);
+      feedback.textContent = "executing...";
+      const response = await fetch(`${actionsBase}/${action}`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload),
+      });
+      const body = await response.json();
+      feedback.textContent = JSON.stringify(body, null, 2);
+    }
+
+    function requeueTask(task) {
+      const operator_id = valueOf("operator-id");
+      const reason = prompt("Reason for requeue:");
+      if (!reason) {
+        return;
+      }
+      runAction("requeue-task", {
+        operator_id,
+        reason,
+        task_id: task.task_id,
+        task_type: task.task_type,
+        status: task.status,
+        op_key: task.op_key,
+        account_id: task.account_id,
+        window_id: task.window_id,
+      }, "task-feedback");
+    }
+
+    function ackAlert(alertCode) {
+      const operator_id = valueOf("operator-id");
+      const reason = prompt("Reason for acknowledge:");
+      if (!reason) {
+        return;
+      }
+      runAction("ack-alert", {operator_id, reason, alert_code: alertCode}, "alert-feedback");
+    }
+  </script>
 </body>
 </html>
