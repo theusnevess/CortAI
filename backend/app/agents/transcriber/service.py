@@ -51,7 +51,7 @@ class TranscriberAgent:
                     start_time=seg.start_time,
                     end_time=seg.end_time,
                     text=text,
-                ).dict()
+                ).model_dump()
             )
 
         return results
