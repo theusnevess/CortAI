@@ -78,6 +78,9 @@ class EventQueryResult:
 
     items: list[EventRecord] = field(default_factory=list)
     stats: EventQueryStats = field(default_factory=EventQueryStats)
+    next_cursor: str | None = None
+    has_more: bool = False
+    query_shape_id: str | None = None
 
 
 @dataclass(frozen=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+import heapq
 from pathlib import Path
 from typing import Iterable, Iterator
 
@@ -110,15 +111,23 @@ class EventIndexer:
                         continue
                     yield _ParsedLine(record=parsed)
 
-    def scan(self, filters: EventQueryFilters, limit: int = 200) -> EventQueryResult:
-        """Executa varredura deterministica com filtros e contadores de qualidade."""
+    def scan(
+        self,
+        filters: EventQueryFilters,
+        limit: int = 200,
+        *,
+        cursor_last: tuple[str, str] | None = None,
+    ) -> EventQueryResult:
+        """Executa varredura deterministica com filtros, seek e limit+1."""
         start_dt = filters.start_dt()
         end_dt = filters.end_dt()
         scanned_files = sum(1 for _ in self.iter_jsonl_files())
-        items: list[EventRecord] = []
+        heap: list[tuple[tuple[str, str], int, EventRecord]] = []
+        capacity = max(limit + 1, 1)
         scanned_lines = 0
         invalid_json = 0
         invalid_shape = 0
+        seq = 0
 
         for parsed in self.iter_events():
             scanned_lines += 1
@@ -131,11 +140,20 @@ class EventIndexer:
             record = parsed.record
             if not self._matches(record, filters, start_dt, end_dt):
                 continue
-            items.append(record)
+            if not self._matches_cursor(record, cursor_last):
+                continue
+            key = (record.ts, record.event_id or "")
+            seq += 1
+            if len(heap) < capacity:
+                heapq.heappush(heap, (key, seq, record))
+            else:
+                if key > heap[0][0]:
+                    heapq.heapreplace(heap, (key, seq, record))
 
-        items.sort(key=lambda item: (item.ts, item.event_id or ""), reverse=True)
-        if limit > 0:
-            items = items[:limit]
+        selected = [item for _, _, item in heap]
+        selected.sort(key=lambda item: (item.ts, item.event_id or ""), reverse=True)
+        has_more = len(selected) > limit
+        items = selected[:limit] if limit > 0 else selected
 
         return EventQueryResult(
             items=items,
@@ -145,7 +163,20 @@ class EventIndexer:
                 invalid_jsonl_lines=invalid_json,
                 invalid_shape_lines=invalid_shape,
             ),
+            has_more=has_more,
         )
+
+    def _matches_cursor(self, record: EventRecord, cursor_last: tuple[str, str] | None) -> bool:
+        """Aplica seek estrito para paginacao DESC sem duplicar boundary."""
+        if cursor_last is None:
+            return True
+        cursor_ts, cursor_event_id = cursor_last
+        record_event_id = record.event_id or ""
+        if record.ts < cursor_ts:
+            return True
+        if record.ts == cursor_ts and record_event_id < cursor_event_id:
+            return True
+        return False
 
     def _matches(self, record: EventRecord, filters: EventQueryFilters, start_dt, end_dt) -> bool:
         try:
