@@ -1,10 +1,13 @@
 ﻿from __future__ import annotations
 
+from datetime import datetime, timezone
 import os
 
 from app.observability.event_query.cursor import (
+    CursorLast,
     SeekCursor,
     decode_cursor,
+    encode_cursor,
     validate_cursor_filters_hash,
     validate_cursor_signature,
 )
@@ -57,7 +60,7 @@ class EventQueryService:
         writer_id: str | None = None,
         cursor: str | SeekCursor | None = None,
     ) -> EventQueryResult:
-        """Executa consulta deterministica por filtros com limite maximo."""
+        """Executa consulta deterministica por filtros com seek keyset."""
         if not filters.start_ts or not filters.end_ts:
             raise TimeRangeRequiredError()
 
@@ -75,12 +78,38 @@ class EventQueryService:
             raise InsufficientFiltersError()
 
         filters_hash = build_filters_hash(filters)
+        query_shape_id = "BASE"
+        cursor_last: tuple[str, str] | None = None
+
         if cursor is not None:
             cursor_obj = decode_cursor(cursor) if isinstance(cursor, str) else cursor
             validate_cursor_signature(cursor_obj, self.cursor_signing_policy)
             validate_cursor_filters_hash(cursor_obj, filters_hash)
+            cursor_last = (cursor_obj.last.ts, cursor_obj.last.event_id)
+            query_shape_id = "WITH_CURSOR"
 
-        return self.indexer.scan(filters=filters, limit=limit)
+        result = self.indexer.scan(filters=filters, limit=limit, cursor_last=cursor_last)
+
+        next_cursor = None
+        if result.has_more and result.items:
+            last_item = result.items[-1]
+            next_cursor = encode_cursor(
+                SeekCursor(
+                    v="1",
+                    filters_hash=filters_hash,
+                    last=CursorLast(ts=last_item.ts, event_id=last_item.event_id or ""),
+                    issued_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                ),
+                signing=self.cursor_signing_policy,
+            )
+
+        return EventQueryResult(
+            items=result.items,
+            stats=result.stats,
+            next_cursor=next_cursor,
+            has_more=result.has_more,
+            query_shape_id=query_shape_id,
+        )
 
     def get_pipeline_trace(self, request: TraceRequest, limit: int = 500) -> PipelineTrace:
         """Reconstrui trace de pipeline de forma deterministica."""
