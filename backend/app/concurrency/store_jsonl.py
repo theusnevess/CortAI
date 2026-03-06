@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from app.observability.event_append.service import append_event
+
 DEFAULT_CONCURRENCY_PATH = Path("OUT/data/concurrency_ops.jsonl")
 
 
@@ -13,10 +15,7 @@ def append_concurrency_event(
     path: Path = DEFAULT_CONCURRENCY_PATH,
 ) -> None:
     """Registra evento append-only para auditoria de concorrencia."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
-        f.flush()
+    append_event(event, path=path)
 
 
 def read_concurrency_events(*, path: Path = DEFAULT_CONCURRENCY_PATH) -> list[dict[str, Any]]:
