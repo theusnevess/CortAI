@@ -9,6 +9,7 @@ from app.api.v1.endpoints import (
     observability,
     status,
     events,
+    ops_dashboard,
     internal_observability_ui,
     internal_maestro,
 )
@@ -59,6 +60,7 @@ app.include_router(videos.router, prefix="/api/v1/videos", tags=["videos"])
 app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])
 app.include_router(observability.router, prefix="/api/v1/observability", tags=["observability"])
 app.include_router(events.router, prefix="/api/v1/events", tags=["events"])
+app.include_router(ops_dashboard.router, prefix="/api/v1/ops", tags=["ops"])
 app.include_router(status.router, prefix="/api/v1", tags=["status"])
 app.include_router(internal_observability_ui.router)
 app.include_router(internal_maestro.router)
