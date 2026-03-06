@@ -39,6 +39,9 @@ def _safe_details(raw: object) -> dict | None:
         "account_id",
         "publish_id",
         "job_id",
+        "task_id",
+        "task_type",
+        "worker_id",
     }
     details: dict = {}
     for key in sorted(raw.keys()):
