@@ -38,7 +38,10 @@ def _resolve_good_urls() -> list[str]:
         if response.status_code == 200:
             resolved.append(candidate)
     if not resolved:
-        pytest.skip("Smoke assets indisponiveis nos endpoints conhecidos")
+        pytest.skip(
+            "Smoke assets indisponiveis nos endpoints conhecidos",
+            allow_module_level=True,
+        )
     return resolved
 
 
@@ -52,7 +55,20 @@ def _ensure_smoke_stack() -> str:
     try:
         MinioService().client.list_buckets()
     except Exception as exc:
-        pytest.skip(f"MinIO indisponivel para smoke do coletor: {exc}")
+        if not os.getenv("MINIO_ENDPOINT"):
+            os.environ["MINIO_ENDPOINT"] = "http://localhost:9000"
+            try:
+                MinioService().client.list_buckets()
+                return good_url
+            except Exception as retry_exc:
+                pytest.skip(
+                    f"MinIO indisponivel para smoke do coletor: {retry_exc}",
+                    allow_module_level=True,
+                )
+        pytest.skip(
+            f"MinIO indisponivel para smoke do coletor: {exc}",
+            allow_module_level=True,
+        )
 
     return good_url
 
