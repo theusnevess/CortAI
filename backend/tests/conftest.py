@@ -92,8 +92,16 @@ async def db_session(async_engine) -> AsyncSession:
             try:
                 yield session
             finally:
+                event.remove(
+                    session.sync_session,
+                    "after_transaction_end",
+                    restart_savepoint,
+                )
+                if session.in_transaction():
+                    await session.rollback()
                 await session.close()
-                await transaction.rollback()
+                if transaction.is_active:
+                    await transaction.rollback()
 
 
 @pytest.fixture
