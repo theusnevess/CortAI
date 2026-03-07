@@ -33,9 +33,10 @@ def _build_pack_id(
 
 
 def _config_signature(policy_config: dict[str, Any], strategy_patch: dict[str, Any] | None) -> str:
-    del strategy_patch
+    active_patch = strategy_patch if isinstance(strategy_patch, dict) and strategy_patch.get("active") is True else None
+    patch_id = "" if active_patch is None else str(active_patch.get("patch_id") or "")
     policy_signature = json_dumps(policy_config)
-    return sha256(policy_signature.encode("utf-8")).hexdigest()[:12]
+    return sha256(f"{policy_signature}|{patch_id}".encode("utf-8")).hexdigest()[:12]
 
 
 def json_dumps(payload: dict[str, Any]) -> str:
@@ -68,9 +69,7 @@ class CreativePackGeneratorService:
             raise ValueError("CREATIVE_PACK_VARIATION_COUNT_INVALID")
 
         timestamp = generated_at or _now_iso()
-        del account_policy
-        del strategy_patch
-        policy_config: dict[str, Any] = {}
+        policy_config = self._resolve_policy_config(account_policy=account_policy, strategy_patch=strategy_patch)
         signature = _config_signature(policy_config, strategy_patch)
 
         packs: list[CreativePack] = []
@@ -82,7 +81,7 @@ class CreativePackGeneratorService:
                 policy_stage=policy_stage,
                 variation_index=variation_index,
                 policy_config=policy_config,
-                strategy_patch=None,
+                strategy_patch=strategy_patch if isinstance(strategy_patch, dict) and strategy_patch.get("active") is True else None,
                 generated_at=timestamp,
                 config_signature=signature,
             )
@@ -92,6 +91,27 @@ class CreativePackGeneratorService:
 
         status = "NOOP" if actions and all(item == "NOOP" for item in actions) else "WRITTEN"
         return CreativePackGenerationResult(status=status, creative_packs=packs, actions=actions)
+
+    def _resolve_policy_config(
+        self,
+        *,
+        account_policy: dict[str, Any] | None,
+        strategy_patch: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        config: dict[str, Any] = {}
+        if isinstance(account_policy, dict):
+            policy_config = account_policy.get("config", {})
+            if isinstance(policy_config, dict):
+                config.update(policy_config)
+        if isinstance(strategy_patch, dict) and strategy_patch.get("active") is True:
+            overrides = strategy_patch.get("overrides", {})
+            if isinstance(overrides, dict):
+                for key, value in overrides.items():
+                    if isinstance(value, dict):
+                        config.setdefault(key, {})
+                        if isinstance(config[key], dict):
+                            config[key] = {**config[key], **value}
+        return config
 
     def _build_pack(
         self,
@@ -105,20 +125,27 @@ class CreativePackGeneratorService:
         generated_at: str,
         config_signature: str,
     ) -> CreativePack:
-        del policy_config
-        angle = [
+        a1 = policy_config.get("a1_prefs_override", {}) if isinstance(policy_config.get("a1_prefs_override"), dict) else {}
+        a4 = policy_config.get("a4_defaults_override", {}) if isinstance(policy_config.get("a4_defaults_override"), dict) else {}
+        a5 = policy_config.get("a5_rewrite_defaults_override", {}) if isinstance(policy_config.get("a5_rewrite_defaults_override"), dict) else {}
+
+        prefer_angles = a1.get("prefer_angles") if isinstance(a1.get("prefer_angles"), list) else []
+        niches_boost = a1.get("niches_boost") if isinstance(a1.get("niches_boost"), list) else []
+        angle = str(prefer_angles[variation_index % len(prefer_angles)]) if prefer_angles else [
             "case_breakdown",
             "unexpected_turn",
             "why_it_mattered",
         ][(variation_index - 1) % 3]
-        hook_style = "curiosity_gap"
-        increase_tension = False
-        force_number = False
-        cta_style = "comment_prompt"
+
+        hook_style = str(a4.get("hook_style") or "curiosity_gap")
+        increase_tension = bool(a4.get("increase_tension") is True)
+        force_number = bool(a4.get("force_number") is True)
+        cta_style = str(a5.get("cta_style") or "comment_prompt")
+
         base_phrase = self._build_base_phrase(theme=theme, angle=angle, increase_tension=increase_tension)
         title = self._build_title(theme=theme, variation_index=variation_index, force_number=force_number, base_phrase=base_phrase)
         hooks = self._build_hooks(theme=theme, hook_style=hook_style, increase_tension=increase_tension)
-        hashtags = self._build_hashtags(theme=theme, policy_stage=policy_stage, niches_boost=[])
+        hashtags = self._build_hashtags(theme=theme, policy_stage=policy_stage, niches_boost=niches_boost)
         cta = self._build_cta(cta_style=cta_style, theme=theme)
         script_skeleton = self._build_script_skeleton(theme=theme, angle=angle, hook=hooks[0], cta=cta)
 
