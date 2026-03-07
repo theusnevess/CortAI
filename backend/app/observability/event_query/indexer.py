@@ -20,6 +20,8 @@ class _ParsedLine:
     record: EventRecord | None
     invalid_json: bool = False
     invalid_shape: bool = False
+    source_file: str | None = None
+    source_line: int = 0
 
 
 def _safe_details(raw: object) -> dict | None:
@@ -92,25 +94,48 @@ class EventIndexer:
 
     def iter_events(self, paths: Iterable[str] | None = None) -> Iterator[_ParsedLine]:
         """Itera linhas parseadas sem falhar por JSONL invalido."""
+        yield from self.iter_events_with_source(paths)
+
+    def iter_events_with_source(self, paths: Iterable[str] | None = None) -> Iterator[_ParsedLine]:
+        """Itera eventos preservando arquivo e linha para rebuild/indexacao."""
         for file_path in self.iter_jsonl_files(paths):
             with file_path.open("r", encoding="utf-8") as f:
-                for line in f:
+                for line_number, line in enumerate(f, start=1):
                     line = line.strip()
                     if not line:
                         continue
                     try:
                         raw = json.loads(line)
                     except json.JSONDecodeError:
-                        yield _ParsedLine(record=None, invalid_json=True)
+                        yield _ParsedLine(
+                            record=None,
+                            invalid_json=True,
+                            source_file=str(file_path),
+                            source_line=line_number,
+                        )
                         continue
                     if not isinstance(raw, dict):
-                        yield _ParsedLine(record=None, invalid_shape=True)
+                        yield _ParsedLine(
+                            record=None,
+                            invalid_shape=True,
+                            source_file=str(file_path),
+                            source_line=line_number,
+                        )
                         continue
                     parsed = self.parse_event(raw)
                     if parsed is None:
-                        yield _ParsedLine(record=None, invalid_shape=True)
+                        yield _ParsedLine(
+                            record=None,
+                            invalid_shape=True,
+                            source_file=str(file_path),
+                            source_line=line_number,
+                        )
                         continue
-                    yield _ParsedLine(record=parsed)
+                    yield _ParsedLine(
+                        record=parsed,
+                        source_file=str(file_path),
+                        source_line=line_number,
+                    )
 
     def scan(
         self,

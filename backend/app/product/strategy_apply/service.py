@@ -10,6 +10,7 @@ from app.product.strategy_apply.models import StrategyPatchApplyResult
 from app.product.strategy_learning.schema import validate_strategy_patch
 from app.registry.merge_effective_config import merge_effective_config
 from app.registry.strategy_overrides import apply_strategy_overrides, validate_strategy_overrides_whitelist
+from app.observability.event_append.service import append_event, build_event_record
 
 
 def _now_utc_iso() -> str:
@@ -21,7 +22,8 @@ def _canonical_payload(record: dict[str, Any]) -> str:
 
 
 def _default_event_sink(event_type: str, payload: dict[str, Any]) -> None:
-    _ = (event_type, payload)
+    event = build_event_record(event_type, payload, writer_id="strategy_apply")
+    append_event(event)
 
 
 @dataclass(frozen=True)
