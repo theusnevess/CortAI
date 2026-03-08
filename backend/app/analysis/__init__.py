@@ -8,11 +8,13 @@ from .models import (
     PilotMetricsSummary,
 )
 from .repo import AnalysisRepo
+from .service import AnalysisService
 
 __all__ = [
     "AccountHealthItem",
     "AccountHealthSummary",
     "AnalysisRepo",
+    "AnalysisService",
     "ExperimentWinnerItem",
     "ExperimentWinners",
     "HookPerformanceItem",
