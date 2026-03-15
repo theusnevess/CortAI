@@ -124,8 +124,7 @@ Nenhum path fora de `OUT/`.
 - `CONTENT/tts_completed`
 - `CONTENT/render_started`
 - `CONTENT/render_completed`
-- `CONTENT/publish_started`
-- `CONTENT/publish_completed`
+- `CONTENT/publish_manifest_created`
 - `CONTENT/pipeline_failed`
 
 `safety` deve emitir:
@@ -224,7 +223,7 @@ Artefatos esperados:
 Eventos esperados:
 - `CONTENT/tts_started`
 - `CONTENT/render_completed`
-- `CONTENT/publish_completed`
+- `CONTENT/publish_manifest_created`
 
 ### 4. Safety funcionando
 
