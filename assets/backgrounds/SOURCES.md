@@ -1,0 +1,5 @@
+- assets/backgrounds/horror/horror_02.jpg -> https://commons.wikimedia.org/wiki/File:A_Corridor_at_a_spring_night_-_Flickr_-_odako1.jpg
+- assets/backgrounds/horror/horror_03.jpg -> https://commons.wikimedia.org/wiki/File:The_Corridor.jpg
+- assets/backgrounds/horror/horror_04.jpg -> https://commons.wikimedia.org/wiki/File:Abandoned_hallway_(16239964271).jpg
+- assets/backgrounds/conspiracy/conspiracy_02.jpg -> https://commons.wikimedia.org/wiki/File:NASA_history_archives.jpg
+- assets/backgrounds/facts/facts_02.jpg -> https://commons.wikimedia.org/wiki/File:Chemistry_laboratory.jpg

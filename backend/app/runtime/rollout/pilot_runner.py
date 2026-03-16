@@ -6,10 +6,18 @@ from pathlib import Path
 from time import time
 from uuid import uuid4
 
+from app.content.pipeline.models import ExecutionEnvelope
+from app.content.pipeline.render import StubRenderAdapter
+from app.content.pipeline.service import ContentPipelineService
+from app.content.pipeline.tts import StubTtsAdapter
+from app.content.script_gen.service import LocalScriptGeneratorService, ScriptGenerationError
 from app.concurrency.idempotency import IdempotencyManager
 from app.concurrency.lease import LeaseManager
+from app.data.publish_records.store_jsonl import read_all_records
+from app.data.publish_records.writer import write_publish_record
+from app.metrics.collector import MetricsCollectorService
 from app.observability.event_append.service import append_event, build_event_record
-from app.runtime.executor import RuntimeExecutorDeps
+from app.runtime.executor import RuntimeExecutorDeps, RuntimeTemporaryError
 from app.runtime.models import DistributedTask, TaskType
 from app.runtime.paths import resolve_out_dir
 from app.runtime.queue import InMemoryTaskQueue
@@ -18,6 +26,7 @@ from app.runtime.rollout.report import write_rollout_report
 from app.runtime.scheduler.models import ScheduleKind
 from app.runtime.scheduler.service import SchedulerService
 from app.runtime.worker import WorkerRunner
+from app.safety.service import SafetyService
 
 
 def run_pilot_rollout(
@@ -65,12 +74,92 @@ def run_pilot_rollout(
         return {"status": "SUCCEEDED"}
 
     def post_pipeline_handler(task: DistributedTask) -> dict:
+        payload = dict(task.payload)
+        account_id = str(task.account_id or payload.get("account_id") or "")
+        publish_slot = str(payload.get("publish_slot") or "")
+        creative_pack_id = str(payload.get("creative_pack_id") or "")
+        script_text = str(payload.get("script_text") or "").strip()
+        caption = str(payload.get("caption") or "")
+        hashtags = [str(item) for item in list(payload.get("hashtags") or [])]
+        theme = str(payload.get("theme") or "abandoned place mystery").strip()
+        angle = str(payload.get("angle") or "unexplained detail").strip()
+        hook_hint = str(payload.get("hook_hint") or "a detail that should not be there").strip()
+
+        safety = SafetyService(
+            safety_dir=out_dir / "safety",
+            event_path=event_path,
+        )
+        _, decision = safety.evaluate_before_publish(account_id=account_id, now=current)
+        if decision.decision.value == "BLOCK":
+            return {"status": "BLOCKED", "reason_code": decision.reason_code}
+        if decision.decision.value == "DELAY":
+            raise RuntimeTemporaryError(f"SAFETY_DELAY:{decision.next_allowed_time or ''}")
+
+        envelope = ExecutionEnvelope(
+            job_id=str(payload.get("job_id") or task.task_id),
+            account_id=account_id,
+            creative_pack_id=creative_pack_id,
+            publish_slot=publish_slot or _iso_now(),
+            experiment_variant=str(payload.get("experiment_variant") or "") or None,
+        )
+        generator = LocalScriptGeneratorService()
+        if generator.should_generate(script_text):
+            try:
+                script_text = generator.generate(
+                    theme=theme,
+                    angle=angle,
+                    hook_hint=hook_hint,
+                    account_id=account_id,
+                )
+            except ScriptGenerationError:
+                script_text = _fallback_script(theme=theme, angle=angle, hook_hint=hook_hint)
+        pipeline = ContentPipelineService(
+            tts_adapter=StubTtsAdapter(base_dir=out_dir / "content"),
+            render_adapter=StubRenderAdapter(base_dir=out_dir / "content"),
+            event_path=event_path,
+        )
+        pipeline_output = pipeline.execute(
+            envelope,
+            script_text=script_text or f"Automated pilot content for {account_id}.",
+            caption=caption,
+            hashtags=hashtags,
+        )
+        result = dict(pipeline_output["result"])
+        if str(result.get("status")) != "READY":
+            return {"status": "FAILED", "reason_code": str(result.get("error_code") or "PIPELINE_FAILED")}
+
+        manifest = dict(result["publish_manifest"])
+        record = write_publish_record(
+            {
+                "publish_id": str(manifest["publish_id"]),
+                "account_id": str(manifest["account_id"]),
+                "job_id": str(envelope.job_id),
+                "video_id": f"vid_{manifest['publish_id']}",
+                "platform": "tiktok",
+                "publish_mode": "auto",
+                "status": "posted",
+                "published_at": str(manifest["scheduled_time"]),
+                "created_at": _iso_now(),
+                "metadata": {
+                    "creative_pack_id": envelope.creative_pack_id,
+                    "video_path": manifest["video_path"],
+                    "caption": manifest["caption"],
+                    "hashtags": list(manifest["hashtags"]),
+                    "window_id": task.window_id,
+                },
+            },
+            path=out_dir / "data" / "publish_records" / "publish_records.jsonl",
+        )
+        safety.record_publish_success(account_id=account_id, published_at=current)
+
         target_dir = artifacts_dir / (task.account_id or "unknown") / _safe_fs_name(task.window_id or "window")
         write_json(target_dir / "scorecard.json", {"window_id": task.window_id, "status": "READY"})
         write_json(target_dir / "attribution.json", {"window_id": task.window_id, "status": "READY"})
         write_json(target_dir / "strategy_patch.json", {"window_id": task.window_id, "status": "READY"})
         write_json(target_dir / "patch_application.json", {"window_id": task.window_id, "status": "NOOP"})
-        return {"status": "SUCCEEDED"}
+        write_json(target_dir / "publish_manifest.json", manifest)
+        write_json(target_dir / "publish_record.json", record)
+        return {"status": "SUCCEEDED", "publish_id": record["publish_id"]}
 
     rollout_config = RolloutConfig(
         enabled=True,
@@ -103,6 +192,19 @@ def run_pilot_rollout(
     worker = WorkerRunner.create(queue=queue, deps=deps, prefix="worker")
     execution_results = worker.run_until_empty()
 
+    metrics_results: list[dict[str, object]] = []
+    publish_rows: list[dict[str, object]] = []
+    metrics_collector = MetricsCollectorService(
+        publish_records_path=out_dir / "data" / "publish_records" / "publish_records.jsonl",
+        metrics_path=out_dir / "metrics" / "video_metrics.jsonl",
+        event_path=event_path,
+    )
+    publish_records_path = out_dir / "data" / "publish_records" / "publish_records.jsonl"
+    if publish_records_path.exists():
+        publish_rows = list(read_all_records(publish_records_path))
+        for row in publish_rows:
+            metrics_results.append(metrics_collector.collect_for_publish(publish_id=str(row["publish_id"])))
+
     first_window = next((task.window_id for task in plan.tasks if task.window_id), "")
     succeeded = [result for result in execution_results if result.status.value == "SUCCEEDED"]
     all_succeeded = len(succeeded) == len(execution_results) and len(execution_results) > 0
@@ -119,6 +221,8 @@ def run_pilot_rollout(
         "patch_applied": "NOOP" if all_succeeded else "FAILED",
         "scheduler_enqueued": sum(1 for item in enqueue_results if item["status"] == "WRITTEN"),
         "tasks_executed": len(execution_results),
+        "publish_records_written": len(publish_rows),
+        "metrics_collected": len(metrics_results),
     }
     alerts: list[dict[str, object]] = []
     paths = write_rollout_report(
@@ -131,6 +235,7 @@ def run_pilot_rollout(
         "plan_tasks": len(plan.tasks),
         "enqueue_results": enqueue_results,
         "execution_results": [result.to_dict() for result in execution_results],
+        "metrics_results": metrics_results,
         "report_paths": [str(path) for path in paths],
         "batch_summary": batch_summary,
     }
@@ -142,6 +247,14 @@ def _iso_now() -> str:
 
 def _safe_fs_name(value: str) -> str:
     return value.replace(":", "-")
+
+
+def _fallback_script(*, theme: str, angle: str, hook_hint: str) -> str:
+    return (
+        f"You thought {theme} was simple. "
+        f"But one {angle} kept appearing where it should not have existed. "
+        f"And nobody ever explained {hook_hint}."
+    )
 
 
 if __name__ == "__main__":

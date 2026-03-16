@@ -80,6 +80,9 @@ backend/.tmp_p2/
 .tmp_p2_gha_*
 docker-compose.netem.yml
 
+# --- Local model artifacts ---
+tools/piper/voices/*.onnx
+
 # --- Perf / bench local ---
 *.wrk.log
 *.audit.txt

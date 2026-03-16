@@ -24,6 +24,20 @@ def build_schedule_plan(
             window_start = current - timedelta(hours=72)
             window_id = _window_id(window_start, current)
             scheduled_for = current.isoformat().replace("+00:00", "Z")
+            pipeline_payload = {
+                "window_id": window_id,
+                "policy_stage": policy_stage,
+                "job_id": f"job_{account_id}_{current.strftime('%Y%m%d%H%M%S')}",
+                "creative_pack_id": f"cp_{account_id}_{current.strftime('%Y%m%d')}",
+                "theme": _default_theme_for_account(account_id),
+                "angle": "unexplained detail",
+                "hook_hint": "a detail that should not be there",
+                "publish_slot": scheduled_for,
+                "experiment_variant": "A",
+                "script_text": f"Automated pilot content for {account_id} during window {window_id}.",
+                "caption": f"Pilot batch for {account_id}",
+                "hashtags": [f"#{account_id}", "#cortai", "#pilot"],
+            }
             tasks.extend(
                 [
                     SchedulerTaskRequest(
@@ -44,7 +58,7 @@ def build_schedule_plan(
                         scheduled_for=scheduled_for,
                         window_id=window_id,
                         op_key=f"D10:{account_id}:{window_id}",
-                        payload={"window_id": window_id, "policy_stage": policy_stage},
+                        payload=pipeline_payload,
                     ),
                 ]
             )
@@ -72,7 +86,20 @@ def build_schedule_plan(
                 scheduled_for=scheduled_for,
                 window_id=None,
                 op_key=f"MANUAL:{account_id}:{scheduled_for}",
-                payload={"manual": True, "policy_stage": policy_stage},
+                payload={
+                    "manual": True,
+                    "policy_stage": policy_stage,
+                    "job_id": f"job_{account_id}_{current.strftime('%Y%m%d%H%M%S')}",
+                    "creative_pack_id": f"cp_{account_id}_{current.strftime('%Y%m%d')}",
+                    "theme": _default_theme_for_account(account_id),
+                    "angle": "unexplained detail",
+                    "hook_hint": "a detail that should not be there",
+                    "publish_slot": scheduled_for,
+                    "experiment_variant": "A",
+                    "script_text": f"Manual pilot content for {account_id}.",
+                    "caption": f"Manual pilot batch for {account_id}",
+                    "hashtags": [f"#{account_id}", "#cortai", "#manual"],
+                },
             )
         )
 
@@ -92,3 +119,12 @@ def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _default_theme_for_account(account_id: str) -> str:
+    account = account_id.lower()
+    if "crime" in account:
+        return "unsolved building mystery"
+    if "history" in account:
+        return "forgotten historical anomaly"
+    return "abandoned place mystery"

@@ -1,0 +1,12 @@
+title = "CortAI gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Ignore local virtualenv, cache, and generated artifacts"
+paths = [
+  '''backend/\.venv/''',
+  '''OUT/''',
+  '''__pycache__/''',
+]
