@@ -1,141 +1,211 @@
 # CortAI
 
-CortAI é um **sistema cognitivo determinístico, auditável e extensível**, projetado para executar ciclos de decisão rastreáveis a partir de observações externas, mantendo **separação rígida de responsabilidades** entre núcleo, observação, planejamento e execução.
+CortAI e um sistema de geracao de conteudo short-form com runtime controlado, pipeline auditavel e baseline operacional validada localmente.
 
-Este repositório prioriza **arquitetura antes de comportamento**. Nenhuma camada possui inteligência implícita fora do que está explicitamente contratado em documentação.
+O projeto saiu do estado de prototipo tecnico e hoje possui:
 
----
+- runtime distribuido
+- scheduler e planner
+- safety layer
+- content pipeline com audio, video e metadata
+- publish manifest e publish record canonico
+- metrics collector
+- analysis layer
+- consistency checker
+- batch local validado
 
-## 🎯 Objetivo do Projeto
+## Status
 
-Construir um núcleo cognitivo (*Cognitive Core*) que:
+- Fase 1: concluida
+- Fase 2: especificacao congelada para implementacao
 
-* Seja **determinístico**
-* Seja **auditável via log append-only**
-* Não dependa de estado implícito em memória
-* Permita evolução por **extensão**, nunca por mutação do core
+Documentos principais:
 
-O sistema foi desenhado para permitir observação de eventos (reais ou sintéticos), tomada de decisão controlada e execução externa, mantendo histórico completo de causa → decisão → efeito.
+- `docs/runtime/phase1_completion_report_v1_0.md`
+- `docs/runtime/phase2_definition_report_v1_0.md`
+- `docs/runtime/phase2_implementation_map_v1_0.md`
+- `docs/runtime/pre_d23_final_release_audit_gate_v1_0.md`
 
----
+## Objetivo do Projeto
 
-## 🧠 Arquitetura Geral
+O objetivo do CortAI e operar um loop completo de geracao e avaliacao de conteudo:
 
-O sistema é dividido em camadas contratuais:
-
-* **Cognitive Core** (congelado)
-* **Observer Layer** (entrada de eventos)
-* **Planner Layer** (decisão futura / extensão)
-* **Executor Layer** (efeitos no mundo)
-
-A arquitetura é regida por contratos em arquivos `.md`. Código **nunca** precede contrato.
-
-```
-CortAI/
-├── backend/
-│   └── app/
-│       └── cognitive_core.py
-├── storage/
-│   ├── audit_log.jsonl
-│   └── process_id.txt
-├── CORTAI_CORE.md
-├── OBSERVER_LAYER.md
-├── EXECUTOR_LAYER.md
-├── PLANNER_LAYER.md
-├── ARCHITECTURE_FREEZE.md
-├── TEST_STRATEGY.md
-├── EXTENSION_MAP.md
-├── README.md
-└── checklist.md
+```text
+scheduler
+-> runtime
+-> safety
+-> content pipeline
+-> publish manifest
+-> publish_record
+-> metrics collector
+-> analysis
+-> consistency validation
 ```
 
----
+Na Fase 1, o foco foi provar que esse loop funciona de forma automatizada, consistente e auditavel.
 
-## 🔒 Estado Atual do Core
+Na Fase 2, o foco passa a ser a camada cognitiva:
 
-O **Cognitive Core está congelado**.
+- contexto de tendencia
+- estrategia por conta
+- geracao de script orientada por retencao
+- selecao de voz
+- selecao de assets
+- video QC
+- learning loop
 
-Isso significa:
+## Arquitetura Atual
 
-* Nenhuma alteração estrutural é permitida
-* Nenhuma nova responsabilidade será adicionada
-* Qualquer evolução ocorre **fora** do core
+Camadas principais:
 
-O congelamento está formalizado em `ARCHITECTURE_FREEZE.md`.
+- `backend/app/runtime/`
+  - executor
+  - worker
+  - scheduler
+  - rollout
+- `backend/app/content/`
+  - pipeline
+  - script generation
+  - screen text
+  - backgrounds
+- `backend/app/safety/`
+- `backend/app/analysis/`
+- `backend/app/creative/`
+  - reservado para a implementacao da Fase 2
 
----
+Persistencia e artefatos:
 
-## 🧾 Persistência e Auditoria
+- `OUT/`
+- `assets/`
+- `tools/`
 
-O sistema utiliza apenas **persistência append-only**:
+Documentacao operacional:
 
-* `storage/audit_log.jsonl`
+- `docs/runtime/`
 
-  * Registro sequencial de `State`, `Decision` e `Outcome`
-* `storage/process_id.txt`
+Scripts operacionais:
 
-  * Identidade persistente do processo
+- `backend/scripts/run_pre_d23_final_release_audit_gate.ps1`
+- `backend/scripts/run_local_d23_18_batch.py`
 
-Não existe deleção, sobrescrita ou mutação de histórico.
+## O que foi validado na Fase 1
 
----
+Infraestrutura:
 
-## 🧪 Testes
+- PostgreSQL
+- Redis
+- MinIO
+- Docker Compose
+- probes de health/readiness
 
-A estratégia de testes está documentada em `TEST_STRATEGY.md` e prioriza:
+Pipeline operacional:
 
-* Validação estrutural
-* Consistência de contratos
-* Rastreabilidade de ciclos
+- `ExecutionEnvelope`
+- `PipelineResult`
+- `PublishManifest`
+- videos reais `1080x1920`
+- audio presente
+- metadata gerada
 
-Testes comportamentais só existem **fora** do core.
+Governanca:
 
-### Execução Reprodutível (API Metrics)
+- safety com `ALLOW`, `DELAY`, `BLOCK`
+- idempotencia por chave
+- `publish_record` canonico
+- metrics consumindo estado canonico
+- analysis e consistency funcionando
 
-Os testes de `backend/tests/test_metrics_api.py` dependem de PostgreSQL.
+Auditoria:
 
-Local (host):
+- gate final pre-D23 executado com `GO`
+- batch local de 18 videos executado com `PASS`
 
-```bash
-PYTHONPATH=backend \
-DATABASE_URL="postgresql://<user>:<pass>@<host>:5432/<db_test>" \
-pytest -q backend/tests/test_metrics_api.py
+## Como rodar os checks principais
+
+### Gate final pre-D23
+
+```powershell
+./backend/scripts/run_pre_d23_final_release_audit_gate.ps1
 ```
 
-Container da API (mesmas dependências do CI):
+Saida principal:
 
-```bash
-docker exec -it cortai_api sh -lc '
-  PYTHONPATH=/app \
-  DATABASE_URL="postgresql://cortai_admin:cortai_secret_pass_123@db:5432/cortai_db" \
-  pytest -q tests/test_metrics_api.py
-'
+- `OUT/audit/pre_d23_final_gate/AUDIT_REPORT.md`
+
+### Batch local validado
+
+```powershell
+python backend/scripts/run_local_d23_18_batch.py
 ```
 
-Recomendado: usar banco dedicado de teste (ex.: `cortai_db_test`).
+Validacao posterior:
 
----
+```powershell
+python backend/scripts/run_local_d23_18_batch.py --validate-only --base-dir OUT/batches/<batch_dir>
+```
 
-## 🚦 Princípios Fundamentais
+## Testes
 
-* **Contrato antes de código**
-* **Core imutável**
-* **Extensão explícita**
-* **Nenhuma inteligência implícita**
-* **Auditoria como feature primária**
+Executar a suite critica atual:
 
----
+```powershell
+python -m unittest -q ^
+  tests.test_content_pipeline_d27_unittest ^
+  tests.test_script_generation_unittest ^
+  tests.test_screen_text_adapter_unittest
+```
 
-## 📌 Próxima Fase
+O gate final tambem cobre:
 
-A próxima etapa do projeto é a **configuração do ambiente de execução controlado** (chat no VS Code), antes de iniciar observação real.
+- build
+- regressao
+- smoke runtime
+- consistency
+- security checks
+- video QC
 
-Nenhuma integração externa deve ser feita antes disso.
+## Regras Arquiteturais
 
----
+- contrato antes de extensao
+- nao quebrar contratos da Fase 1
+- `publish_record` e `metrics` continuam canonicos
+- safety nao pode ser contornado
+- pipeline nao escreve `publish_record` diretamente
+- Fase 2 nao substitui runtime nem pipeline; ela decide, a Fase 1 executa
 
-## ⚠️ Aviso
+## Fase 2
 
-Este projeto não é um playground experimental.
+A Fase 2 esta especificada e congelada para implementacao.
 
-Qualquer alteração fora do fluxo definido quebra garantias arquiteturais e invalida rastreabilidade.
+Documentos-base:
+
+- `docs/runtime/phase2_definition_report_v1_0.md`
+- `docs/runtime/phase2_implementation_map_v1_0.md`
+
+Escopo da Fase 2:
+
+- `Creative Orchestrator Service`
+- `Trend Analysis Agent`
+- `Strategy Agent`
+- `Script Agent`
+- `Voice Agent`
+- `Asset Selection Agent`
+- `Video QC Agent`
+- `Account Health Agent`
+- `Learning and Optimization Agent`
+- `Experiment Capability`
+
+## Observacoes
+
+- o modelo local do Piper `.onnx` nao fica versionado no Git por causa do limite de tamanho do GitHub
+- artefatos operacionais em `OUT/` podem ser limpos entre batches
+- este repositorio prioriza auditabilidade e integridade operacional antes de qualidade criativa premium
+
+## Estado Atual
+
+O projeto esta pronto para:
+
+- preservar a baseline da Fase 1
+- iniciar implementacao controlada da Fase 2
+
+O proximo passo arquitetural correto e construir a camada `backend/app/creative/` seguindo os contratos congelados em `docs/runtime/phase2_implementation_map_v1_0.md`.
