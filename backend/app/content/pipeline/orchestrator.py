@@ -8,6 +8,7 @@ from typing import Any, Callable, Protocol
 from app.content.pipeline.models import ExecutionEnvelope, PipelineResult, RenderJob, RenderJobStatus
 from app.content.pipeline.publish import PublishAdapter, PublishTransientError, StubPublishAdapter
 from app.content.pipeline.render import RenderAdapter, RenderTransientError, StubRenderAdapter
+from app.content.screen_text.service import ScreenTextAdapterService
 from app.content.pipeline.tts import StubTtsAdapter, TtsAdapter, TtsTransientError
 
 
@@ -98,13 +99,15 @@ class ContentPipelineOrchestrator:
         tts_adapter = self.tts_adapter or StubTtsAdapter()
         render_adapter = self.render_adapter or StubRenderAdapter()
         publish_adapter = self.publish_adapter or StubPublishAdapter()
+        screen_blocks = ScreenTextAdapterService().adapt(script_text)
+        narration_text = screen_blocks.narration_text()
 
         try:
             job = self._update_job(job, status=RenderJobStatus.TTS_RUNNING)
             self._emit("CONTENT/tts_started", job, {"creative_pack_id": envelope.creative_pack_id}, events_emitted)
             tts_output, tts_attempts = self._retry(
                 lambda attempt: tts_adapter.generate_audio(
-                    script_text=script_text,
+                    script_text=narration_text,
                     voice_profile=voice_profile,
                     language=language,
                     render_job_id=job.render_job_id,
@@ -125,6 +128,9 @@ class ContentPipelineOrchestrator:
             render_output, render_attempts = self._retry(
                 lambda attempt: render_adapter.render_video(
                     audio_path=str(job.audio_path),
+                    script_text=script_text,
+                    screen_blocks=screen_blocks.as_list(),
+                    segment_durations=tts_output.segment_durations,
                     render_job_id=job.render_job_id,
                     template_id=template_id,
                     aspect_ratio=aspect_ratio,

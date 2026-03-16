@@ -122,6 +122,108 @@ class ContentPipelineD27Tests(unittest.TestCase):
         self.assertEqual(result["result"]["status"], "FAILED")
         self.assertIn("CONTENT/pipeline_failed", result["result"]["events_emitted"])
 
+    def test_render_generates_ass_subtitles_with_stable_styles_and_escaping(self) -> None:
+        result = self.service.execute(
+            self._envelope(creative_pack_id="cp_ass"),
+            script_text=(
+                "In the old motel, someone wrote: \"don't look back,\" on the mirror. "
+                "Who left that warning: the night guard, or someone else? "
+                "Then the lights failed, and the door wouldn't open."
+            ),
+            caption="caption",
+            hashtags=["#ass"],
+        )
+
+        self.assertEqual(result["result"]["status"], "READY")
+        render_job_id = result["result"]["render_job_id"]
+        metadata_path = self.out / "content" / "metadata" / f"{render_job_id}.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        subtitle_path = Path(metadata["subtitle_path"])
+        self.assertTrue(subtitle_path.exists())
+
+        subtitle_text = subtitle_path.read_text(encoding="utf-8")
+        self.assertIn("Style: HookStyle", subtitle_text)
+        self.assertIn("Style: BodyStyle", subtitle_text)
+        self.assertIn("Style: PayoffStyle", subtitle_text)
+        self.assertIn(r"{\fad(120,120)}", subtitle_text)
+        self.assertIn(r"\N", subtitle_text)
+        self.assertNotIn("\u2019", subtitle_text)
+        self.assertNotIn("\u201c", subtitle_text)
+        self.assertNotIn("\u201d", subtitle_text)
+        self.assertIn(r"SOMEONE WROTE ON\NTHE MIRROR", subtitle_text)
+        self.assertIn(r"WHO LEFT THE\NWARNING?", subtitle_text)
+        self.assertIn(r"THE DOOR WOULDN'T\NOPEN", subtitle_text)
+
+        cues = metadata["subtitle_cues"]
+        self.assertEqual([cue["style_role"] for cue in cues], ["hook", "setup", "payoff"])
+        self.assertEqual(cues[0]["start"], 0.0)
+        self.assertLess(cues[0]["start"], cues[0]["end"])
+        self.assertLess(cues[1]["start"], cues[1]["end"])
+        self.assertLess(cues[2]["start"], cues[2]["end"])
+        self.assertTrue(all(len(cue["text"].splitlines()) <= 3 for cue in cues))
+
+    def test_render_preserves_three_line_body_when_needed(self) -> None:
+        result = self.service.execute(
+            self._envelope(creative_pack_id="cp_three_line"),
+            script_text=(
+                "Workers sealed the tunnel decades ago, but a single light still blinked behind the concrete. "
+                "Nobody could explain the sound coming from inside. "
+                "Then the wall answered with three knocks."
+            ),
+            caption="caption",
+            hashtags=["#three"],
+        )
+
+        self.assertEqual(result["result"]["status"], "READY")
+        render_job_id = result["result"]["render_job_id"]
+        metadata_path = self.out / "content" / "metadata" / f"{render_job_id}.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        cues = metadata["subtitle_cues"]
+        self.assertEqual(len(cues[1]["text"].splitlines()), 3)
+        self.assertIn("INSIDE", cues[1]["text"])
+        self.assertIn("EXPLAIN", cues[1]["text"])
+
+    def test_render_preserves_three_line_hook_when_needed(self) -> None:
+        result = self.service.execute(
+            self._envelope(creative_pack_id="cp_three_line_hook"),
+            script_text=(
+                "Workers sealed the tunnel decades ago, but a single light still blinked behind the concrete. "
+                "Nobody could explain the sound coming from inside. "
+                "Then the wall answered with three knocks."
+            ),
+            caption="caption",
+            hashtags=["#hook3"],
+        )
+
+        self.assertEqual(result["result"]["status"], "READY")
+        render_job_id = result["result"]["render_job_id"]
+        metadata_path = self.out / "content" / "metadata" / f"{render_job_id}.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        cues = metadata["subtitle_cues"]
+        self.assertEqual(len(cues[0]["text"].splitlines()), 3)
+        self.assertIn("WORKERS", cues[0]["text"])
+        self.assertIn("DECADES", cues[0]["text"])
+
+    def test_fit_text_preserves_semantic_tail_in_hook(self) -> None:
+        normalized = self.service.render_adapter._normalize_block(  # noqa: SLF001
+            "AT ABANDONED TRAIN PLATFORM, ONE TIMETABLE KEPT",
+            role="hook",
+        )
+
+        self.assertIn("KEPT", normalized)
+        self.assertNotIn("ONE", normalized.replace("\n", " ").split())
+        self.assertLessEqual(len(normalized.splitlines()), 3)
+
+    def test_fit_text_preserves_semantic_tail_in_payoff(self) -> None:
+        normalized = self.service.render_adapter._normalize_block(  # noqa: SLF001
+            "THEN FINAL DEPARTURE APPEARED STATION NEVER EXISTED",
+            role="payoff",
+        )
+
+        self.assertIn("EXISTED", normalized)
+        self.assertIn("NEVER", normalized)
+        self.assertLessEqual(len(normalized.splitlines()), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

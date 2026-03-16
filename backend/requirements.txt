@@ -34,6 +34,7 @@ python-dotenv==1.0.1
 yt-dlp>=2026.2.21         # Download de videos com fix de CVE e extractors recentes
 ffmpeg-python==0.2.0      # Wrapper para FFmpeg
 moviepy==1.0.3            # Edicao programatica
+edge-tts==6.1.19          # TTS leve para MVP de voz real
 playwright                # Controla navegadores headless
 openai==1.13.3            # Client compativel com Ollama
 

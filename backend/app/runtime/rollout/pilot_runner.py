@@ -10,6 +10,7 @@ from app.content.pipeline.models import ExecutionEnvelope
 from app.content.pipeline.render import StubRenderAdapter
 from app.content.pipeline.service import ContentPipelineService
 from app.content.pipeline.tts import StubTtsAdapter
+from app.content.script_gen.service import LocalScriptGeneratorService, ScriptGenerationError
 from app.concurrency.idempotency import IdempotencyManager
 from app.concurrency.lease import LeaseManager
 from app.data.publish_records.store_jsonl import read_all_records
@@ -80,6 +81,9 @@ def run_pilot_rollout(
         script_text = str(payload.get("script_text") or "").strip()
         caption = str(payload.get("caption") or "")
         hashtags = [str(item) for item in list(payload.get("hashtags") or [])]
+        theme = str(payload.get("theme") or "abandoned place mystery").strip()
+        angle = str(payload.get("angle") or "unexplained detail").strip()
+        hook_hint = str(payload.get("hook_hint") or "a detail that should not be there").strip()
 
         safety = SafetyService(
             safety_dir=out_dir / "safety",
@@ -98,6 +102,17 @@ def run_pilot_rollout(
             publish_slot=publish_slot or _iso_now(),
             experiment_variant=str(payload.get("experiment_variant") or "") or None,
         )
+        generator = LocalScriptGeneratorService()
+        if generator.should_generate(script_text):
+            try:
+                script_text = generator.generate(
+                    theme=theme,
+                    angle=angle,
+                    hook_hint=hook_hint,
+                    account_id=account_id,
+                )
+            except ScriptGenerationError:
+                script_text = _fallback_script(theme=theme, angle=angle, hook_hint=hook_hint)
         pipeline = ContentPipelineService(
             tts_adapter=StubTtsAdapter(base_dir=out_dir / "content"),
             render_adapter=StubRenderAdapter(base_dir=out_dir / "content"),
@@ -232,6 +247,14 @@ def _iso_now() -> str:
 
 def _safe_fs_name(value: str) -> str:
     return value.replace(":", "-")
+
+
+def _fallback_script(*, theme: str, angle: str, hook_hint: str) -> str:
+    return (
+        f"You thought {theme} was simple. "
+        f"But one {angle} kept appearing where it should not have existed. "
+        f"And nobody ever explained {hook_hint}."
+    )
 
 
 if __name__ == "__main__":

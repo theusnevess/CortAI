@@ -29,6 +29,9 @@ def build_schedule_plan(
                 "policy_stage": policy_stage,
                 "job_id": f"job_{account_id}_{current.strftime('%Y%m%d%H%M%S')}",
                 "creative_pack_id": f"cp_{account_id}_{current.strftime('%Y%m%d')}",
+                "theme": _default_theme_for_account(account_id),
+                "angle": "unexplained detail",
+                "hook_hint": "a detail that should not be there",
                 "publish_slot": scheduled_for,
                 "experiment_variant": "A",
                 "script_text": f"Automated pilot content for {account_id} during window {window_id}.",
@@ -88,6 +91,9 @@ def build_schedule_plan(
                     "policy_stage": policy_stage,
                     "job_id": f"job_{account_id}_{current.strftime('%Y%m%d%H%M%S')}",
                     "creative_pack_id": f"cp_{account_id}_{current.strftime('%Y%m%d')}",
+                    "theme": _default_theme_for_account(account_id),
+                    "angle": "unexplained detail",
+                    "hook_hint": "a detail that should not be there",
                     "publish_slot": scheduled_for,
                     "experiment_variant": "A",
                     "script_text": f"Manual pilot content for {account_id}.",
@@ -113,3 +119,12 @@ def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _default_theme_for_account(account_id: str) -> str:
+    account = account_id.lower()
+    if "crime" in account:
+        return "unsolved building mystery"
+    if "history" in account:
+        return "forgotten historical anomaly"
+    return "abandoned place mystery"
