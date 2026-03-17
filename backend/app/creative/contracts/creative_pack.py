@@ -6,9 +6,11 @@ from typing import Any
 
 @dataclass(frozen=True)
 class StrategyProfile:
-    pacing: str = "baseline"
-    hook_intensity: str = "medium"
-    target_duration_s: int = 10
+    goal: str = "retention"
+    content_mode: str = "standard"
+    hook_aggressiveness: str = "medium"
+    target_duration_range: str = "8-12s"
+    variation_policy: str = "low"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -91,6 +93,8 @@ class CreativePack:
     experiment_assignment: ExperimentAssignment | None
     generated_at: str
     orchestrator_version: str
+    account_health_status: str = "SAFE"
+    recommended_constraints: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
