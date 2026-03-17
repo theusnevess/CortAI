@@ -76,6 +76,32 @@ class AssetPlan:
 
 
 @dataclass(frozen=True)
+class LearningInsights:
+    recommended_hook_type: str = "question"
+    target_duration_range: str = "8-12s"
+    preferred_visual_style: str = "phase1_baseline"
+    preferred_voice_style: str = "phase1_baseline"
+    saturation_signal: str = "baseline"
+    recommendations: list[str] = field(default_factory=list)
+    signal_summary: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ExperimentPlan:
+    experiment_id: str = "exp_default"
+    variant_id: str = "A"
+    variant_type: str = "baseline"
+    variant_params: dict[str, Any] = field(default_factory=dict)
+    fallback_used: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class ExperimentAssignment:
     experiment_id: str
     variant_id: str
@@ -95,6 +121,8 @@ class CreativePack:
     script_plan: ScriptPlan
     voice_plan: VoicePlan
     asset_plan: AssetPlan
+    learning_insights: LearningInsights
+    experiment_plan: ExperimentPlan
     experiment_assignment: ExperimentAssignment | None
     generated_at: str
     orchestrator_version: str
@@ -109,6 +137,8 @@ class CreativePack:
         payload["voice_plan"] = self.voice_plan.to_dict()
         payload["asset_plan"] = self.asset_plan.to_dict()
         payload["asset_selection"] = self.asset_plan.to_dict()
+        payload["learning_insights"] = self.learning_insights.to_dict()
+        payload["experiment_plan"] = self.experiment_plan.to_dict()
         if self.experiment_assignment is not None:
             payload["experiment_assignment"] = self.experiment_assignment.to_dict()
         return payload

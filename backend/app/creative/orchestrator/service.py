@@ -6,6 +6,8 @@ from hashlib import sha256
 from pathlib import Path
 
 from app.content.pipeline.service import ContentPipelineService
+from app.creative.agents.learning.models import LearningAgentInput
+from app.creative.agents.learning.service import LearningAgentService
 from app.creative.agents.asset_selection.models import AssetSelectionInput
 from app.creative.agents.asset_selection.service import AssetSelectionAgentService
 from app.creative.agents.account_health.models import AccountHealthInput
@@ -17,8 +19,10 @@ from app.creative.agents.trend_analysis.service import TrendAnalysisAgentService
 from app.creative.agents.script.service import ScriptAgentService
 from app.creative.agents.voice.service import VoiceAgentService
 from app.creative.agents.video_qc.service import VideoQcAgentService
-from app.creative.contracts.creative_pack import AssetPlan, CreativePack, StrategyProfile, TrendProfile
+from app.creative.contracts.creative_pack import CreativePack, ExperimentAssignment
 from app.creative.contracts.orchestrator_io import CreativeOrchestratorInput, CreativeOrchestratorResult
+from app.creative.experiments.models import ExperimentCapabilityInput
+from app.creative.experiments.service import ExperimentCapabilityService
 from app.creative.orchestrator.events import CreativeEventEmitter
 from app.creative.orchestrator.models import CreativePipelineExecution
 
@@ -37,16 +41,18 @@ class CreativeOrchestratorService:
     pipeline_service: ContentPipelineService = field(default_factory=ContentPipelineService)
     account_health_agent: AccountHealthAgentService = field(default_factory=AccountHealthAgentService)
     trend_analysis_agent: TrendAnalysisAgentService = field(default_factory=TrendAnalysisAgentService)
+    learning_agent: LearningAgentService = field(default_factory=LearningAgentService)
     strategy_agent: StrategyAgentService = field(default_factory=StrategyAgentService)
+    experiment_capability: ExperimentCapabilityService = field(default_factory=ExperimentCapabilityService)
     asset_selection_agent: AssetSelectionAgentService = field(default_factory=AssetSelectionAgentService)
     script_agent: ScriptAgentService = field(default_factory=ScriptAgentService)
     voice_agent: VoiceAgentService = field(default_factory=VoiceAgentService)
     video_qc_agent: VideoQcAgentService = field(default_factory=VideoQcAgentService)
     event_emitter: CreativeEventEmitter = field(default_factory=CreativeEventEmitter)
-    orchestrator_version: str = "phase2-block3"
+    orchestrator_version: str = "phase2-block4"
 
     def build_creative_pack(self, data: CreativeOrchestratorInput) -> CreativeOrchestratorResult:
-        account_health, trend_result, strategy_result, asset_selection_result = self._resolve_account_context(data)
+        account_health, trend_result, learning_result, strategy_result, experiment_result, asset_selection_result = self._resolve_account_context(data)
         if account_health.decision.status == "HOLD":
             raise AccountHealthHoldError("ACCOUNT_HEALTH_HOLD")
 
@@ -54,17 +60,21 @@ class CreativeOrchestratorService:
             data=data,
             account_health=account_health,
             trend_result=trend_result,
+            learning_result=learning_result,
             strategy_result=strategy_result,
+            experiment_result=experiment_result,
             asset_selection_result=asset_selection_result,
         )
 
     def execute(self, data: CreativeOrchestratorInput) -> CreativePipelineExecution:
         try:
-            account_health, trend_result, strategy_result, asset_selection_result = self._resolve_account_context(data)
+            account_health, trend_result, learning_result, strategy_result, experiment_result, asset_selection_result = self._resolve_account_context(data)
         except Exception:
             account_health = None
             trend_result = None
+            learning_result = None
             strategy_result = None
+            experiment_result = None
             asset_selection_result = None
 
         if account_health is not None and account_health.decision.status == "HOLD":
@@ -83,7 +93,9 @@ class CreativeOrchestratorService:
                 video_qc=None,
                 account_health=account_health,
                 trend_analysis=trend_result,
+                learning=learning_result,
                 strategy=strategy_result,
+                experiment=experiment_result,
                 asset_selection=asset_selection_result,
             )
 
@@ -91,7 +103,9 @@ class CreativeOrchestratorService:
             data=data,
             account_health=account_health,
             trend_result=trend_result,
+            learning_result=learning_result,
             strategy_result=strategy_result,
+            experiment_result=experiment_result,
             asset_selection_result=asset_selection_result,
         )
         creative_pack = result.creative_pack
@@ -101,6 +115,7 @@ class CreativeOrchestratorService:
             script_text=creative_pack.script_plan.narration_text(),
             voice_profile=creative_pack.voice_plan.voice_id,
             publish_slot=data.publish_slot,
+            experiment_variant=creative_pack.experiment_plan.variant_id,
         )
         qc_result = self.video_qc_agent.evaluate(
             render_job_id=str(pipeline_output["result"].get("render_job_id") or ""),
@@ -125,7 +140,9 @@ class CreativeOrchestratorService:
             video_qc=qc_result,
             account_health=account_health,
             trend_analysis=trend_result,
+            learning=learning_result,
             strategy=strategy_result,
+            experiment=experiment_result,
             asset_selection=asset_selection_result,
         )
 
@@ -135,13 +152,27 @@ class CreativeOrchestratorService:
     ):
         account_health = self.account_health_agent.evaluate(AccountHealthInput(account_id=data.account_id))
         trend_result = self.trend_analysis_agent.load(TrendAnalysisInput(niche=data.niche))
+        learning_result = self.learning_agent.generate(
+            LearningAgentInput(
+                account_id=data.account_id,
+            )
+        )
         strategy_result = self.strategy_agent.generate(
             StrategyInput(
                 account_id=data.account_id,
                 account_goal="retention",
-                recent_metrics_summary={},
+                recent_metrics_summary=dict(learning_result.learning_insights.signal_summary),
                 health_status=account_health.decision.status,
                 recommended_constraints=dict(account_health.decision.recommended_constraints),
+            )
+        )
+        experiment_result = self.experiment_capability.generate(
+            ExperimentCapabilityInput(
+                account_id=data.account_id,
+                niche=data.niche,
+                topic=data.topic,
+                publish_slot=data.publish_slot,
+                learning_insights=learning_result.learning_insights,
             )
         )
         asset_selection_result = self.asset_selection_agent.select(
@@ -152,7 +183,7 @@ class CreativeOrchestratorService:
                 trend_profile=trend_result.trend_profile,
             )
         )
-        return account_health, trend_result, strategy_result, asset_selection_result
+        return account_health, trend_result, learning_result, strategy_result, experiment_result, asset_selection_result
 
     def _build_creative_pack_from_context(
         self,
@@ -160,7 +191,9 @@ class CreativeOrchestratorService:
         data: CreativeOrchestratorInput,
         account_health,
         trend_result,
+        learning_result,
         strategy_result,
+        experiment_result,
         asset_selection_result,
     ) -> CreativeOrchestratorResult:
         events: list[str] = []
@@ -202,6 +235,27 @@ class CreativeOrchestratorService:
                 },
                 events=events,
             )
+        if learning_result.fallback.used:
+            fallbacks.append(f"learning:{learning_result.fallback.reason}")
+            self._emit(
+                "CREATIVE/learning_insights_fallback",
+                data={
+                    "account_id": data.account_id,
+                    "fallback_used": True,
+                },
+                events=events,
+            )
+        else:
+            self._emit(
+                "CREATIVE/learning_insights_generated",
+                data={
+                    "account_id": data.account_id,
+                    "recommended_hook_type": learning_result.learning_insights.recommended_hook_type,
+                    "target_duration_range": learning_result.learning_insights.target_duration_range,
+                    "fallback_used": False,
+                },
+                events=events,
+            )
         self._emit(
             "CREATIVE/strategy_profile_generated",
             data={
@@ -213,6 +267,28 @@ class CreativeOrchestratorService:
             },
             events=events,
         )
+        if experiment_result.fallback.used:
+            fallbacks.append(f"experiment:{experiment_result.fallback.reason}")
+            self._emit(
+                "CREATIVE/experiment_plan_fallback",
+                data={
+                    "account_id": data.account_id,
+                    "fallback_used": True,
+                },
+                events=events,
+            )
+        else:
+            self._emit(
+                "CREATIVE/experiment_plan_generated",
+                data={
+                    "account_id": data.account_id,
+                    "experiment_id": experiment_result.experiment_plan.experiment_id,
+                    "variant_id": experiment_result.experiment_plan.variant_id,
+                    "variant_type": experiment_result.experiment_plan.variant_type,
+                    "fallback_used": False,
+                },
+                events=events,
+            )
         if asset_selection_result.fallback.used:
             fallbacks.append(f"asset_selection:{asset_selection_result.fallback.reason}")
             self._emit(
@@ -284,7 +360,12 @@ class CreativeOrchestratorService:
             script_plan=script_result.script_plan,
             voice_plan=voice_result.voice_plan,
             asset_plan=asset_selection_result.asset_selection,
-            experiment_assignment=None,
+            learning_insights=learning_result.learning_insights,
+            experiment_plan=experiment_result.experiment_plan,
+            experiment_assignment=None if experiment_result is None else ExperimentAssignment(
+                experiment_id=experiment_result.experiment_plan.experiment_id,
+                variant_id=experiment_result.experiment_plan.variant_id,
+            ),
             account_health_status=account_health.decision.status,
             recommended_constraints=dict(account_health.decision.recommended_constraints),
             generated_at=_now_iso(),
