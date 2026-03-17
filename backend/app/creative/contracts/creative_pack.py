@@ -18,8 +18,12 @@ class StrategyProfile:
 
 @dataclass(frozen=True)
 class TrendProfile:
+    niche: str = "default"
     dominant_hooks: list[str] = field(default_factory=list)
+    avg_duration: str = "8-12"
+    pacing: str = "baseline"
     visual_style: str = "phase1_baseline"
+    text_style: str = "caption_focus"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -64,6 +68,7 @@ class AssetPlan:
     hook_asset: str = ""
     setup_asset: str = ""
     payoff_asset: str = ""
+    visual_style: str = "phase1_baseline"
     motion_profile: str = "phase1_baseline"
 
     def to_dict(self) -> dict[str, Any]:
@@ -103,6 +108,7 @@ class CreativePack:
         payload["script_plan"] = self.script_plan.to_dict()
         payload["voice_plan"] = self.voice_plan.to_dict()
         payload["asset_plan"] = self.asset_plan.to_dict()
+        payload["asset_selection"] = self.asset_plan.to_dict()
         if self.experiment_assignment is not None:
             payload["experiment_assignment"] = self.experiment_assignment.to_dict()
         return payload

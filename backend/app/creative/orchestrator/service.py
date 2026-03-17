@@ -6,10 +6,14 @@ from hashlib import sha256
 from pathlib import Path
 
 from app.content.pipeline.service import ContentPipelineService
+from app.creative.agents.asset_selection.models import AssetSelectionInput
+from app.creative.agents.asset_selection.service import AssetSelectionAgentService
 from app.creative.agents.account_health.models import AccountHealthInput
 from app.creative.agents.account_health.service import AccountHealthAgentService
 from app.creative.agents.strategy.models import StrategyInput
 from app.creative.agents.strategy.service import StrategyAgentService
+from app.creative.agents.trend_analysis.models import TrendAnalysisInput
+from app.creative.agents.trend_analysis.service import TrendAnalysisAgentService
 from app.creative.agents.script.service import ScriptAgentService
 from app.creative.agents.voice.service import VoiceAgentService
 from app.creative.agents.video_qc.service import VideoQcAgentService
@@ -32,30 +36,36 @@ def _build_creative_pack_id(*, account_id: str, niche: str, topic: str, publish_
 class CreativeOrchestratorService:
     pipeline_service: ContentPipelineService = field(default_factory=ContentPipelineService)
     account_health_agent: AccountHealthAgentService = field(default_factory=AccountHealthAgentService)
+    trend_analysis_agent: TrendAnalysisAgentService = field(default_factory=TrendAnalysisAgentService)
     strategy_agent: StrategyAgentService = field(default_factory=StrategyAgentService)
+    asset_selection_agent: AssetSelectionAgentService = field(default_factory=AssetSelectionAgentService)
     script_agent: ScriptAgentService = field(default_factory=ScriptAgentService)
     voice_agent: VoiceAgentService = field(default_factory=VoiceAgentService)
     video_qc_agent: VideoQcAgentService = field(default_factory=VideoQcAgentService)
     event_emitter: CreativeEventEmitter = field(default_factory=CreativeEventEmitter)
-    orchestrator_version: str = "phase2-block2"
+    orchestrator_version: str = "phase2-block3"
 
     def build_creative_pack(self, data: CreativeOrchestratorInput) -> CreativeOrchestratorResult:
-        account_health, strategy_result = self._resolve_account_context(data)
+        account_health, trend_result, strategy_result, asset_selection_result = self._resolve_account_context(data)
         if account_health.decision.status == "HOLD":
             raise AccountHealthHoldError("ACCOUNT_HEALTH_HOLD")
 
         return self._build_creative_pack_from_context(
             data=data,
             account_health=account_health,
+            trend_result=trend_result,
             strategy_result=strategy_result,
+            asset_selection_result=asset_selection_result,
         )
 
     def execute(self, data: CreativeOrchestratorInput) -> CreativePipelineExecution:
         try:
-            account_health, strategy_result = self._resolve_account_context(data)
+            account_health, trend_result, strategy_result, asset_selection_result = self._resolve_account_context(data)
         except Exception:
             account_health = None
+            trend_result = None
             strategy_result = None
+            asset_selection_result = None
 
         if account_health is not None and account_health.decision.status == "HOLD":
             self.event_emitter.emit(
@@ -72,13 +82,17 @@ class CreativeOrchestratorService:
                 pipeline_output={"result": {"status": "HOLD", "render_job_id": None, "artifacts": {}}},
                 video_qc=None,
                 account_health=account_health,
+                trend_analysis=trend_result,
                 strategy=strategy_result,
+                asset_selection=asset_selection_result,
             )
 
         result = self._build_creative_pack_from_context(
             data=data,
             account_health=account_health,
+            trend_result=trend_result,
             strategy_result=strategy_result,
+            asset_selection_result=asset_selection_result,
         )
         creative_pack = result.creative_pack
         pipeline_output = self.pipeline_service.run_pipeline(
@@ -110,7 +124,9 @@ class CreativeOrchestratorService:
             pipeline_output=pipeline_output,
             video_qc=qc_result,
             account_health=account_health,
+            trend_analysis=trend_result,
             strategy=strategy_result,
+            asset_selection=asset_selection_result,
         )
 
     def _resolve_account_context(
@@ -118,6 +134,7 @@ class CreativeOrchestratorService:
         data: CreativeOrchestratorInput,
     ):
         account_health = self.account_health_agent.evaluate(AccountHealthInput(account_id=data.account_id))
+        trend_result = self.trend_analysis_agent.load(TrendAnalysisInput(niche=data.niche))
         strategy_result = self.strategy_agent.generate(
             StrategyInput(
                 account_id=data.account_id,
@@ -127,14 +144,24 @@ class CreativeOrchestratorService:
                 recommended_constraints=dict(account_health.decision.recommended_constraints),
             )
         )
-        return account_health, strategy_result
+        asset_selection_result = self.asset_selection_agent.select(
+            AssetSelectionInput(
+                niche=data.niche,
+                topic=data.topic,
+                strategy_profile=strategy_result.strategy_profile,
+                trend_profile=trend_result.trend_profile,
+            )
+        )
+        return account_health, trend_result, strategy_result, asset_selection_result
 
     def _build_creative_pack_from_context(
         self,
         *,
         data: CreativeOrchestratorInput,
         account_health,
+        trend_result,
         strategy_result,
+        asset_selection_result,
     ) -> CreativeOrchestratorResult:
         events: list[str] = []
         fallbacks: list[str] = []
@@ -153,6 +180,28 @@ class CreativeOrchestratorService:
         )
         if strategy_result.fallback.used:
             fallbacks.append(f"strategy:{strategy_result.fallback.reason}")
+        if trend_result.fallback.used:
+            fallbacks.append(f"trend:{trend_result.fallback.reason}")
+            self._emit(
+                "CREATIVE/trend_profile_fallback",
+                data={
+                    "account_id": data.account_id,
+                    "niche": data.niche,
+                    "fallback_used": True,
+                },
+                events=events,
+            )
+        else:
+            self._emit(
+                "CREATIVE/trend_profile_loaded",
+                data={
+                    "account_id": data.account_id,
+                    "niche": trend_result.trend_profile.niche,
+                    "visual_style": trend_result.trend_profile.visual_style,
+                    "fallback_used": False,
+                },
+                events=events,
+            )
         self._emit(
             "CREATIVE/strategy_profile_generated",
             data={
@@ -161,6 +210,29 @@ class CreativeOrchestratorService:
                 "content_mode": strategy_result.strategy_profile.content_mode,
                 "health_status": account_health.decision.status,
                 "fallback_used": strategy_result.fallback.used,
+            },
+            events=events,
+        )
+        if asset_selection_result.fallback.used:
+            fallbacks.append(f"asset_selection:{asset_selection_result.fallback.reason}")
+            self._emit(
+                "CREATIVE/asset_selection_fallback",
+                data={
+                    "account_id": data.account_id,
+                    "niche": data.niche,
+                    "fallback_used": True,
+                },
+                events=events,
+            )
+        self._emit(
+            "CREATIVE/asset_selection_generated",
+            data={
+                "account_id": data.account_id,
+                "hook_asset": asset_selection_result.asset_selection.hook_asset,
+                "setup_asset": asset_selection_result.asset_selection.setup_asset,
+                "payoff_asset": asset_selection_result.asset_selection.payoff_asset,
+                "visual_style": asset_selection_result.asset_selection.visual_style,
+                "fallback_used": asset_selection_result.fallback.used,
             },
             events=events,
         )
@@ -208,10 +280,10 @@ class CreativeOrchestratorService:
             niche=data.niche,
             topic=data.topic,
             strategy_profile=strategy_result.strategy_profile,
-            trend_profile=TrendProfile(),
+            trend_profile=trend_result.trend_profile,
             script_plan=script_result.script_plan,
             voice_plan=voice_result.voice_plan,
-            asset_plan=AssetPlan(),
+            asset_plan=asset_selection_result.asset_selection,
             experiment_assignment=None,
             account_health_status=account_health.decision.status,
             recommended_constraints=dict(account_health.decision.recommended_constraints),
