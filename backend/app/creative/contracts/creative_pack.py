@@ -53,14 +53,55 @@ class ScriptPlan:
 
 
 @dataclass(frozen=True)
+class VoiceDeliveryProfile:
+    overall_mode: str = "baseline"
+    overall_rate: float = 1.0
+    overall_intensity: str = "medium"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class VoiceSegmentPlan:
+    rate: float = 1.0
+    emphasis: str = "medium"
+    pause_after_ms: int = 0
+    pause_before_ms: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class VoiceRuntimeConstraints:
+    allow_provider_fallback: bool = True
+    fallback_order: list[str] = field(default_factory=lambda: ["piper"])
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class VoicePlan:
     provider: str
     voice_id: str
     style: str
     fallback_used: bool = False
+    delivery_profile: VoiceDeliveryProfile = field(default_factory=VoiceDeliveryProfile)
+    segments: dict[str, VoiceSegmentPlan] = field(default_factory=dict)
+    runtime_constraints: VoiceRuntimeConstraints = field(default_factory=VoiceRuntimeConstraints)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "provider": self.provider,
+            "voice_id": self.voice_id,
+            "style": self.style,
+            "fallback_used": self.fallback_used,
+            "delivery_profile": self.delivery_profile.to_dict(),
+            "segments": {name: segment.to_dict() for name, segment in self.segments.items()},
+            "runtime_constraints": self.runtime_constraints.to_dict(),
+        }
 
 
 @dataclass(frozen=True)

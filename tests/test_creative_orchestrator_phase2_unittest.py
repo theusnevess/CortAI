@@ -14,13 +14,40 @@ if str(BACKEND_DIR) not in sys.path:
 from app.content.pipeline.publish import StubPublishAdapter
 from app.content.pipeline.render import StubRenderAdapter
 from app.content.pipeline.service import ContentPipelineService
+from app.content.script_gen.models import ScriptGenerationResponse, StructuredScriptPayload
 from app.content.pipeline.tts import StubTtsAdapter
 from app.creative.agents.script.service import ScriptAgentService
 from app.creative.agents.voice.service import VoiceAgentService
 from app.creative.agents.video_qc.service import VideoQcAgentService
+from app.creative.contracts.agent_common import FallbackDecision
+from app.creative.contracts.creative_pack import ScriptPlan
 from app.creative.orchestrator.events import CreativeEventEmitter
 from app.creative.orchestrator.service import CreativeOrchestratorService
 from app.creative.contracts.orchestrator_io import CreativeOrchestratorInput
+
+
+class _StructuredGenerator:
+    def generate_structured(self, request):  # noqa: ANN001
+        _ = request
+        return ScriptGenerationResponse(
+            script_plan=ScriptPlan(
+                hook="The sealed corridor answered after midnight.",
+                setup="A warning appeared on the dusted mirror.",
+                payoff="The last lock clicked from inside the wall.",
+                generation_mode="test_structured",
+            ),
+            payload=StructuredScriptPayload(
+                hook="The sealed corridor answered after midnight.",
+                setup="A warning appeared on the dusted mirror.",
+                payoff="The last lock clicked from inside the wall.",
+                narrative_mode="official_warning",
+            ),
+            provider_used="test",
+            model_used="test",
+            prompt_used="prompt",
+            raw_output="{}",
+            fallback=FallbackDecision(used=False, mode="NONE", reason=""),
+        )
 
 
 class CreativeOrchestratorPhase2Tests(unittest.TestCase):
@@ -36,7 +63,7 @@ class CreativeOrchestratorPhase2Tests(unittest.TestCase):
         )
         self.orchestrator = CreativeOrchestratorService(
             pipeline_service=self.pipeline,
-            script_agent=ScriptAgentService(),
+            script_agent=ScriptAgentService(generator=_StructuredGenerator()),
             voice_agent=VoiceAgentService(),
             video_qc_agent=VideoQcAgentService(),
             event_emitter=CreativeEventEmitter(event_path=self.out / "events" / "creative_events.jsonl"),

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
+import os
 from typing import Any, Callable, Protocol
 
 from app.content.pipeline.models import ExecutionEnvelope, PipelineResult, RenderJob, RenderJobStatus
@@ -10,6 +11,8 @@ from app.content.pipeline.publish import PublishAdapter, PublishTransientError, 
 from app.content.pipeline.render import RenderAdapter, RenderTransientError, StubRenderAdapter
 from app.content.screen_text.service import ScreenTextAdapterService
 from app.content.pipeline.tts import StubTtsAdapter, TtsAdapter, TtsTransientError
+from app.content.pipeline.tts_router import TtsRouter
+from app.creative.contracts.creative_pack import VoicePlan
 
 
 def _now_iso() -> str:
@@ -83,6 +86,7 @@ class ContentPipelineOrchestrator:
         *,
         envelope: ExecutionEnvelope,
         script_text: str,
+        voice_plan: VoicePlan | None = None,
         voice_profile: str | None = None,
         language: str | None = None,
         template_id: str | None = None,
@@ -99,29 +103,49 @@ class ContentPipelineOrchestrator:
         tts_adapter = self.tts_adapter or StubTtsAdapter()
         render_adapter = self.render_adapter or StubRenderAdapter()
         publish_adapter = self.publish_adapter or StubPublishAdapter()
+        tts_router = TtsRouter(tts_adapter=tts_adapter)
         screen_blocks = ScreenTextAdapterService().adapt(script_text)
         narration_text = screen_blocks.narration_text()
+        resolved_voice_plan = voice_plan or self._legacy_voice_plan(voice_profile)
 
         try:
             job = self._update_job(job, status=RenderJobStatus.TTS_RUNNING)
             self._emit("CONTENT/tts_started", job, {"creative_pack_id": envelope.creative_pack_id}, events_emitted)
-            tts_output, tts_attempts = self._retry(
-                lambda attempt: tts_adapter.generate_audio(
+            tts_result, tts_attempts = self._retry(
+                lambda attempt: tts_router.generate_audio(
                     script_text=narration_text,
-                    voice_profile=voice_profile,
+                    voice_plan=resolved_voice_plan,
                     language=language,
                     render_job_id=job.render_job_id,
                     attempt_count=attempt,
                 ),
                 retry_on=TtsTransientError,
             )
+            tts_output = tts_result.response
+            tts_trace = tts_result.trace
             job = self._update_job(
                 job,
                 status=RenderJobStatus.TTS_DONE,
                 audio_path=tts_output.audio_path,
                 attempt_count=max(job.attempt_count, tts_attempts),
             )
-            self._emit("CONTENT/tts_completed", job, {"audio_path": tts_output.audio_path, "duration_s": tts_output.duration_s}, events_emitted)
+            self._emit(
+                "CONTENT/tts_completed",
+                job,
+                {
+                    "audio_path": tts_output.audio_path,
+                    "duration_s": tts_output.duration_s,
+                    "provider_requested": tts_trace.provider_requested,
+                    "provider_executed": tts_trace.provider_executed,
+                    "voice_id_requested": tts_trace.voice_id_requested,
+                    "voice_id_executed": tts_trace.voice_id_executed,
+                    "style_requested": tts_trace.style_requested,
+                    "fallback_used": tts_trace.fallback_used,
+                    "fallback_reason": tts_trace.fallback_reason,
+                    "tts_latency_s": tts_trace.latency_s,
+                },
+                events_emitted,
+            )
 
             job = self._update_job(job, status=RenderJobStatus.RENDER_RUNNING)
             self._emit("CONTENT/render_started", job, {"audio_path": job.audio_path}, events_emitted)
@@ -180,6 +204,7 @@ class ContentPipelineOrchestrator:
                 events_emitted=events_emitted,
                 error_code=None,
                 render_job_id=job.render_job_id,
+                tts_trace=tts_trace,
             )
         except Exception as exc:  # noqa: BLE001
             error_code = str(exc) or exc.__class__.__name__
@@ -229,3 +254,9 @@ class ContentPipelineOrchestrator:
             **details,
         }
         self.emit_event(event_type, payload)
+
+    def _legacy_voice_plan(self, voice_profile: str | None) -> VoicePlan:
+        mode = os.getenv("CORTAI_TTS_MODE", "piper").lower()
+        provider = mode if mode in {"piper", "openai", "edge", "pyttsx3"} else "piper"
+        resolved_voice = voice_profile or os.getenv("CORTAI_PIPER_MODEL", "")
+        return VoicePlan(provider=provider, voice_id=resolved_voice, style="legacy_voice_profile")

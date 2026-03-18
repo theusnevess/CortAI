@@ -8,6 +8,7 @@ from app.content.pipeline.orchestrator import ContentPipelineOrchestrator
 from app.content.pipeline.publish import PublishAdapter, StubPublishAdapter
 from app.content.pipeline.render import RenderAdapter, StubRenderAdapter
 from app.content.pipeline.tts import StubTtsAdapter, TtsAdapter
+from app.creative.contracts.creative_pack import VoicePlan
 from app.observability.event_append.service import append_event, build_event_record
 
 
@@ -35,6 +36,7 @@ class ContentPipelineService:
         envelope: ExecutionEnvelope,
         *,
         script_text: str,
+        voice_plan: VoicePlan | None = None,
         voice_profile: str | None = None,
         language: str | None = None,
         template_id: str | None = None,
@@ -52,6 +54,7 @@ class ContentPipelineService:
         job, result = orchestrator.execute(
             envelope=envelope,
             script_text=script_text,
+            voice_plan=voice_plan,
             voice_profile=voice_profile,
             language=language,
             template_id=template_id,
@@ -70,6 +73,7 @@ class ContentPipelineService:
         creative_pack_id: str,
         account_id: str,
         script_text: str,
+        voice_plan: VoicePlan | None = None,
         voice_profile: str | None = None,
         language: str | None = None,
         template_id: str | None = None,
@@ -89,6 +93,7 @@ class ContentPipelineService:
         return self.execute(
             envelope,
             script_text=script_text,
+            voice_plan=voice_plan,
             voice_profile=voice_profile,
             language=language,
             template_id=template_id,

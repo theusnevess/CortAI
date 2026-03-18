@@ -65,6 +65,23 @@ class RenderJob:
 
 
 @dataclass(frozen=True)
+class TtsExecutionTrace:
+    provider_requested: str
+    provider_executed: str
+    voice_id_requested: str
+    voice_id_executed: str
+    style_requested: str
+    fallback_used: bool = False
+    fallback_reason: str = ""
+    latency_s: float | None = None
+    audio_duration_s: float | None = None
+    segment_durations: list[float] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class PipelineResult:
     """Resultado explicito do pipeline sem side effects de publicacao."""
 
@@ -74,9 +91,12 @@ class PipelineResult:
     events_emitted: list[str] = field(default_factory=list)
     error_code: str | None = None
     render_job_id: str | None = None
+    tts_trace: TtsExecutionTrace | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         if self.publish_manifest is not None:
             payload["publish_manifest"] = self.publish_manifest.to_dict()
+        if self.tts_trace is not None:
+            payload["tts_trace"] = self.tts_trace.to_dict()
         return payload

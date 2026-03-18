@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -50,6 +51,8 @@ class TtsAdapter:
 
 class StubTtsAdapter(TtsAdapter):
     """TTS local com modos configuraveis e fallback deterministico."""
+
+    SUPPORTED_PROVIDERS = {"piper", "openai", "edge", "pyttsx3"}
 
     def __init__(self, *, base_dir: Path = Path("OUT/content")) -> None:
         self.base_dir = base_dir
@@ -113,6 +116,76 @@ class StubTtsAdapter(TtsAdapter):
 
         return self._generate_silent_audio(script_text=script_text, render_job_id=render_job_id)
 
+    def supports_provider(self, provider: str) -> bool:
+        return self._normalize_provider(provider) in self.SUPPORTED_PROVIDERS
+
+    def generate_audio_for_provider(
+        self,
+        *,
+        provider: str,
+        script_text: str,
+        voice_profile: str | None,
+        language: str | None,
+        render_job_id: str,
+        attempt_count: int,
+        overall_rate: float | None = None,
+        inter_segment_pause_ms: list[int] | None = None,
+    ) -> TtsResponse:
+        del attempt_count
+        normalized_provider = self._normalize_provider(provider)
+        started = time.perf_counter()
+        if normalized_provider == "piper":
+            result = self._try_piper_tts(
+                script_text=script_text,
+                voice_profile=voice_profile,
+                language=language,
+                render_job_id=render_job_id,
+                strict=True,
+                length_scale_override=self._length_scale_from_rate(overall_rate),
+                inter_segment_pause_ms=inter_segment_pause_ms,
+            )
+        elif normalized_provider == "openai":
+            result = self._try_openai_tts(
+                script_text=script_text,
+                voice_profile=voice_profile,
+                language=language,
+                render_job_id=render_job_id,
+                strict=True,
+                speed_override=overall_rate,
+            )
+        elif normalized_provider == "edge":
+            result = self._try_edge_tts(
+                script_text=script_text,
+                voice_profile=voice_profile,
+                language=language,
+                render_job_id=render_job_id,
+                strict=True,
+            )
+        elif normalized_provider == "pyttsx3":
+            result = self._try_pyttsx3(
+                script_text=script_text,
+                voice_profile=voice_profile,
+                language=language,
+                render_job_id=render_job_id,
+                strict=True,
+                rate_override=overall_rate,
+            )
+        else:
+            raise TtsTransientError(f"TTS_PROVIDER_UNSUPPORTED:{provider}")
+        if result is None:
+            raise TtsTransientError(f"TTS_PROVIDER_FAILED:{provider}")
+        return TtsResponse(
+            audio_path=result.audio_path,
+            duration_s=result.duration_s,
+            segment_durations=result.segment_durations,
+        )
+
+    def _normalize_provider(self, provider: str | None) -> str:
+        normalized = str(provider or "").strip().lower()
+        if normalized in {"edge_tts", "edge-tts"}:
+            return "edge"
+        return normalized
+
     def _try_piper_tts(
         self,
         *,
@@ -121,6 +194,8 @@ class StubTtsAdapter(TtsAdapter):
         language: str | None,
         render_job_id: str,
         strict: bool,
+        length_scale_override: str | None = None,
+        inter_segment_pause_ms: list[int] | None = None,
     ) -> TtsResponse | None:
         del language
         piper_cmd = shutil.which("piper")
@@ -141,7 +216,7 @@ class StubTtsAdapter(TtsAdapter):
         target = self.base_dir / "audio" / f"{render_job_id}.wav"
         target.parent.mkdir(parents=True, exist_ok=True)
         sentence_silence = os.getenv("CORTAI_PIPER_SENTENCE_SILENCE", "0.08")
-        length_scale = os.getenv("CORTAI_PIPER_LENGTH_SCALE", "0.94")
+        length_scale = length_scale_override or os.getenv("CORTAI_PIPER_LENGTH_SCALE", "0.94")
         noise_scale = os.getenv("CORTAI_PIPER_NOISE_SCALE", "0.45")
         noise_w_scale = os.getenv("CORTAI_PIPER_NOISE_W_SCALE", "0.75")
         cmd = [
@@ -165,11 +240,12 @@ class StubTtsAdapter(TtsAdapter):
             segments = [item.strip() for item in script_text.split("\n\n") if item.strip()]
             if len(segments) > 1:
                 pause_ms = int(float(os.getenv("CORTAI_TTS_BLOCK_PAUSE_MS", str(DEFAULT_BLOCK_PAUSE_MS))))
+                pause_profile_ms = inter_segment_pause_ms or [pause_ms] * (len(segments) - 1)
                 segment_durations = self._render_piper_segments(
                     cmd=cmd,
                     segments=segments,
                     target=target,
-                    pause_ms=pause_ms,
+                    pause_profile_ms=pause_profile_ms,
                 )
                 return TtsResponse(
                     audio_path=str(target),
@@ -201,6 +277,7 @@ class StubTtsAdapter(TtsAdapter):
         language: str | None,
         render_job_id: str,
         strict: bool,
+        speed_override: float | None = None,
     ) -> TtsResponse | None:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -219,11 +296,14 @@ class StubTtsAdapter(TtsAdapter):
         target.parent.mkdir(parents=True, exist_ok=True)
         model = os.getenv("CORTAI_OPENAI_TTS_MODEL", DEFAULT_OPENAI_MODEL)
         voice = voice_profile or os.getenv("CORTAI_TTS_VOICE") or self._default_openai_voice(language)
-        speed_raw = os.getenv("CORTAI_OPENAI_TTS_SPEED", "1.0")
-        try:
-            speed = float(speed_raw)
-        except ValueError:
-            speed = 1.0
+        if speed_override is None:
+            speed_raw = os.getenv("CORTAI_OPENAI_TTS_SPEED", "1.0")
+            try:
+                speed = float(speed_raw)
+            except ValueError:
+                speed = 1.0
+        else:
+            speed = speed_override
 
         try:
             client = OpenAI(api_key=api_key)
@@ -252,6 +332,7 @@ class StubTtsAdapter(TtsAdapter):
         language: str | None,
         render_job_id: str,
         strict: bool,
+        rate_override: float | None = None,
     ) -> TtsResponse | None:
         try:
             import pyttsx3
@@ -272,7 +353,7 @@ class StubTtsAdapter(TtsAdapter):
             if selected_voice:
                 engine.setProperty("voice", selected_voice)
             engine.setProperty("volume", 1.0)
-            engine.setProperty("rate", 165)
+            engine.setProperty("rate", self._pyttsx3_rate(rate_override))
             engine.save_to_file(script_text, str(target))
             engine.runAndWait()
             try:
@@ -348,7 +429,7 @@ class StubTtsAdapter(TtsAdapter):
         cmd: list[str],
         segments: list[str],
         target: Path,
-        pause_ms: int,
+        pause_profile_ms: list[int],
     ) -> list[float]:
         rendered_paths: list[Path] = []
         segment_lengths: list[float] = []
@@ -371,29 +452,36 @@ class StubTtsAdapter(TtsAdapter):
                     raise TtsTransientError(f"PIPER_SEGMENT_OUTPUT_MISSING:{index}")
                 rendered_paths.append(segment_path)
                 segment_lengths.append(self._wave_duration(segment_path))
-            self._merge_wav_segments(rendered_paths=rendered_paths, target=target, pause_ms=pause_ms)
-        pause_s = max(0.0, pause_ms / 1000.0)
+            self._merge_wav_segments(rendered_paths=rendered_paths, target=target, pause_profile_ms=pause_profile_ms)
         return [
-            round(length + (pause_s if index != len(segment_lengths) - 1 else 0.0), 2)
+            round(
+                length + (
+                    max(0.0, pause_profile_ms[index] / 1000.0)
+                    if index < len(segment_lengths) - 1 and index < len(pause_profile_ms)
+                    else 0.0
+                ),
+                2,
+            )
             for index, length in enumerate(segment_lengths)
         ]
 
-    def _merge_wav_segments(self, *, rendered_paths: list[Path], target: Path, pause_ms: int) -> None:
+    def _merge_wav_segments(self, *, rendered_paths: list[Path], target: Path, pause_profile_ms: list[int]) -> None:
         if not rendered_paths:
             raise TtsTransientError("PIPER_SEGMENTS_EMPTY")
         target.parent.mkdir(parents=True, exist_ok=True)
 
         with wave.open(str(rendered_paths[0]), "rb") as first:
             params = first.getparams()
-            pause_frames = int(params.framerate * max(0, pause_ms) / 1000)
-            silence = b"\x00" * pause_frames * params.sampwidth * params.nchannels
 
         with wave.open(str(target), "wb") as writer:
             writer.setparams(params)
             for index, path in enumerate(rendered_paths):
                 with wave.open(str(path), "rb") as reader:
                     writer.writeframes(reader.readframes(reader.getnframes()))
-                if index != len(rendered_paths) - 1 and pause_frames > 0:
+                if index != len(rendered_paths) - 1:
+                    pause_ms = pause_profile_ms[index] if index < len(pause_profile_ms) else DEFAULT_BLOCK_PAUSE_MS
+                    pause_frames = int(params.framerate * max(0, pause_ms) / 1000)
+                    silence = b"\x00" * pause_frames * params.sampwidth * params.nchannels
                     writer.writeframes(silence)
 
     def _estimate_duration(self, script_text: str) -> float:
@@ -409,6 +497,19 @@ class StubTtsAdapter(TtsAdapter):
     def _default_openai_voice(self, language: str | None) -> str:
         _ = language
         return DEFAULT_OPENAI_VOICE
+
+    def _length_scale_from_rate(self, overall_rate: float | None) -> str | None:
+        if overall_rate is None:
+            return None
+        if overall_rate <= 0:
+            return None
+        return f"{round(1 / overall_rate, 3):.3f}"
+
+    def _pyttsx3_rate(self, overall_rate: float | None) -> int:
+        base_rate = 165
+        if overall_rate is None or overall_rate <= 0:
+            return base_rate
+        return max(120, min(220, int(round(base_rate * overall_rate))))
 
     def _wave_duration(self, audio_path: Path) -> float:
         with wave.open(str(audio_path), "rb") as reader:

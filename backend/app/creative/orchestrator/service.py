@@ -17,6 +17,7 @@ from app.creative.agents.strategy.service import StrategyAgentService
 from app.creative.agents.trend_analysis.models import TrendAnalysisInput
 from app.creative.agents.trend_analysis.service import TrendAnalysisAgentService
 from app.creative.agents.script.service import ScriptAgentService
+from app.creative.agents.script.models import ScriptAgentInput
 from app.creative.agents.voice.service import VoiceAgentService
 from app.creative.agents.video_qc.service import VideoQcAgentService
 from app.creative.contracts.creative_pack import CreativePack, ExperimentAssignment
@@ -113,6 +114,7 @@ class CreativeOrchestratorService:
             creative_pack_id=creative_pack.creative_pack_id,
             account_id=creative_pack.account_id,
             script_text=creative_pack.script_plan.narration_text(),
+            voice_plan=creative_pack.voice_plan,
             voice_profile=creative_pack.voice_plan.voice_id,
             publish_slot=data.publish_slot,
             experiment_variant=creative_pack.experiment_plan.variant_id,
@@ -314,9 +316,16 @@ class CreativeOrchestratorService:
         )
 
         script_result = self.script_agent.generate(
-            account_id=data.account_id,
-            niche=data.niche,
-            topic=data.topic,
+            ScriptAgentInput(
+                account_id=data.account_id,
+                niche=data.niche,
+                topic=data.topic,
+                account_health_status=account_health.decision.status,
+                strategy_profile=strategy_result.strategy_profile,
+                trend_profile=trend_result.trend_profile,
+                learning_insights=learning_result.learning_insights,
+                experiment_plan=experiment_result.experiment_plan,
+            )
         )
         if script_result.fallback.used:
             fallbacks.append(f"script:{script_result.fallback.reason}")
@@ -331,7 +340,12 @@ class CreativeOrchestratorService:
             events=events,
         )
 
-        voice_result = self.voice_agent.resolve(account_id=data.account_id, niche=data.niche)
+        voice_result = self.voice_agent.resolve(
+            account_id=data.account_id,
+            niche=data.niche,
+            script_plan=script_result.script_plan,
+            strategy_profile=strategy_result.strategy_profile,
+        )
         if voice_result.fallback.used:
             fallbacks.append(f"voice:{voice_result.fallback.reason}")
         self._emit(
@@ -340,6 +354,7 @@ class CreativeOrchestratorService:
                 "account_id": data.account_id,
                 "provider": voice_result.voice_plan.provider,
                 "voice_id": voice_result.voice_plan.voice_id,
+                "style": voice_result.voice_plan.style,
                 "fallback_used": voice_result.fallback.used,
             },
             events=events,
