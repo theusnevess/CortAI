@@ -340,6 +340,23 @@ class CreativeOrchestratorService:
             events=events,
         )
 
+        aligned_asset_plan = self.asset_selection_agent.align_first_frame(
+            niche=data.niche,
+            topic=data.topic,
+            hook_text=script_result.script_plan.hook,
+            asset_plan=asset_selection_result.asset_selection,
+        )
+        if aligned_asset_plan.hook_asset != asset_selection_result.asset_selection.hook_asset:
+            self._emit(
+                "CREATIVE/hook_visual_alignment_applied",
+                data={
+                    "account_id": data.account_id,
+                    "hook_asset_before": asset_selection_result.asset_selection.hook_asset,
+                    "hook_asset_after": aligned_asset_plan.hook_asset,
+                },
+                events=events,
+            )
+
         voice_result = self.voice_agent.resolve(
             account_id=data.account_id,
             niche=data.niche,
@@ -374,7 +391,7 @@ class CreativeOrchestratorService:
             trend_profile=trend_result.trend_profile,
             script_plan=script_result.script_plan,
             voice_plan=voice_result.voice_plan,
-            asset_plan=asset_selection_result.asset_selection,
+            asset_plan=aligned_asset_plan,
             learning_insights=learning_result.learning_insights,
             experiment_plan=experiment_result.experiment_plan,
             experiment_assignment=None if experiment_result is None else ExperimentAssignment(

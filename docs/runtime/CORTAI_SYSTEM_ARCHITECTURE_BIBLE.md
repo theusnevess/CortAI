@@ -76,6 +76,7 @@ Estado atual real:
 - Phase 2.5B: concluida e validada
 - Script Agent: otimizado e aprovado em gate de excelencia
 - Voice subsystem: corrigido, governado e aprovado em gate
+- Hook visual alignment: promovido como baseline
 - provider local principal atual: `Kokoro`
 - fallback duro local: `Piper`
 
@@ -883,6 +884,7 @@ Funcao:
 
 - selecionar assets por papel narrativo
 - materializar `asset_plan`
+- alinhar o `hook_asset` com o tipo de hook quando houver `visual_anchor` valido
 
 ### 14.7 Script Agent
 
@@ -1429,6 +1431,74 @@ Para continuidade por LLM:
 
 - use os documentos congelados para entender a intencao arquitetural
 - use o codigo atual para entender o comportamento real em runtime
+
+### 15.5 Hook Visual Alignment (Baseline Behavior)
+
+O baseline do CortAI agora inclui alinhamento do primeiro frame visual com o tipo de hook gerado.
+
+Fluxo padrao:
+
+```text
+hook_text
+-> hook_type detection (experiential | inferential)
+-> visual_anchor selection
+-> first_frame asset selection
+```
+
+Regra central:
+
+- o primeiro frame deve materializar a anomalia do hook, nao apenas o ambiente
+
+Separacao de dialetos:
+
+- `experiential`
+  - tipo: evento fisico ou diretamente imaginavel
+  - regra: mostrar `entidade + estado anomalo`
+  - exemplos:
+    - camera com glitch
+    - porta ou acesso selado
+    - painel ou display com aviso
+- `inferential`
+  - tipo: inconsistencia documental ou logica
+  - regra: mostrar `evidencia da contradicao`
+  - exemplos:
+    - log com data impossivel
+    - transcript inconsistente
+    - arquivo alterado
+
+Prioridade de selecao:
+
+```text
+1. visual_anchor (se detectado)
+2. fallback tematico (apenas se necessario)
+```
+
+Regra operacional:
+
+- e proibido usar opening generico quando ha anchor valido
+
+Escopo:
+
+- atua apenas na selecao do `hook_asset`
+- nao altera:
+  - `Script Agent`
+  - `hook_text`
+  - `setup/payoff`
+  - `TTS / voice`
+  - providers
+
+Residual conhecido:
+
+- `map / blueprint literalness`
+  - limitado pela asset library atual
+  - nao bloqueia o baseline
+  - permanece sob monitoramento
+
+Seguranca operacional:
+
+- `CORTAI_EXPERIMENT_HOOK_VISUAL_ALIGNMENT`
+  - baseline ativo por padrao
+  - `0` desliga para rollback rapido
 
 ---
 
