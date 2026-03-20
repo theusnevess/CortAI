@@ -1584,6 +1584,85 @@ Manter monitoramento leve para:
 
 ---
 
+### 25.7 Editorial Mix Adjustment (Baseline Behavior)
+
+#### Contexto
+
+O `investigation_stream` apresenta skew estrutural para `inferential`, o que pode gerar fadiga dialetal mesmo com a pipeline tecnica estavel.
+
+O ajuste correto ocorre antes da pipeline, na composicao do lote editorial.
+
+#### Principio
+
+- qualidade do feed investigativo depende da mistura de tipos de investigacao, nao apenas da qualidade individual dos itens
+
+#### Classificacao editorial
+
+Cada tema investigativo deve ser classificado como:
+
+- `inferential`
+- `experiential_eligible`
+
+#### Criterios de `experiential_eligible`
+
+Um tema so se qualifica se:
+
+- possui entidade fisica clara
+- possui anomalia observavel ou imaginavel diretamente
+- nao depende exclusivamente de evidencia documental
+
+#### Regras de composicao do lote
+
+Para lote de `8-12`:
+
+- alvo:
+  - `>= 3` temas `experiential_eligible` quando houver universo real
+- evitar:
+  - `5/5 inferential` em qualquer janela simulada
+- aplicar:
+  - dispersao leve dos temas experienciais ao longo do lote
+
+#### Fallback editorial
+
+Se o universo tematico for predominantemente documental:
+
+- aceitar skew
+- registrar:
+
+```json
+{
+  "editorial_mix_relaxed": true,
+  "reason": "insufficient_experiential_topics_available"
+}
+```
+
+Nunca:
+
+- forcar tema artificial
+- degradar plausibilidade narrativa
+
+#### Integracao com pipeline
+
+Este ajuste ocorre antes de:
+
+- `Script Agent`
+- visual alignment
+- candidate universe
+- sequencing
+
+Nenhuma camada tecnica e modificada por esta regra editorial.
+
+#### Impacto esperado
+
+- reducao de:
+  - `max_consecutive_same_hook_type`
+  - `dialect_fatigue_rate`
+- manutencao de:
+  - coerencia investigativa
+  - naturalidade do feed
+
+---
+
 ## 26. Como Um Novo Chat Deve Ler o Projeto
 
 Ordem recomendada de leitura para continuidade:
