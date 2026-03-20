@@ -1502,6 +1502,88 @@ Seguranca operacional:
 
 ---
 
+### 25.6 Candidate Universe Expansion (Baseline Behavior)
+
+O CortAI passa a expandir o universo candidato antes da composicao e do sequencing, com o objetivo de reduzir skew estrutural no feed.
+
+Fluxo logico:
+
+```text
+candidate universe
+-> conservative inferential supply expansion
+-> document/evidence visual subtyping
+-> feed candidate composition
+-> feed sequencing
+```
+
+#### 1. Inferential supply expansion
+
+O sistema amplia conservadoramente a presenca de hooks inferenciais apenas quando o conteudo ja contem sinais semanticamente compativeis, como:
+
+- `record`
+- `log`
+- `tape`
+- `transcript`
+- `archive`
+- `date`
+- `discrepancy`
+
+Principio:
+
+- expandir apenas quando a natureza do conteudo ja for inferencial
+
+Regras:
+
+- preferir falso negativo a falso positivo
+- nunca converter caso claramente experiencial
+- nunca abrir novo dialeto
+- nunca alterar `setup/payoff`
+
+#### 2. Document visual subtyping
+
+O anchor visual `document` deixa de operar como monocategoria e passa a usar subtipos controlados dentro da mesma familia semantica, como:
+
+- `document_printed`
+- `document_redacted`
+- `document_annotated`
+- `terminal_log`
+- `transcript_sheet`
+- `evidence_board`
+- `timestamp_closeup`
+
+Principio:
+
+- expandir dentro da semantica, nao fora dela
+
+Objetivo:
+
+- reduzir monocultura visual documental
+- aumentar variedade valida no pool
+- melhorar o feed downstream sem quebrar coerencia investigativa
+
+#### 3. Safety / rollback
+
+A expansao permanece protegida por flag operacional:
+
+- `CORTAI_EXPERIMENT_CANDIDATE_UNIVERSE_EXPANSION`
+
+Comportamento:
+
+- `ON` -> baseline atual expandido
+- `OFF` -> retorno imediato ao comportamento anterior
+
+#### 4. Known monitoring points
+
+Manter monitoramento leve para:
+
+- `inferential overreach`
+- `document subtype saturation`
+- drift por nicho em:
+  - `mystery_dark`
+  - `investigative`
+
+---
+
 ## 26. Como Um Novo Chat Deve Ler o Projeto
 
 Ordem recomendada de leitura para continuidade:

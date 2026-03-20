@@ -8,6 +8,9 @@ from app.runtime.models import DistributedTask
 from app.runtime.queue import InMemoryTaskQueue
 from app.runtime.rollout.config import RolloutConfig
 from app.runtime.rollout.policy import evaluate_rollout_account
+from app.runtime.scheduler.candidate_universe import expand_candidate_universe
+from app.runtime.scheduler.feed_composition import compose_feed_candidates
+from app.runtime.scheduler.feed_distribution import reorder_feed_candidates
 from app.runtime.scheduler.models import ScheduleKind, SchedulePlan, SchedulerTaskRequest
 from app.runtime.scheduler.planner import build_schedule_plan
 
@@ -80,6 +83,20 @@ class SchedulerService:
         )
         self.queue.enqueue(task)
         return {"status": "WRITTEN", "task_id": task.task_id, "op_key": request.op_key}
+
+    def reorder_feed_candidates(self, candidates: list[dict[str, object]]) -> tuple[list[dict[str, object]], int]:
+        return reorder_feed_candidates(candidates)
+
+    def compose_feed_candidates(
+        self,
+        candidates: list[dict[str, object]],
+        *,
+        target_size: int | None = None,
+    ) -> tuple[list[dict[str, object]], dict[str, object]]:
+        return compose_feed_candidates(candidates, target_size=target_size)
+
+    def expand_candidate_universe(self, candidates: list[dict[str, object]]) -> tuple[list[dict[str, object]], dict[str, object]]:
+        return expand_candidate_universe(candidates)
 
     def _materialize_payload(self, request: SchedulerTaskRequest) -> dict[str, str]:
         return {
