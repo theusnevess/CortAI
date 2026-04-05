@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,15 +13,37 @@ from app.product.attribution.errors import (
 )
 from app.product.attribution.schema import validate_content_attribution
 
+REQUIRED_EVIDENCE_INPUTS = (
+    "publish_record",
+    "video_metrics",
+    "window_metrics",
+)
+
+OPTIONAL_EVIDENCE_INPUTS = (
+    "scorecard",
+    "experiment_assignment_record",
+    "experiment_result_record",
+)
+
+EXPERIMENT_LINKAGE_STATUS = {
+    "LINKED",
+    "NOT_PRESENT",
+    "MISSING_ASSIGNMENT",
+    "MISSING_RESULT",
+    "UNSAFE_TO_INFER",
+}
+
 
 @dataclass(frozen=True)
 class AttributionDeps:
-    """Dependências de leitura usadas pelo builder de attribution."""
+    """Dependencias de leitura usadas pelo builder de attribution."""
 
     publish_records_repo: Any
     video_metrics_repo: Any
     window_metrics_repo: Any
     scorecard_repo: Any | None = None
+    experiment_assignments_repo: Any | None = None
+    experiment_results_repo: Any | None = None
 
 
 def _now_utc_iso() -> str:
@@ -29,10 +51,28 @@ def _now_utc_iso() -> str:
 
 
 def _call_optional(repo: Any, method_names: tuple[str, ...], *args: Any) -> Any:
+    if repo is None:
+        return None
     for name in method_names:
         method = getattr(repo, name, None)
         if callable(method):
             return method(*args)
+    return None
+
+
+def _lookup_repo_record_by_id(repo: Any, *, direct_methods: tuple[str, ...], key_field: str, value: str) -> Any:
+    if repo is None or not value:
+        return None
+    for name in direct_methods:
+        method = getattr(repo, name, None)
+        if callable(method):
+            return method(value)
+    method = getattr(repo, "get_by_key", None)
+    if callable(method):
+        return method(key_field, value)
+    method = getattr(repo, "get", None)
+    if callable(method):
+        return method(value)
     return None
 
 
@@ -91,8 +131,135 @@ def _resolve_duration_field(publish: dict[str, Any], field_name: str) -> int | N
     return parsed
 
 
+def build_evidence_summary(
+    *,
+    publish_present: bool,
+    metrics_present: bool,
+    window_metrics_present: bool,
+    scorecard_present: bool,
+    experiment_assignment_present: bool = False,
+    experiment_result_present: bool = False,
+) -> dict[str, Any]:
+    required_present = {
+        "publish_record": bool(publish_present),
+        "video_metrics": bool(metrics_present),
+        "window_metrics": bool(window_metrics_present),
+    }
+    optional_present = {
+        "scorecard": bool(scorecard_present),
+        "experiment_assignment_record": bool(experiment_assignment_present),
+        "experiment_result_record": bool(experiment_result_present),
+    }
+    required_complete = all(required_present.values())
+    evidence_mode = "WITH_OPTIONAL_SCORECARD" if required_complete and optional_present["scorecard"] else "REQUIRED_ONLY"
+    if not required_complete:
+        evidence_mode = "INCOMPLETE_REQUIRED_EVIDENCE"
+    return {
+        "required_inputs": list(REQUIRED_EVIDENCE_INPUTS),
+        "optional_inputs": list(OPTIONAL_EVIDENCE_INPUTS),
+        "required_present": required_present,
+        "optional_present": optional_present,
+        "required_evidence_complete": required_complete,
+        "evidence_mode": evidence_mode,
+    }
+
+
+def build_experiment_linkage(
+    *,
+    publish: dict[str, Any],
+    deps: AttributionDeps,
+) -> dict[str, Any]:
+    metadata = publish.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    explicit_assignment_id = str(metadata.get("experiment_assignment_id") or "").strip()
+    explicit_result_id = str(metadata.get("experiment_result_id") or "").strip()
+    explicit_experiment_id = str(metadata.get("experiment_id") or "").strip()
+    explicit_variant_id = str(metadata.get("experiment_variant_id") or metadata.get("variant_id") or "").strip()
+    explicit_subject_key = str(metadata.get("experiment_subject_key") or "").strip()
+    creative_pack_id = str(metadata.get("creative_pack_id") or "").strip()
+
+    assignment = None
+    result = None
+
+    if not any((explicit_assignment_id, explicit_result_id, explicit_experiment_id, explicit_variant_id, explicit_subject_key)):
+        status = "UNSAFE_TO_INFER" if creative_pack_id else "NOT_PRESENT"
+        return {
+            "experiment_linkage_status": status,
+            "experiment_context": None,
+            "experiment_result_available": False,
+        }
+
+    if explicit_assignment_id:
+        assignment = _lookup_repo_record_by_id(
+            deps.experiment_assignments_repo,
+            direct_methods=("get_by_assignment_id",),
+            key_field="assignment_id",
+            value=explicit_assignment_id,
+        )
+        if deps.experiment_assignments_repo is not None and not isinstance(assignment, dict):
+            return {
+                "experiment_linkage_status": "MISSING_ASSIGNMENT",
+                "experiment_context": {
+                    "assignment_id": explicit_assignment_id,
+                    "experiment_id": explicit_experiment_id or None,
+                    "variant_id": explicit_variant_id or None,
+                    "subject_key": explicit_subject_key or None,
+                    "result_id": explicit_result_id or None,
+                },
+                "experiment_result_available": False,
+            }
+
+    if explicit_result_id:
+        result = _lookup_repo_record_by_id(
+            deps.experiment_results_repo,
+            direct_methods=("get_by_result_id",),
+            key_field="result_id",
+            value=explicit_result_id,
+        )
+        if deps.experiment_results_repo is not None and not isinstance(result, dict):
+            return {
+                "experiment_linkage_status": "MISSING_RESULT",
+                "experiment_context": {
+                    "assignment_id": explicit_assignment_id or (None if not isinstance(assignment, dict) else str(assignment.get("assignment_id") or "") or None),
+                    "experiment_id": explicit_experiment_id or (None if not isinstance(assignment, dict) else str(assignment.get("experiment_id") or "") or None),
+                    "variant_id": explicit_variant_id or (None if not isinstance(assignment, dict) else str(assignment.get("variant") or "") or None),
+                    "subject_key": explicit_subject_key or (None if not isinstance(assignment, dict) else str(assignment.get("subject_key") or "") or None),
+                    "result_id": explicit_result_id,
+                },
+                "experiment_result_available": False,
+            }
+
+    experiment_context = {
+        "assignment_id": explicit_assignment_id or (None if not isinstance(assignment, dict) else str(assignment.get("assignment_id") or "") or None),
+        "experiment_id": explicit_experiment_id
+        or (None if not isinstance(assignment, dict) else str(assignment.get("experiment_id") or "") or None)
+        or (None if not isinstance(result, dict) else str(result.get("experiment_id") or "") or None),
+        "variant_id": explicit_variant_id
+        or (None if not isinstance(assignment, dict) else str(assignment.get("variant") or "") or None)
+        or (None if not isinstance(result, dict) else str(result.get("variant") or "") or None),
+        "subject_key": explicit_subject_key
+        or (None if not isinstance(assignment, dict) else str(assignment.get("subject_key") or "") or None)
+        or (None if not isinstance(result, dict) else str(result.get("subject_key") or "") or None),
+        "result_id": explicit_result_id or (None if not isinstance(result, dict) else str(result.get("result_id") or "") or None),
+    }
+    if not any(experiment_context.values()):
+        return {
+            "experiment_linkage_status": "NOT_PRESENT",
+            "experiment_context": None,
+            "experiment_result_available": False,
+        }
+
+    return {
+        "experiment_linkage_status": "LINKED",
+        "experiment_context": experiment_context,
+        "experiment_result_available": isinstance(result, dict),
+    }
+
+
 def build_attribution(publish_id: str, deps: AttributionDeps) -> dict[str, Any]:
-    """Constrói 1 content attribution por publish_id sem efeitos colaterais."""
+    """Constroi 1 content attribution por publish_id sem efeitos colaterais."""
     publish = _must_call(deps.publish_records_repo, ("get_by_publish_id",), publish_id)
     if not isinstance(publish, dict):
         raise PublishRecordNotFoundError()

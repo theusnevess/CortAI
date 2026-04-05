@@ -9,8 +9,10 @@ from app.runtime.queue import InMemoryTaskQueue
 from app.runtime.rollout.config import RolloutConfig
 from app.runtime.rollout.policy import evaluate_rollout_account
 from app.runtime.scheduler.candidate_universe import expand_candidate_universe
+from app.runtime.scheduler.dialect_fatigue import reorder_by_hook_type
 from app.runtime.scheduler.feed_composition import compose_feed_candidates
 from app.runtime.scheduler.feed_distribution import reorder_feed_candidates
+from app.runtime.scheduler.investigation_density import reorder_investigation_stream_by_density
 from app.runtime.scheduler.models import ScheduleKind, SchedulePlan, SchedulerTaskRequest
 from app.runtime.scheduler.planner import build_schedule_plan
 
@@ -97,6 +99,18 @@ class SchedulerService:
 
     def expand_candidate_universe(self, candidates: list[dict[str, object]]) -> tuple[list[dict[str, object]], dict[str, object]]:
         return expand_candidate_universe(candidates)
+
+    def reorder_for_dialect_fatigue(
+        self,
+        candidates: list[dict[str, object]],
+    ) -> tuple[list[dict[str, object]], dict[str, object]]:
+        return reorder_by_hook_type(candidates)
+
+    def reorder_investigation_stream_density(
+        self,
+        candidates: list[dict[str, object]],
+    ) -> tuple[list[dict[str, object]], dict[str, object]]:
+        return reorder_investigation_stream_by_density(candidates)
 
     def _materialize_payload(self, request: SchedulerTaskRequest) -> dict[str, str]:
         return {
