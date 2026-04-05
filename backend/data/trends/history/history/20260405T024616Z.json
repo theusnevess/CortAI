@@ -1,0 +1,53 @@
+{
+  "niche": "history",
+  "dominant_hooks": [
+    "story_opening",
+    "contradiction",
+    "question"
+  ],
+  "avg_duration": "10-14s",
+  "pacing": "baseline",
+  "visual_style": "archive_dark",
+  "text_style": "large_caption_focus",
+  "region": "US",
+  "trend_source": "manual_curation",
+  "confidence_scores": {
+    "dominant_hooks": 0.85,
+    "avg_duration": 0.85,
+    "pacing": 0.85,
+    "visual_style": 0.85,
+    "text_style": 0.85,
+    "overall": 0.85
+  },
+  "updated_at": "2026-04-03T00:00:00Z",
+  "valid_until": "2026-04-17T00:00:00Z",
+  "sample_size": 6,
+  "evidence": [
+    {
+      "evidence_type": "manual_top_video",
+      "source": "manual_curation",
+      "reference_id": "history_seed_001",
+      "reference_url": "https://example.com/history_seed_001",
+      "captured_at": "2026-04-03T00:00:00Z",
+      "region": "US",
+      "metadata": {
+        "rank": 1,
+        "notes": "Contradictory archive framing with restrained investigative pacing."
+      }
+    },
+    {
+      "evidence_type": "manual_top_video",
+      "source": "manual_curation",
+      "reference_id": "history_seed_002",
+      "reference_url": "https://example.com/history_seed_002",
+      "captured_at": "2026-04-03T00:00:00Z",
+      "region": "US",
+      "metadata": {
+        "rank": 2,
+        "notes": "Proof-first historical reveal using document-centered visuals."
+      }
+    }
+  ],
+  "trend_version": "2.0",
+  "collector_version": "trend-analysis-agent-v2_0_phase_b"
+}
