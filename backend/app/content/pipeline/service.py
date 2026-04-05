@@ -8,7 +8,8 @@ from app.content.pipeline.orchestrator import ContentPipelineOrchestrator
 from app.content.pipeline.publish import PublishAdapter, StubPublishAdapter
 from app.content.pipeline.render import RenderAdapter, StubRenderAdapter
 from app.content.pipeline.tts import StubTtsAdapter, TtsAdapter
-from app.creative.contracts.creative_pack import VoicePlan
+from app.creative.contracts.creative_pack import AssetPlan, VoicePlan
+from app.creative.contracts.edit_plan import EditPlan
 from app.observability.event_append.service import append_event, build_event_record
 
 
@@ -36,6 +37,8 @@ class ContentPipelineService:
         envelope: ExecutionEnvelope,
         *,
         script_text: str,
+        asset_plan: AssetPlan | None = None,
+        edit_plan: EditPlan | None = None,
         voice_plan: VoicePlan | None = None,
         voice_profile: str | None = None,
         language: str | None = None,
@@ -43,6 +46,7 @@ class ContentPipelineService:
         aspect_ratio: str | None = None,
         caption: str = "",
         hashtags: list[str] | None = None,
+        defer_publish_manifest: bool = False,
     ) -> dict[str, object]:
         orchestrator = ContentPipelineOrchestrator(
             repository=self.repository,
@@ -54,6 +58,8 @@ class ContentPipelineService:
         job, result = orchestrator.execute(
             envelope=envelope,
             script_text=script_text,
+            asset_plan=asset_plan,
+            edit_plan=edit_plan,
             voice_plan=voice_plan,
             voice_profile=voice_profile,
             language=language,
@@ -61,6 +67,7 @@ class ContentPipelineService:
             aspect_ratio=aspect_ratio,
             caption=caption,
             hashtags=hashtags,
+            defer_publish_manifest=defer_publish_manifest,
         )
         return {
             "job": job.to_dict(),
@@ -73,6 +80,8 @@ class ContentPipelineService:
         creative_pack_id: str,
         account_id: str,
         script_text: str,
+        asset_plan: AssetPlan | None = None,
+        edit_plan: EditPlan | None = None,
         voice_plan: VoicePlan | None = None,
         voice_profile: str | None = None,
         language: str | None = None,
@@ -82,6 +91,7 @@ class ContentPipelineService:
         experiment_variant: str | None = None,
         caption: str = "",
         hashtags: list[str] | None = None,
+        defer_publish_manifest: bool = False,
     ) -> dict[str, object]:
         envelope = ExecutionEnvelope(
             job_id="",
@@ -93,6 +103,8 @@ class ContentPipelineService:
         return self.execute(
             envelope,
             script_text=script_text,
+            asset_plan=asset_plan,
+            edit_plan=edit_plan,
             voice_plan=voice_plan,
             voice_profile=voice_profile,
             language=language,
@@ -100,7 +112,58 @@ class ContentPipelineService:
             aspect_ratio=aspect_ratio,
             caption=caption,
             hashtags=hashtags,
+            defer_publish_manifest=defer_publish_manifest,
         )
+
+    def finalize_publish(
+        self,
+        *,
+        creative_pack_id: str,
+        account_id: str,
+        render_job_id: str,
+        publish_slot: str = "",
+        experiment_variant: str | None = None,
+        caption: str = "",
+        hashtags: list[str] | None = None,
+    ) -> dict[str, object]:
+        orchestrator = ContentPipelineOrchestrator(
+            repository=self.repository,
+            tts_adapter=self.tts_adapter,
+            render_adapter=self.render_adapter,
+            publish_adapter=self.publish_adapter,
+            emit_event=self._emit_event,
+        )
+        envelope = ExecutionEnvelope(
+            job_id="",
+            account_id=account_id,
+            creative_pack_id=creative_pack_id,
+            publish_slot=publish_slot or "1970-01-01T00:00:00Z",
+            experiment_variant=experiment_variant,
+        )
+        job, result = orchestrator.finalize_publish(
+            render_job_id=render_job_id,
+            envelope=envelope,
+            caption=caption,
+            hashtags=hashtags,
+        )
+        return {
+            "job": job.to_dict(),
+            "result": result.to_dict(),
+        }
+
+    def mark_non_publishable(self, *, render_job_id: str, decision: str) -> dict[str, object]:
+        orchestrator = ContentPipelineOrchestrator(
+            repository=self.repository,
+            tts_adapter=self.tts_adapter,
+            render_adapter=self.render_adapter,
+            publish_adapter=self.publish_adapter,
+            emit_event=self._emit_event,
+        )
+        job, result = orchestrator.mark_governance_outcome(render_job_id=render_job_id, decision=decision)
+        return {
+            "job": job.to_dict(),
+            "result": result.to_dict(),
+        }
 
     def _emit_event(self, event_type: str, payload: dict[str, object]) -> None:
         event = build_event_record(event_type, dict(payload), writer_id="content_pipeline")

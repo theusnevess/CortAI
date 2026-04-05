@@ -62,6 +62,13 @@ class ScreenTextAdapterService:
         payoff = self._adapt_payoff(sentences[2])
         return ScreenTextBlocks(hook_text=hook, setup_text=setup, payoff_text=payoff)
 
+    def adapt_structured_blocks(self, *, hook: str, setup: str, payoff: str) -> ScreenTextBlocks:
+        return ScreenTextBlocks(
+            hook_text=self._light_adapt_block(hook, role="hook"),
+            setup_text=self._light_adapt_block(setup, role="setup"),
+            payoff_text=self._light_adapt_block(payoff, role="payoff"),
+        )
+
     def _split_sentences(self, script_text: str) -> list[str]:
         normalized = self._normalize_ascii(script_text)
         sentences = [item.strip() for item in re.split(r"(?<=[.!?])\s+", normalized) if item.strip()]
@@ -237,3 +244,47 @@ class ScreenTextAdapterService:
 
     def _upper(self, text: str) -> str:
         return self._normalize_ascii(text).upper()
+
+    def _light_adapt_block(self, text: str, *, role: str) -> str:
+        normalized = self._normalize_ascii(text)
+        normalized = re.sub(r"\b(hook|setup|payoff)\s*:\s*", "", normalized, flags=re.IGNORECASE)
+        normalized = normalized.strip().strip('"').strip("'").strip()
+        normalized = self._strip_punctuation(normalized, keep_question=normalized.endswith("?"))
+        if not normalized:
+            return ""
+
+        max_words = 10 if role == "hook" else 12
+        tokens = normalized.split()
+        if len(tokens) > max_words:
+            normalized = self._soft_compress(tokens=tokens, keep=max_words, keep_question=text.strip().endswith("?"))
+        elif text.strip().endswith("?"):
+            normalized = normalized.rstrip("?") + "?"
+
+        return self._upper(normalized)
+
+    def _soft_compress(self, *, tokens: list[str], keep: int, keep_question: bool) -> str:
+        trimmed = list(tokens)
+        removable = {
+            "A", "AN", "THE", "THAT", "THIS", "THESE", "THOSE", "IN", "ON", "AT", "OF",
+            "TO", "FOR", "WITH", "BY", "FROM", "AND", "THEN", "JUST", "VERY", "REALLY",
+        }
+        while len(trimmed) > keep:
+            removable_index = None
+            tail_keep = 3 if keep >= 9 else 2
+            cutoff = max(1, len(trimmed) - tail_keep)
+            for index, word in enumerate(trimmed[:cutoff]):
+                if index == 0:
+                    continue
+                if word.upper().strip(",.!?;:") in removable:
+                    removable_index = index
+                    break
+            if removable_index is None:
+                head_keep = max(2, keep - tail_keep)
+                trimmed = trimmed[:head_keep] + trimmed[-tail_keep:]
+                break
+            trimmed.pop(removable_index)
+
+        candidate = " ".join(trimmed).strip()
+        if keep_question:
+            return candidate.rstrip("?") + "?"
+        return candidate

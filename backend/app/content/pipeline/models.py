@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 
+from app.creative.contracts.edit_plan import EditPlan
+
 
 class RenderJobStatus(str, Enum):
     """Estados canonicos do job de conteudo."""
@@ -13,6 +15,8 @@ class RenderJobStatus(str, Enum):
     TTS_DONE = "TTS_DONE"
     RENDER_RUNNING = "RENDER_RUNNING"
     RENDER_DONE = "RENDER_DONE"
+    HOLD = "HOLD"
+    REJECT = "REJECT"
     READY = "READY"
     FAILED = "FAILED"
     NOOP = "NOOP"
@@ -86,12 +90,15 @@ class PipelineResult:
     """Resultado explicito do pipeline sem side effects de publicacao."""
 
     status: str
+    publishable: bool = False
     publish_manifest: PublishManifest | None = None
     artifacts: dict[str, str] = field(default_factory=dict)
     events_emitted: list[str] = field(default_factory=list)
     error_code: str | None = None
     render_job_id: str | None = None
     tts_trace: TtsExecutionTrace | None = None
+    visual_trace: dict[str, Any] | None = None
+    edit_trace: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
