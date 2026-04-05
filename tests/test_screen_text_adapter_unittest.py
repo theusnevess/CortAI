@@ -98,6 +98,17 @@ class ScreenTextAdapterTests(unittest.TestCase):
         self.assertEqual(blocks.setup_text, "NO EMPLOYEE ADMITTED TOUCHING IT")
         self.assertEqual(blocks.payoff_text, "FINAL DEPARTURE TO A STATION THAT NEVER EXISTED")
 
+    def test_adapt_structured_blocks_preserves_semantics_with_light_compression(self) -> None:
+        blocks = self.service.adapt_structured_blocks(
+            hook="Police reopened the locked evidence room.",
+            setup="They were just dusting for old clues.",
+            payoff="The recorder picked up whispers from sealed evidence.",
+        )
+
+        self.assertEqual(blocks.hook_text, "POLICE REOPENED THE LOCKED EVIDENCE ROOM")
+        self.assertEqual(blocks.setup_text, "THEY WERE JUST DUSTING FOR OLD CLUES")
+        self.assertEqual(blocks.payoff_text, "THE RECORDER PICKED UP WHISPERS FROM SEALED EVIDENCE")
+
 
 if __name__ == "__main__":
     unittest.main()

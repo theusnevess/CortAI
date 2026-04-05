@@ -21,27 +21,23 @@ class VoiceAgentPhase2Tests(unittest.TestCase):
         os.environ.clear()
         os.environ.update(self.original_env)
 
-    def test_prefers_premium_voice_when_configured(self) -> None:
-        os.environ["CORTAI_PREMIUM_TTS_PROVIDER"] = "elevenlabs"
-        os.environ["CORTAI_PREMIUM_TTS_VOICE"] = "adam"
-
+    def test_prefers_kokoro_as_primary_provider(self) -> None:
         result = VoiceAgentService().resolve(account_id="acc_1", niche="horror")
 
-        self.assertEqual(result.voice_plan.provider, "elevenlabs")
-        self.assertEqual(result.voice_plan.voice_id, "adam")
+        self.assertEqual(result.voice_plan.provider, "kokoro")
+        self.assertEqual(result.voice_plan.voice_id, "af_heart")
+        self.assertEqual(result.voice_plan.runtime_constraints.fallback_order, ["kokoro", "piper"])
         self.assertFalse(result.fallback.used)
 
-    def test_falls_back_to_piper_when_premium_is_unavailable(self) -> None:
-        os.environ.pop("CORTAI_PREMIUM_TTS_PROVIDER", None)
-        os.environ.pop("CORTAI_PREMIUM_TTS_VOICE", None)
-        os.environ["CORTAI_PIPER_MODEL"] = "tools/piper/voices/en_US-lessac-high.onnx"
-
+    def test_keeps_kokoro_as_primary_even_if_premium_env_is_present(self) -> None:
+        os.environ["CORTAI_PREMIUM_TTS_PROVIDER"] = "elevenlabs"
+        os.environ["CORTAI_PREMIUM_TTS_VOICE"] = "adam"
         result = VoiceAgentService().resolve(account_id="acc_1", niche="horror")
 
-        self.assertEqual(result.voice_plan.provider, "piper")
-        self.assertTrue(result.voice_plan.voice_id.endswith(".onnx"))
-        self.assertTrue(result.fallback.used)
-        self.assertEqual(result.fallback.reason, "voice_fallback_to_piper")
+        self.assertEqual(result.voice_plan.provider, "kokoro")
+        self.assertEqual(result.voice_plan.voice_id, "af_heart")
+        self.assertFalse(result.fallback.used)
+        self.assertEqual(result.fallback.reason, "")
 
 
 if __name__ == "__main__":

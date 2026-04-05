@@ -153,6 +153,49 @@ class Phase2Block4SmokeTests(unittest.TestCase):
             self.assertFalse(execution.experiment.fallback.used)
             self.assertTrue(execution.creative_pack.learning_insights.recommendations)
             self.assertTrue(execution.creative_pack.experiment_plan.experiment_id.startswith("exp_"))
+            self.assertIsNotNone(execution.experiment.experiment_assignment)
+            self.assertIsNotNone(execution.creative_pack.experiment_assignment)
+            self.assertEqual(
+                execution.creative_pack.experiment_assignment.assignment_id,
+                execution.experiment.experiment_assignment.assignment_id,
+            )
+            self.assertEqual(
+                execution.creative_pack.experiment_assignment.subject_key,
+                "acc_block4|2026-03-17T12:00:00Z|sealed mirror tunnel",
+            )
+            assignment_rows = [
+                json.loads(line)
+                for line in (experiments_dir / "assignments.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(assignment_rows), 1)
+            self.assertEqual(
+                assignment_rows[0]["assignment_id"],
+                execution.creative_pack.experiment_assignment.assignment_id,
+            )
+            result_rows = [
+                json.loads(line)
+                for line in (experiments_dir / "results.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(result_rows), 1)
+            self.assertIsNotNone(execution.experiment.experiment_result)
+            self.assertEqual(result_rows[0]["result_id"], execution.experiment.experiment_result["result_id"])
+            self.assertEqual(
+                result_rows[0]["subject_key"],
+                execution.creative_pack.experiment_assignment.subject_key,
+            )
+            self.assertEqual(execution.experiment.decision_trace["assignment_path_used"], "framework_assign")
+            self.assertTrue(execution.experiment.decision_trace["config_exists"])
+            self.assertTrue(execution.experiment.experiment_trace["result_recorded"])
+            self.assertEqual(
+                execution.experiment.experiment_trace["result_id"],
+                execution.experiment.experiment_result["result_id"],
+            )
+            self.assertEqual(
+                execution.experiment.experiment_trace["result_metrics_summary"]["qc_status"],
+                execution.video_qc.status,
+            )
             self.assertEqual(execution.pipeline_output["result"]["status"], "READY")
             self.assertEqual(execution.video_qc.status, "APPROVE")
 

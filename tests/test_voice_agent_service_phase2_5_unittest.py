@@ -23,8 +23,6 @@ class VoiceAgentServicePhase25Tests(unittest.TestCase):
         os.environ.update(self.original_env)
 
     def test_generates_operational_voice_plan(self) -> None:
-        os.environ.pop("CORTAI_PREMIUM_TTS_PROVIDER", None)
-        os.environ.pop("CORTAI_PREMIUM_TTS_VOICE", None)
         service = VoiceAgentService()
 
         result = service.resolve(
@@ -39,15 +37,16 @@ class VoiceAgentServicePhase25Tests(unittest.TestCase):
             strategy_profile=StrategyProfile(content_mode="standard"),
         )
 
-        self.assertEqual(result.voice_plan.provider, "piper")
+        self.assertEqual(result.voice_plan.provider, "kokoro")
+        self.assertEqual(result.voice_plan.voice_id, "af_heart")
         self.assertEqual(result.voice_plan.style, "investigative")
         self.assertIn("hook", result.voice_plan.segments)
         self.assertIn("setup", result.voice_plan.segments)
         self.assertIn("payoff", result.voice_plan.segments)
-        self.assertEqual(result.voice_plan.runtime_constraints.fallback_order, ["piper"])
-        self.assertTrue(result.fallback.used)
+        self.assertEqual(result.voice_plan.runtime_constraints.fallback_order, ["kokoro", "piper"])
+        self.assertFalse(result.fallback.used)
 
-    def test_preserves_premium_env_path_but_with_operational_metadata(self) -> None:
+    def test_ignores_premium_env_and_keeps_kokoro_operational_path(self) -> None:
         os.environ["CORTAI_PREMIUM_TTS_PROVIDER"] = "elevenlabs"
         os.environ["CORTAI_PREMIUM_TTS_VOICE"] = "adam"
         service = VoiceAgentService()
@@ -58,8 +57,8 @@ class VoiceAgentServicePhase25Tests(unittest.TestCase):
             script_plan=ScriptPlan(hook="h", setup="s", payoff="p", generation_mode="structured"),
         )
 
-        self.assertEqual(result.voice_plan.provider, "elevenlabs")
-        self.assertEqual(result.voice_plan.voice_id, "adam")
+        self.assertEqual(result.voice_plan.provider, "kokoro")
+        self.assertEqual(result.voice_plan.voice_id, "af_heart")
         self.assertIn("piper", result.voice_plan.runtime_constraints.fallback_order)
         self.assertFalse(result.fallback.used)
 

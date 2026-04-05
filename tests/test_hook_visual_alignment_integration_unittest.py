@@ -122,9 +122,11 @@ class HookVisualAlignmentIntegrationTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(Path(result.creative_pack.asset_plan.hook_asset), Path("assets/backgrounds/conspiracy/conspiracy_02.jpg"))
+        self.assertTrue(result.creative_pack.asset_plan.hook_asset)
+        self.assertEqual(result.creative_pack.asset_plan.visual_anchor, "document")
+        self.assertEqual(result.creative_pack.asset_plan.segments["hook"].category, "document")
 
-    def test_flag_on_changes_only_first_asset(self) -> None:
+    def test_flag_on_keeps_first_frame_semantically_resolved(self) -> None:
         orchestrator = self._experiential_orchestrator()
         os.environ["CORTAI_EXPERIMENT_HOOK_VISUAL_ALIGNMENT"] = "0"
         baseline = orchestrator.build_creative_pack(
@@ -147,8 +149,9 @@ class HookVisualAlignmentIntegrationTests(unittest.TestCase):
             )
         )
 
-        self.assertNotEqual(result.creative_pack.asset_plan.hook_asset, baseline.creative_pack.asset_plan.hook_asset)
-        self.assertEqual(Path(result.creative_pack.asset_plan.hook_asset), Path("assets/backgrounds/horror/horror_03.jpg"))
+        self.assertTrue(result.creative_pack.asset_plan.hook_asset)
+        self.assertEqual(result.creative_pack.asset_plan.visual_anchor, "device")
+        self.assertEqual(result.creative_pack.asset_plan.segments["hook"].category, "monitor_screen")
         self.assertEqual(result.creative_pack.asset_plan.setup_asset, baseline.creative_pack.asset_plan.setup_asset)
         self.assertEqual(result.creative_pack.asset_plan.payoff_asset, baseline.creative_pack.asset_plan.payoff_asset)
 

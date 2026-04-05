@@ -57,7 +57,7 @@ class _TracingTtsAdapter(StubTtsAdapter):
         self.calls: list[str] = []
 
     def supports_provider(self, provider: str) -> bool:
-        return provider in {"openai", "piper"}
+        return provider in {"piper"}
 
     def generate_audio_for_provider(self, *, provider: str, script_text: str, voice_profile: str | None, language: str | None, render_job_id: str, attempt_count: int, overall_rate: float | None = None, inter_segment_pause_ms: list[int] | None = None) -> TtsResponse:
         del script_text, voice_profile, language, attempt_count, overall_rate, inter_segment_pause_ms
@@ -81,8 +81,6 @@ class VoicePlanIntegrationPhase25Tests(unittest.TestCase):
         os.environ.update(self.original_env)
 
     def test_orchestrator_pipeline_and_tts_trace_obey_voice_plan(self) -> None:
-        os.environ["CORTAI_PREMIUM_TTS_PROVIDER"] = "openai"
-        os.environ["CORTAI_PREMIUM_TTS_VOICE"] = "alloy"
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "OUT"
             tts_adapter = _TracingTtsAdapter(base_dir=out / "content")
@@ -110,10 +108,11 @@ class VoicePlanIntegrationPhase25Tests(unittest.TestCase):
             )
 
             self.assertEqual(execution.pipeline_output["result"]["status"], "READY")
-            self.assertEqual(execution.creative_pack.voice_plan.provider, "openai")
-            self.assertEqual(execution.pipeline_output["result"]["tts_trace"]["provider_requested"], "openai")
-            self.assertEqual(execution.pipeline_output["result"]["tts_trace"]["provider_executed"], "openai")
-            self.assertEqual(tts_adapter.calls, ["openai"])
+            self.assertEqual(execution.creative_pack.voice_plan.provider, "kokoro")
+            self.assertEqual(execution.pipeline_output["result"]["tts_trace"]["provider_requested"], "kokoro")
+            self.assertEqual(execution.pipeline_output["result"]["tts_trace"]["provider_executed"], "kokoro")
+            self.assertFalse(execution.pipeline_output["result"]["tts_trace"]["fallback_used"])
+            self.assertEqual(tts_adapter.calls, [])
 
 
 if __name__ == "__main__":
