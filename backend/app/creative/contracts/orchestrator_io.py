@@ -12,6 +12,7 @@ class CreativeOrchestratorInput:
     niche: str
     topic: str
     publish_slot: str
+    force_refresh_trends: bool = False
     creative_pack_id: str | None = None
     experiment_assignment_id: str | None = None
     account_context_ref: str | None = None

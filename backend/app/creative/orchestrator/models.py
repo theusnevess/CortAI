@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from app.creative.agents.learning.models import LearningAgentResult
+from app.creative.agents.novelty.models import NoveltyResult
 from app.creative.agents.asset_selection.models import AssetSelectionResult
 from app.creative.agents.account_health.models import AccountHealthResult
 from app.creative.agents.strategy.models import StrategyResult
@@ -21,6 +22,7 @@ class CreativePipelineExecution:
     account_health: AccountHealthResult | None = None
     trend_analysis: TrendAnalysisResult | None = None
     learning: LearningAgentResult | None = None
+    novelty: NoveltyResult | None = None
     strategy: StrategyResult | None = None
     experiment: ExperimentCapabilityResult | None = None
     asset_selection: AssetSelectionResult | None = None
@@ -34,6 +36,7 @@ class CreativePipelineExecution:
         payload["account_health"] = None if self.account_health is None else self.account_health.to_dict()
         payload["trend_analysis"] = None if self.trend_analysis is None else self.trend_analysis.to_dict()
         payload["learning"] = None if self.learning is None else self.learning.to_dict()
+        payload["novelty"] = None if self.novelty is None else self.novelty.to_dict()
         payload["strategy"] = None if self.strategy is None else self.strategy.to_dict()
         payload["experiment"] = None if self.experiment is None else self.experiment.to_dict()
         payload["asset_selection"] = None if self.asset_selection is None else self.asset_selection.to_dict()

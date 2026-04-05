@@ -12,9 +12,11 @@ from app.creative.contracts.creative_pack import (
     ExperimentAssignment,
     ScriptPlan,
     StrategyProfile,
+    TrendEvidenceReference,
     TrendProfile,
     VoicePlan,
 )
+from app.creative.contracts.edit_plan import EditPlan
 from app.creative.contracts.orchestrator_io import (
     CreativeOrchestratorFailure,
     CreativeOrchestratorInput,
@@ -33,8 +35,10 @@ __all__ = [
     "ExperimentAssignment",
     "ScriptPlan",
     "StrategyProfile",
+    "TrendEvidenceReference",
     "TrendProfile",
     "VoicePlan",
+    "EditPlan",
     "CreativeOrchestratorFailure",
     "CreativeOrchestratorInput",
     "CreativeOrchestratorResult",
