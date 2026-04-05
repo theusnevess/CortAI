@@ -39,9 +39,13 @@ class AccountHealthDecision:
 class AccountHealthResult:
     decision: AccountHealthDecision
     fallback: FallbackDecision
+    input_summary: dict[str, Any] = field(default_factory=dict)
+    decision_trace: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "decision": self.decision.to_dict(),
             "fallback": self.fallback.to_dict(),
+            "input_summary": dict(self.input_summary),
+            "decision_trace": dict(self.decision_trace),
         }

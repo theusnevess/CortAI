@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 
-from app.content.pipeline.tts import DEFAULT_PIPER_MODEL
+from app.content.pipeline.kokoro_adapter import DEFAULT_KOKORO_VOICE
 from app.creative.agents.voice.interpreter import VoiceInterpreter
 from app.creative.agents.voice.models import VoiceAgentInput, VoiceAgentResult
 from app.creative.contracts.agent_common import FallbackDecision, FallbackMode
@@ -37,44 +36,23 @@ class VoiceAgentService:
             script_plan=request.script_plan or self._default_script_plan(),
             strategy_profile=request.strategy_profile,
         )
-
-        premium_voice = os.getenv("CORTAI_PREMIUM_TTS_VOICE") or os.getenv("ELEVENLABS_VOICE_ID")
-        premium_provider = os.getenv("CORTAI_PREMIUM_TTS_PROVIDER") or ("elevenlabs" if premium_voice else "")
-        if premium_provider and premium_voice:
-            return VoiceAgentResult(
-                voice_plan=VoicePlan(
-                    provider=premium_provider,
-                    voice_id=premium_voice,
-                    style=os.getenv("CORTAI_PREMIUM_TTS_STYLE", interpretation.style),
-                    fallback_used=False,
-                    delivery_profile=interpretation.delivery_profile,
-                    segments=interpretation.segments,
-                    runtime_constraints=VoiceRuntimeConstraints(
-                        allow_provider_fallback=True,
-                        fallback_order=[premium_provider, "piper"],
-                    ),
-                ),
-                fallback=FallbackDecision(used=False, mode=FallbackMode.NONE.value, reason=""),
-            )
-
-        piper_model = os.getenv("CORTAI_PIPER_MODEL", DEFAULT_PIPER_MODEL)
         return VoiceAgentResult(
             voice_plan=VoicePlan(
-                provider="piper",
-                voice_id=piper_model,
+                provider="kokoro",
+                voice_id=DEFAULT_KOKORO_VOICE,
                 style=interpretation.style,
-                fallback_used=True,
+                fallback_used=False,
                 delivery_profile=interpretation.delivery_profile,
                 segments=interpretation.segments,
                 runtime_constraints=VoiceRuntimeConstraints(
                     allow_provider_fallback=True,
-                    fallback_order=["piper"],
+                    fallback_order=["kokoro", "piper"],
                 ),
             ),
             fallback=FallbackDecision(
-                used=True,
-                mode=FallbackMode.LOCAL_DEFAULT.value,
-                reason="voice_fallback_to_piper",
+                used=False,
+                mode=FallbackMode.NONE.value,
+                reason="",
             ),
         )
 

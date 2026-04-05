@@ -4,46 +4,40 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from app.creative.contracts.agent_common import FallbackDecision
-from app.creative.contracts.creative_pack import (
-    ExperimentPlan,
-    LearningInsights,
-    ScriptPlan,
-    StrategyProfile,
-    TrendProfile,
-)
+from app.creative.contracts.creative_pack import AssetPlan, ScriptPlan, StrategyProfile, TrendProfile, VoicePlan
+from app.creative.contracts.edit_plan import EditPlan
 
 
 @dataclass(frozen=True)
-class ScriptAgentInput:
+class EditorAgentInput:
     account_id: str
     niche: str
     topic: str
-    account_health_status: str = "SAFE"
+    script_plan: ScriptPlan
+    voice_plan: VoicePlan
+    asset_plan: AssetPlan
     strategy_profile: StrategyProfile | None = None
     trend_profile: TrendProfile | None = None
-    learning_insights: LearningInsights | None = None
-    experiment_plan: ExperimentPlan | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
+        payload["script_plan"] = self.script_plan.to_dict()
+        payload["voice_plan"] = self.voice_plan.to_dict()
+        payload["asset_plan"] = self.asset_plan.to_dict()
         if self.strategy_profile is not None:
             payload["strategy_profile"] = self.strategy_profile.to_dict()
         if self.trend_profile is not None:
             payload["trend_profile"] = self.trend_profile.to_dict()
-        if self.learning_insights is not None:
-            payload["learning_insights"] = self.learning_insights.to_dict()
-        if self.experiment_plan is not None:
-            payload["experiment_plan"] = self.experiment_plan.to_dict()
         return payload
 
 
 @dataclass(frozen=True)
-class ScriptAgentResult:
-    script_plan: ScriptPlan
+class EditorAgentResult:
+    edit_plan: EditPlan
     fallback: FallbackDecision
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "script_plan": self.script_plan.to_dict(),
+            "edit_plan": self.edit_plan.to_dict(),
             "fallback": self.fallback.to_dict(),
         }
