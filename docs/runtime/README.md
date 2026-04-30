@@ -1,0 +1,120 @@
+# Runtime Documentation
+
+Runtime documentation is organized by responsibility and lifecycle stage.
+
+## Directories
+
+- `docs\runtime\architecture/` - 2 files
+- `docs\runtime\baselines/` - 11 files
+- `docs\runtime\full-system-audit/` - 3 files
+- `docs\runtime\phase-2-6/` - 22 files
+- `docs\runtime\phase-3/` - 2 files
+- `docs\runtime\publisher/` - 13 files
+- `docs\runtime\sandbox/` - 51 files
+
+## File Map
+
+- `docs/runtime/architecture/CORTAI_RUNTIME_MASTER_STATE_V2_5.md`
+- `docs/runtime/architecture/CORTAI_SYSTEM_ARCHITECTURE_BIBLE.md`
+- `docs/runtime/baselines/account-health/ACCOUNT_HEALTH_AGENT_BASELINE_OPERATION_RULES_v1_0.md`
+- `docs/runtime/baselines/account-health/ACCOUNT_HEALTH_AGENT_SYSTEM_BIBLE_PHASE1.md`
+- `docs/runtime/baselines/asset/ASSET_AGENT_DECISION_STANDARD.md`
+- `docs/runtime/baselines/asset/ASSET_AGENT_SYSTEM_BIBLE.md`
+- `docs/runtime/baselines/attribution/CONTENT_PERFORMANCE_ATTRIBUTION_SYSTEM_BIBLE_PHASE1.md`
+- `docs/runtime/baselines/experiment/EXPERIMENT_CAPABILITY_SYSTEM_BIBLE_PHASE1.md`
+- `docs/runtime/baselines/learning/LEARNING_AGENT_SYSTEM_BIBLE_PHASE1.md`
+- `docs/runtime/baselines/qc/QC_AGENT_SYSTEM_BIBLE.md`
+- `docs/runtime/baselines/strategy/STRATEGY_AGENT_SYSTEM_BIBLE_PHASE1.md`
+- `docs/runtime/baselines/trend-analysis/TREND_ANALYSIS_AGENT_FULL_SYSTEM_AUDIT_CHECKLIST_v2_0.md`
+- `docs/runtime/baselines/trend-analysis/TREND_ANALYSIS_AGENT_SYSTEM_BIBLE_PHASE1.md`
+- `docs/runtime/full-system-audit/FULL_SYSTEM_AUDIT_REPORT.md`
+- `docs/runtime/full-system-audit/FULL_SYSTEM_EXTREME_AUDIT_CHECKLIST.md`
+- `docs/runtime/full-system-audit/FULL_SYSTEM_EXTREME_AUDIT_GATE.md`
+- `docs/runtime/phase-2-6/agents/account-health/ACCOUNT_HEALTH_AGENT_V2_6_EXCELLENCE_GATE.md`
+- `docs/runtime/phase-2-6/agents/account-health/ACCOUNT_HEALTH_AGENT_V2_6_EXCELLENCE_PLAN.md`
+- `docs/runtime/phase-2-6/agents/asset-selection/ASSET_SELECTION_AGENT_V2_6_EXCELLENCE_GATE.md`
+- `docs/runtime/phase-2-6/agents/asset-selection/ASSET_SELECTION_AGENT_V2_6_EXCELLENCE_PLAN.md`
+- `docs/runtime/phase-2-6/agents/learning/LEARNING_AGENT_V2_6_EXCELLENCE_GATE.md`
+- `docs/runtime/phase-2-6/agents/learning/LEARNING_AGENT_V2_6_EXCELLENCE_PLAN.md`
+- `docs/runtime/phase-2-6/agents/script/SCRIPT_AGENT_V2_6_EXCELLENCE_GATE.md`
+- `docs/runtime/phase-2-6/agents/script/SCRIPT_AGENT_V2_6_EXCELLENCE_PLAN.md`
+- `docs/runtime/phase-2-6/agents/trend-analysis/TREND_ANALYSIS_AGENT_V2_6_EXCELLENCE_GATE.md`
+- `docs/runtime/phase-2-6/agents/trend-analysis/TREND_ANALYSIS_AGENT_V2_6_EXCELLENCE_PLAN.md`
+- `docs/runtime/phase-2-6/agents/video-qc/VIDEO_QC_AGENT_V2_6_EXCELLENCE_GATE.md`
+- `docs/runtime/phase-2-6/agents/video-qc/VIDEO_QC_AGENT_V2_6_EXCELLENCE_PLAN.md`
+- `docs/runtime/phase-2-6/agents/voice/VOICE_AGENT_V2_6_EXCELLENCE_GATE.md`
+- `docs/runtime/phase-2-6/agents/voice/VOICE_AGENT_V2_6_EXCELLENCE_PLAN.md`
+- `docs/runtime/phase-2-6/master/PHASE_2_6_EXCELLENCE_HARDENING_MASTER_PLAN.md`
+- `docs/runtime/phase-2-6/master/PHASE_2_6_WAVE_2_OUTPUT_EXCELLENCE_PLAN.md`
+- `docs/runtime/phase-2-6/master-gates/CORTAI_ABSOLUTE_MASTER_GATE_PRE_WAVE_2.md`
+- `docs/runtime/phase-2-6/master-gates/PHASE_2_6_FINAL_MASTER_GATE.md`
+- `docs/runtime/phase-2-6/master-gates/PHASE_2_6_PARTIAL_MASTER_GATE_LEARNING_ACCOUNT_HEALTH.md`
+- `docs/runtime/phase-2-6/master-gates/PHASE_2_6_WAVE_1_MASTER_GATE.md`
+- `docs/runtime/phase-2-6/master-gates/PHASE_2_6_WAVE_2_MASTER_GATE.md`
+- `docs/runtime/phase-2-6/reports/PHASE_2_6_WAVES_1_AND_2_REPORT.md`
+- `docs/runtime/phase-3/monitoring/PRODUCTION_MONITORING_AND_RUNTIME_EVIDENCE_PLAN.md`
+- `docs/runtime/phase-3/PHASE_3_OPERATIONAL_GOVERNANCE_AND_MATURITY_PLAN.md`
+- `docs/runtime/publisher/dry-run/PUBLISHER_DRY_RUN_BATCH_COLLECTION_GATE.md`
+- `docs/runtime/publisher/dry-run/PUBLISHER_DRY_RUN_BATCH_COLLECTION_PLAN.md`
+- `docs/runtime/publisher/dry-run/PUBLISHER_DRY_RUN_OPERATIONAL_EVIDENCE_GATE.md`
+- `docs/runtime/publisher/dry-run/PUBLISHER_DRY_RUN_OPERATIONAL_EVIDENCE_PLAN.md`
+- `docs/runtime/publisher/governance/PUBLISHER_GOVERNANCE_AND_PUBLISH_TRACE_GATE.md`
+- `docs/runtime/publisher/governance/PUBLISHER_GOVERNANCE_AND_PUBLISH_TRACE_GATE_PLAN.md`
+- `docs/runtime/publisher/governance/PUBLISHER_GOVERNANCE_AND_PUBLISH_TRACE_PLAN.md`
+- `docs/runtime/publisher/platform-integration/PUBLISHER_PLATFORM_INTEGRATION_GATE.md`
+- `docs/runtime/publisher/platform-integration/PUBLISHER_PLATFORM_INTEGRATION_GATE_PLAN.md`
+- `docs/runtime/publisher/platform-integration/PUBLISHER_PLATFORM_INTEGRATION_PLAN.md`
+- `docs/runtime/publisher/trace/PUBLISHER_TRACE_IMPLEMENTATION_GATE.md`
+- `docs/runtime/publisher/trace/PUBLISHER_TRACE_IMPLEMENTATION_GATE_PLAN.md`
+- `docs/runtime/publisher/trace/PUBLISHER_TRACE_IMPLEMENTATION_PLAN.md`
+- `docs/runtime/sandbox/adapter/SANDBOX_ADAPTER_IMPLEMENTATION_GATE.md`
+- `docs/runtime/sandbox/adapter/SANDBOX_ADAPTER_IMPLEMENTATION_PLAN.md`
+- `docs/runtime/sandbox/authorization/EXTERNAL_SANDBOX_EXTERNAL_CALL_AUTHORIZATION_CHECKPOINT.md`
+- `docs/runtime/sandbox/authorization/EXTERNAL_SANDBOX_FIRST_AUTHORIZATION_GATE.md`
+- `docs/runtime/sandbox/authorization/EXTERNAL_SANDBOX_FIRST_AUTHORIZATION_GATE_REVIEW.md`
+- `docs/runtime/sandbox/authorization/EXTERNAL_SANDBOX_FIRST_AUTHORIZATION_PLAN.md`
+- `docs/runtime/sandbox/authorization/EXTERNAL_SANDBOX_SANDBOX_VALIDATION_CALL_AUTHORIZATION_GATE.md`
+- `docs/runtime/sandbox/authorization/EXTERNAL_SANDBOX_SANDBOX_VALIDATION_CALL_AUTHORIZATION_GATE_REVIEW.md`
+- `docs/runtime/sandbox/authorization/EXTERNAL_SANDBOX_SANDBOX_VALIDATION_CALL_AUTHORIZATION_PLAN.md`
+- `docs/runtime/sandbox/controlled-binding/EXTERNAL_SANDBOX_CONTROLLED_BINDING_GATE.md`
+- `docs/runtime/sandbox/controlled-binding/EXTERNAL_SANDBOX_CONTROLLED_BINDING_PLAN.md`
+- `docs/runtime/sandbox/controlled-binding/EXTERNAL_SANDBOX_CONTROLLED_BINDING_REVIEW.md`
+- `docs/runtime/sandbox/envelope/EXTERNAL_SANDBOX_REQUEST_ENVELOPE_GATE.md`
+- `docs/runtime/sandbox/envelope/EXTERNAL_SANDBOX_REQUEST_ENVELOPE_IMPLEMENTATION_GATE.md`
+- `docs/runtime/sandbox/envelope/EXTERNAL_SANDBOX_REQUEST_ENVELOPE_IMPLEMENTATION_GATE_REVIEW.md`
+- `docs/runtime/sandbox/envelope/EXTERNAL_SANDBOX_REQUEST_ENVELOPE_IMPLEMENTATION_PLAN.md`
+- `docs/runtime/sandbox/envelope/EXTERNAL_SANDBOX_REQUEST_ENVELOPE_PLAN.md`
+- `docs/runtime/sandbox/evidence/EXTERNAL_SANDBOX_EVIDENCE_COLLECTION_GATE.md`
+- `docs/runtime/sandbox/evidence/EXTERNAL_SANDBOX_EVIDENCE_COLLECTION_PLAN.md`
+- `docs/runtime/sandbox/external-call-boundary/EXTERNAL_SANDBOX_EXTERNAL_CALL_BOUNDARY_GATE.md`
+- `docs/runtime/sandbox/external-call-boundary/EXTERNAL_SANDBOX_EXTERNAL_CALL_BOUNDARY_IMPLEMENTATION_GATE.md`
+- `docs/runtime/sandbox/external-call-boundary/EXTERNAL_SANDBOX_EXTERNAL_CALL_BOUNDARY_IMPLEMENTATION_PLAN.md`
+- `docs/runtime/sandbox/external-call-boundary/EXTERNAL_SANDBOX_EXTERNAL_CALL_BOUNDARY_IMPLEMENTATION_REVIEW.md`
+- `docs/runtime/sandbox/external-call-boundary/EXTERNAL_SANDBOX_EXTERNAL_CALL_BOUNDARY_PLAN.md`
+- `docs/runtime/sandbox/external-call-boundary/EXTERNAL_SANDBOX_EXTERNAL_CALL_BOUNDARY_REVIEW.md`
+- `docs/runtime/sandbox/pre-execution-guard/EXTERNAL_SANDBOX_EXTERNAL_CALL_PRE_EXECUTION_GUARD_GATE.md`
+- `docs/runtime/sandbox/pre-execution-guard/EXTERNAL_SANDBOX_EXTERNAL_CALL_PRE_EXECUTION_GUARD_PLAN.md`
+- `docs/runtime/sandbox/pre-execution-guard/EXTERNAL_SANDBOX_EXTERNAL_CALL_PRE_EXECUTION_GUARD_REVIEW.md`
+- `docs/runtime/sandbox/simulation/EXTERNAL_SANDBOX_EXECUTION_SIMULATION_GATE.md`
+- `docs/runtime/sandbox/simulation/EXTERNAL_SANDBOX_EXECUTION_SIMULATION_PLAN.md`
+- `docs/runtime/sandbox/simulation/EXTERNAL_SANDBOX_EXECUTION_SIMULATION_REVIEW.md`
+- `docs/runtime/sandbox/validation-call/implementation-authorization/EXTERNAL_SANDBOX_VALIDATION_CALL_IMPLEMENTATION_AUTHORIZATION_GATE.md`
+- `docs/runtime/sandbox/validation-call/implementation-authorization/EXTERNAL_SANDBOX_VALIDATION_CALL_IMPLEMENTATION_AUTHORIZATION_GATE_REVIEW.md`
+- `docs/runtime/sandbox/validation-call/implementation-authorization/EXTERNAL_SANDBOX_VALIDATION_CALL_IMPLEMENTATION_AUTHORIZATION_PLAN.md`
+- `docs/runtime/sandbox/validation-call/implementation-authorization/EXTERNAL_SANDBOX_VALIDATION_CALL_IMPLEMENTATION_AUTHORIZATION_REVIEW.md`
+- `docs/runtime/sandbox/validation-call/implementation-authorization/EXTERNAL_SANDBOX_VALIDATION_CALL_IMPLEMENTATION_AUTHORIZATION_REVIEW_GATE.md`
+- `docs/runtime/sandbox/validation-call/implementation-authorization/EXTERNAL_SANDBOX_VALIDATION_CALL_IMPLEMENTATION_AUTHORIZATION_REVIEW_PLAN.md`
+- `docs/runtime/sandbox/validation-call/offline-preparation/EXTERNAL_SANDBOX_VALIDATION_CALL_OFFLINE_PREPARATION_IMPLEMENTATION_ACCEPTANCE_REVIEW.md`
+- `docs/runtime/sandbox/validation-call/offline-preparation/EXTERNAL_SANDBOX_VALIDATION_CALL_OFFLINE_PREPARATION_IMPLEMENTATION_AUTHORIZATION.md`
+- `docs/runtime/sandbox/validation-call/offline-preparation/EXTERNAL_SANDBOX_VALIDATION_CALL_OFFLINE_PREPARATION_IMPLEMENTATION_GATE.md`
+- `docs/runtime/sandbox/validation-call/offline-preparation/EXTERNAL_SANDBOX_VALIDATION_CALL_OFFLINE_PREPARATION_IMPLEMENTATION_GATE_REVIEW.md`
+- `docs/runtime/sandbox/validation-call/offline-preparation/EXTERNAL_SANDBOX_VALIDATION_CALL_OFFLINE_PREPARATION_IMPLEMENTATION_PLAN.md`
+- `docs/runtime/sandbox/validation-call/offline-preparation/EXTERNAL_SANDBOX_VALIDATION_CALL_OFFLINE_PREPARATION_RUNTIME_INTEGRATION_GATE.md`
+- `docs/runtime/sandbox/validation-call/offline-preparation/EXTERNAL_SANDBOX_VALIDATION_CALL_OFFLINE_PREPARATION_RUNTIME_INTEGRATION_GATE_REVIEW.md`
+- `docs/runtime/sandbox/validation-call/offline-preparation/EXTERNAL_SANDBOX_VALIDATION_CALL_OFFLINE_PREPARATION_RUNTIME_INTEGRATION_PLAN.md`
+- `docs/runtime/sandbox/validation-call/offline-preparation/EXTERNAL_SANDBOX_VALIDATION_CALL_OFFLINE_PREPARATION_RUNTIME_INTEGRATION_READINESS_GATE.md`
+- `docs/runtime/sandbox/validation-call/offline-preparation/EXTERNAL_SANDBOX_VALIDATION_CALL_OFFLINE_PREPARATION_RUNTIME_INTEGRATION_READINESS_GATE_REVIEW.md`
+- `docs/runtime/sandbox/validation-call/offline-preparation/EXTERNAL_SANDBOX_VALIDATION_CALL_OFFLINE_PREPARATION_RUNTIME_INTEGRATION_READINESS_PLAN.md`
+- `docs/runtime/sandbox/validation-call/pre-implementation/EXTERNAL_SANDBOX_VALIDATION_CALL_PRE_IMPLEMENTATION_GATE.md`
+- `docs/runtime/sandbox/validation-call/pre-implementation/EXTERNAL_SANDBOX_VALIDATION_CALL_PRE_IMPLEMENTATION_GATE_REVIEW.md`
+- `docs/runtime/sandbox/validation-call/pre-implementation/EXTERNAL_SANDBOX_VALIDATION_CALL_PRE_IMPLEMENTATION_PLAN.md`

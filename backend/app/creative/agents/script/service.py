@@ -6,7 +6,16 @@ import os
 from app.content.script_gen.models import ScriptGenerationContext, ScriptGenerationRequest
 from app.content.script_gen.service import LocalScriptGeneratorService, ScriptGenerationError
 from app.content.screen_text.service import ScreenTextAdapterService
+from app.creative.agents.script.confidence_calibration import ScriptConfidenceCalibrator
+from app.creative.agents.script.context_governance import ScriptContextGovernanceEvaluator
+from app.creative.agents.script.diversity_analysis import ScriptDiversityAnalyzer
+from app.creative.agents.script.hook_analysis import ScriptHookStrengthAnalyzer
 from app.creative.agents.script.models import ScriptAgentInput, ScriptAgentResult
+from app.creative.agents.script.payoff_analysis import ScriptPayoffMemorabilityAnalyzer
+from app.creative.agents.script.provider_fallback_trace import ScriptProviderFallbackTracer
+from app.creative.agents.script.quality_rubric import ScriptQualityRubricEvaluator
+from app.creative.agents.script.setup_analysis import ScriptSetupProgressionAnalyzer
+from app.creative.agents.script.trace_auditability import ScriptTraceBuilder
 from app.creative.contracts.agent_common import FallbackDecision, FallbackMode
 from app.creative.contracts.creative_pack import ScriptPlan
 
@@ -15,8 +24,19 @@ from app.creative.contracts.creative_pack import ScriptPlan
 class ScriptAgentService:
     generator: LocalScriptGeneratorService = field(default_factory=LocalScriptGeneratorService)
     screen_text_adapter: ScreenTextAdapterService = field(default_factory=ScreenTextAdapterService)
+    context_governance_evaluator: ScriptContextGovernanceEvaluator = field(default_factory=ScriptContextGovernanceEvaluator)
+    quality_rubric_evaluator: ScriptQualityRubricEvaluator = field(default_factory=ScriptQualityRubricEvaluator)
+    hook_strength_analyzer: ScriptHookStrengthAnalyzer = field(default_factory=ScriptHookStrengthAnalyzer)
+    setup_progression_analyzer: ScriptSetupProgressionAnalyzer = field(default_factory=ScriptSetupProgressionAnalyzer)
+    payoff_memorability_analyzer: ScriptPayoffMemorabilityAnalyzer = field(default_factory=ScriptPayoffMemorabilityAnalyzer)
+    diversity_analyzer: ScriptDiversityAnalyzer = field(default_factory=ScriptDiversityAnalyzer)
+    provider_fallback_tracer: ScriptProviderFallbackTracer = field(default_factory=ScriptProviderFallbackTracer)
+    confidence_calibrator: ScriptConfidenceCalibrator = field(default_factory=ScriptConfidenceCalibrator)
+    trace_builder: ScriptTraceBuilder = field(default_factory=ScriptTraceBuilder)
 
     def generate(self, data: ScriptAgentInput) -> ScriptAgentResult:
+        context_governance = self.context_governance_evaluator.evaluate(data).to_dict()
+        decision_trace = {"context_governance": context_governance}
         try:
             context = ScriptGenerationContext(
                 account_id=data.account_id,
@@ -47,24 +67,161 @@ class ScriptAgentService:
                 setup=generation.script_plan.setup,
                 payoff=generation.script_plan.payoff,
             )
-            return ScriptAgentResult(
-                script_plan=ScriptPlan(
-                    hook=blocks.hook_text,
-                    setup=blocks.setup_text,
-                    payoff=blocks.payoff_text,
-                    generation_mode=generation.script_plan.generation_mode,
-                ),
-                fallback=generation.fallback,
+            script_plan = ScriptPlan(
+                hook=blocks.hook_text,
+                setup=blocks.setup_text,
+                payoff=blocks.payoff_text,
+                generation_mode=generation.script_plan.generation_mode,
             )
-        except ScriptGenerationError:
+            quality_rubric = self.quality_rubric_evaluator.evaluate(
+                script_plan=script_plan,
+                data=data,
+                context_governance=context_governance,
+            ).to_dict()
+            hook_analysis = self.hook_strength_analyzer.analyze(
+                script_plan=script_plan,
+                data=data,
+            ).to_dict()
+            setup_analysis = self.setup_progression_analyzer.analyze(
+                script_plan=script_plan,
+                data=data,
+            ).to_dict()
+            payoff_analysis = self.payoff_memorability_analyzer.analyze(
+                script_plan=script_plan,
+                data=data,
+            ).to_dict()
+            diversity_analysis = self.diversity_analyzer.analyze(
+                script_plan=script_plan,
+                data=data,
+            ).to_dict()
+            provider_fallback_trace = self.provider_fallback_tracer.from_generation(
+                generation=generation,
+                script_plan=script_plan,
+            ).to_dict()
+            confidence_calibration = self.confidence_calibrator.calibrate(
+                context_governance=context_governance,
+                quality_rubric=quality_rubric,
+                hook_analysis=hook_analysis,
+                setup_analysis=setup_analysis,
+                payoff_analysis=payoff_analysis,
+                diversity_analysis=diversity_analysis,
+                provider_fallback_trace=provider_fallback_trace,
+            ).to_dict()
+            decision_trace["quality_rubric"] = quality_rubric
+            decision_trace["hook_analysis"] = hook_analysis
+            decision_trace["setup_analysis"] = setup_analysis
+            decision_trace["payoff_analysis"] = payoff_analysis
+            decision_trace["diversity_analysis"] = diversity_analysis
+            decision_trace["provider_fallback_trace"] = provider_fallback_trace
+            decision_trace["confidence_calibration"] = confidence_calibration
+            script_trace = self.trace_builder.build(
+                script_plan=script_plan,
+                fallback=generation.fallback,
+                context_governance=context_governance,
+                quality_rubric=quality_rubric,
+                hook_analysis=hook_analysis,
+                setup_analysis=setup_analysis,
+                payoff_analysis=payoff_analysis,
+                diversity_analysis=diversity_analysis,
+                provider_fallback_trace=provider_fallback_trace,
+                confidence_calibration=confidence_calibration,
+            ).to_dict()
+            decision_trace["script_trace"] = script_trace
+            return ScriptAgentResult(
+                script_plan=script_plan,
+                fallback=generation.fallback,
+                context_governance=context_governance,
+                quality_rubric=quality_rubric,
+                hook_analysis=hook_analysis,
+                setup_analysis=setup_analysis,
+                payoff_analysis=payoff_analysis,
+                diversity_analysis=diversity_analysis,
+                provider_fallback_trace=provider_fallback_trace,
+                confidence=confidence_calibration["confidence"],
+                confidence_level=confidence_calibration["confidence_level"],
+                confidence_components=confidence_calibration["confidence_components"],
+                confidence_rationale=confidence_calibration["confidence_rationale"],
+                script_trace=script_trace,
+                decision_trace=decision_trace,
+            )
+        except ScriptGenerationError as exc:
             fallback_plan = self._fallback_script(data)
+            fallback_decision = FallbackDecision(
+                used=True,
+                mode=FallbackMode.SAFE_DEFAULT.value,
+                reason="script_generation_contextual_fallback",
+            )
+            quality_rubric = self.quality_rubric_evaluator.evaluate(
+                script_plan=fallback_plan,
+                data=data,
+                context_governance=context_governance,
+            ).to_dict()
+            hook_analysis = self.hook_strength_analyzer.analyze(
+                script_plan=fallback_plan,
+                data=data,
+            ).to_dict()
+            setup_analysis = self.setup_progression_analyzer.analyze(
+                script_plan=fallback_plan,
+                data=data,
+            ).to_dict()
+            payoff_analysis = self.payoff_memorability_analyzer.analyze(
+                script_plan=fallback_plan,
+                data=data,
+            ).to_dict()
+            diversity_analysis = self.diversity_analyzer.analyze(
+                script_plan=fallback_plan,
+                data=data,
+            ).to_dict()
+            provider_fallback_trace = self.provider_fallback_tracer.from_exception(
+                exc=exc,
+                fallback=fallback_decision,
+                script_plan=fallback_plan,
+            ).to_dict()
+            confidence_calibration = self.confidence_calibrator.calibrate(
+                context_governance=context_governance,
+                quality_rubric=quality_rubric,
+                hook_analysis=hook_analysis,
+                setup_analysis=setup_analysis,
+                payoff_analysis=payoff_analysis,
+                diversity_analysis=diversity_analysis,
+                provider_fallback_trace=provider_fallback_trace,
+            ).to_dict()
+            decision_trace["quality_rubric"] = quality_rubric
+            decision_trace["hook_analysis"] = hook_analysis
+            decision_trace["setup_analysis"] = setup_analysis
+            decision_trace["payoff_analysis"] = payoff_analysis
+            decision_trace["diversity_analysis"] = diversity_analysis
+            decision_trace["provider_fallback_trace"] = provider_fallback_trace
+            decision_trace["confidence_calibration"] = confidence_calibration
+            script_trace = self.trace_builder.build(
+                script_plan=fallback_plan,
+                fallback=fallback_decision,
+                context_governance=context_governance,
+                quality_rubric=quality_rubric,
+                hook_analysis=hook_analysis,
+                setup_analysis=setup_analysis,
+                payoff_analysis=payoff_analysis,
+                diversity_analysis=diversity_analysis,
+                provider_fallback_trace=provider_fallback_trace,
+                confidence_calibration=confidence_calibration,
+            ).to_dict()
+            decision_trace["script_trace"] = script_trace
             return ScriptAgentResult(
                 script_plan=fallback_plan,
-                fallback=FallbackDecision(
-                    used=True,
-                    mode=FallbackMode.SAFE_DEFAULT.value,
-                    reason="script_generation_contextual_fallback",
-                ),
+                fallback=fallback_decision,
+                context_governance=context_governance,
+                quality_rubric=quality_rubric,
+                hook_analysis=hook_analysis,
+                setup_analysis=setup_analysis,
+                payoff_analysis=payoff_analysis,
+                diversity_analysis=diversity_analysis,
+                provider_fallback_trace=provider_fallback_trace,
+                confidence=confidence_calibration["confidence"],
+                confidence_level=confidence_calibration["confidence_level"],
+                confidence_components=confidence_calibration["confidence_components"],
+                confidence_rationale=confidence_calibration["confidence_rationale"],
+                script_trace=script_trace,
+                decision_trace=decision_trace,
             )
 
     def _fallback_script(self, data: ScriptAgentInput) -> ScriptPlan:

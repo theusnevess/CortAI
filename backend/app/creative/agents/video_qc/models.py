@@ -43,6 +43,14 @@ class VideoQcResult:
     checked_at: str = ""
     publishable: bool = False
     details: dict[str, Any] = field(default_factory=dict)
+    qc_input_governance: dict[str, Any] = field(default_factory=dict)
+    qc_evidence_scoring: dict[str, Any] = field(default_factory=dict)
+    decision_semantics: dict[str, Any] = field(default_factory=dict)
+    qc_trace: dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+    confidence_level: str = ""
+    confidence_components: dict[str, float] = field(default_factory=dict)
+    confidence_rationale: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

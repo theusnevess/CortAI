@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from app.creative.contracts.agent_common import FallbackDecision
@@ -27,9 +27,33 @@ class VoiceAgentInput:
 class VoiceAgentResult:
     voice_plan: VoicePlan
     fallback: FallbackDecision
+    voice_plan_governance: dict[str, Any] = field(default_factory=dict)
+    delivery_semantics: dict[str, Any] = field(default_factory=dict)
+    segment_timing: dict[str, Any] = field(default_factory=dict)
+    monotony_contrast_analysis: dict[str, Any] = field(default_factory=dict)
+    provider_fallback_honesty: dict[str, Any] = field(default_factory=dict)
+    audio_validation_linkage: dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+    confidence_level: str = "low"
+    confidence_components: dict[str, float] = field(default_factory=dict)
+    confidence_rationale: dict[str, Any] = field(default_factory=dict)
+    confidence_calibration: dict[str, Any] = field(default_factory=dict)
+    voice_trace: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "voice_plan": self.voice_plan.to_dict(),
             "fallback": self.fallback.to_dict(),
+            "voice_plan_governance": dict(self.voice_plan_governance),
+            "delivery_semantics": dict(self.delivery_semantics),
+            "segment_timing": dict(self.segment_timing),
+            "monotony_contrast_analysis": dict(self.monotony_contrast_analysis),
+            "provider_fallback_honesty": dict(self.provider_fallback_honesty),
+            "audio_validation_linkage": dict(self.audio_validation_linkage),
+            "confidence": self.confidence,
+            "confidence_level": self.confidence_level,
+            "confidence_components": dict(self.confidence_components),
+            "confidence_rationale": dict(self.confidence_rationale),
+            "confidence_calibration": dict(self.confidence_calibration),
+            "voice_trace": dict(self.voice_trace),
         }

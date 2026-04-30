@@ -238,6 +238,16 @@ class LearningInsights:
     saturation_signal: str = "baseline"
     recommendations: list[str] = field(default_factory=list)
     signal_summary: dict[str, Any] = field(default_factory=dict)
+    qc_summary: dict[str, Any] = field(default_factory=dict)
+    qc_patterns: list[dict[str, Any]] = field(default_factory=list)
+    qc_confidence_summary: dict[str, Any] = field(default_factory=dict)
+    temporal_analysis: dict[str, Any] = field(default_factory=dict)
+    contamination_summary: dict[str, Any] = field(default_factory=dict)
+    noise_summary: dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+    confidence_components: dict[str, float] = field(default_factory=dict)
+    confidence_rationale: dict[str, Any] = field(default_factory=dict)
+    learning_trace: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -254,12 +264,49 @@ class LearningPolicySignal:
 
 
 @dataclass(frozen=True)
+class LearningStrategyPressureTarget:
+    field: str = ""
+    value: str = ""
+    confidence: float = 0.0
+    evidence_count: int = 0
+    rationale: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class LearningStrategyPressure:
+    pressure_mode: str = "weak_bias"
+    pressure_targets: list[LearningStrategyPressureTarget] = field(default_factory=list)
+    confidence: float = 0.0
+    bounded: bool = True
+    strategy_influence_mode: str = "bounded"
+    strategy_override_allowed: bool = True
+    higher_authority_constraints_apply: bool = True
+    pressure_origin_summary: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "pressure_mode": self.pressure_mode,
+            "pressure_targets": [target.to_dict() for target in self.pressure_targets],
+            "confidence": self.confidence,
+            "bounded": self.bounded,
+            "strategy_influence_mode": self.strategy_influence_mode,
+            "strategy_override_allowed": self.strategy_override_allowed,
+            "higher_authority_constraints_apply": self.higher_authority_constraints_apply,
+            "pressure_origin_summary": dict(self.pressure_origin_summary),
+        }
+
+
+@dataclass(frozen=True)
 class LearningPolicy:
     hook_type_bias: LearningPolicySignal = field(default_factory=LearningPolicySignal)
     duration_bias: LearningPolicySignal = field(default_factory=LearningPolicySignal)
     payoff_specificity_bias: LearningPolicySignal = field(default_factory=LearningPolicySignal)
     risk_adjustment_hint: LearningPolicySignal = field(default_factory=LearningPolicySignal)
     variation_tolerance_hint: LearningPolicySignal = field(default_factory=LearningPolicySignal)
+    strategy_pressure: LearningStrategyPressure = field(default_factory=LearningStrategyPressure)
     confidence_summary: dict[str, Any] = field(default_factory=dict)
     policy_trace: dict[str, Any] = field(default_factory=dict)
 
@@ -270,6 +317,7 @@ class LearningPolicy:
             "payoff_specificity_bias": self.payoff_specificity_bias.to_dict(),
             "risk_adjustment_hint": self.risk_adjustment_hint.to_dict(),
             "variation_tolerance_hint": self.variation_tolerance_hint.to_dict(),
+            "strategy_pressure": self.strategy_pressure.to_dict(),
             "confidence_summary": dict(self.confidence_summary),
             "policy_trace": dict(self.policy_trace),
         }
@@ -285,6 +333,8 @@ class PatternFindingSummary:
     avg_overall_score: float = 0.0
     avg_product_quality: float = 0.0
     contaminated_evidence_rate: float = 0.0
+    confidence: float = 0.0
+    confidence_rationale: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

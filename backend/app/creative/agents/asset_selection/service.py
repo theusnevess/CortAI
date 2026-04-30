@@ -7,6 +7,15 @@ from pathlib import Path
 import re
 
 from app.content.backgrounds.service import BackgroundGeneratorService
+from app.creative.agents.asset_selection.catalog_source_governance import AssetCatalogSourceGovernanceEvaluator
+from app.creative.agents.asset_selection.confidence_calibration import AssetConfidenceCalibrator
+from app.creative.agents.asset_selection.context_governance import AssetContextGovernanceEvaluator
+from app.creative.agents.asset_selection.diversity_guard import AssetDiversityGuard
+from app.creative.agents.asset_selection.fallback_honesty import AssetFallbackHonestyEvaluator
+from app.creative.agents.asset_selection.segment_visual_intent import AssetSegmentVisualIntentMapper
+from app.creative.agents.asset_selection.trace_auditability import AssetTraceBuilder
+from app.creative.agents.asset_selection.visual_semantic_alignment import AssetVisualSemanticAlignmentEvaluator
+from app.creative.agents.asset_selection.visual_truthfulness import AssetVisualTruthfulnessEvaluator
 from app.creative.agents.asset.interpreter import AssetInterpreterService
 from app.creative.agents.asset_selection.models import AssetSelectionInput, AssetSelectionResult
 from app.creative.contracts.agent_common import FallbackDecision, FallbackMode
@@ -25,10 +34,30 @@ class AssetSelectionAgentService:
     background_service: BackgroundGeneratorService = field(default_factory=BackgroundGeneratorService)
     interpreter: AssetInterpreterService = field(default_factory=AssetInterpreterService)
     selector: AssetSelector = field(default_factory=AssetSelector)
+    context_governance: AssetContextGovernanceEvaluator = field(default_factory=AssetContextGovernanceEvaluator)
+    source_governance: AssetCatalogSourceGovernanceEvaluator = field(default_factory=AssetCatalogSourceGovernanceEvaluator)
+    segment_intent_mapper: AssetSegmentVisualIntentMapper = field(default_factory=AssetSegmentVisualIntentMapper)
+    visual_alignment_evaluator: AssetVisualSemanticAlignmentEvaluator = field(default_factory=AssetVisualSemanticAlignmentEvaluator)
+    visual_truthfulness_evaluator: AssetVisualTruthfulnessEvaluator = field(default_factory=AssetVisualTruthfulnessEvaluator)
+    fallback_honesty_evaluator: AssetFallbackHonestyEvaluator = field(default_factory=AssetFallbackHonestyEvaluator)
+    diversity_guard: AssetDiversityGuard = field(default_factory=AssetDiversityGuard)
+    confidence_calibrator: AssetConfidenceCalibrator = field(default_factory=AssetConfidenceCalibrator)
+    trace_builder: AssetTraceBuilder = field(default_factory=AssetTraceBuilder)
 
     def select(self, data: AssetSelectionInput) -> AssetSelectionResult:
-        if not self._has_local_assets():
-            return self._fallback_result()
+        local_assets_available = self._has_local_assets()
+        if not local_assets_available:
+            fallback_result = self._fallback_result()
+            return self._with_context_governance(
+                data=data,
+                result=fallback_result,
+                local_assets_available=False,
+                script_plan_used=None,
+                script_fallback_used=False,
+                selection_requests={},
+                segment_fallback_trace={},
+            )
+        script_fallback_used = data.script_plan is None
         script_plan = data.script_plan or self._fallback_script_plan(data.topic)
         seed = self._selection_key(data.niche, data.topic, script_plan, data.strategy_profile)
         plan = self.interpreter.build_plan(
@@ -44,6 +73,8 @@ class AssetSelectionAgentService:
             script_plan=script_plan,
         )
         resolved_segments: dict[str, AssetSegmentPlan] = {}
+        selection_requests: dict[str, dict[str, object]] = {}
+        segment_fallback_trace: dict[str, dict[str, object]] = {}
         used_paths: set[str] = set()
         for segment_name in ("hook", "setup", "payoff"):
             segment = plan.segments.get(segment_name, AssetSegmentPlan())
@@ -72,19 +103,28 @@ class AssetSelectionAgentService:
                 strategy_profile=data.strategy_profile,
                 payoff_evidence=payoff_evidence,
             )
+            minimum_score = self._minimum_local_score(
+                segment_name=segment_name,
+                strategy_profile=data.strategy_profile,
+                payoff_evidence=payoff_evidence,
+            )
+            selection_requests[segment_name] = {
+                "requested_category": effective_category,
+                "requested_tags": list(effective_tags),
+                "query_text": query_text,
+                "minimum_score": minimum_score,
+            }
             local_path = self.selector.select(
                 category=effective_category,
                 tags=effective_tags,
                 seed=f"{seed}:{segment_name}",
                 exclude_paths=used_paths,
                 query_text=query_text,
-                minimum_score=self._minimum_local_score(
-                    segment_name=segment_name,
-                    strategy_profile=data.strategy_profile,
-                    payoff_evidence=payoff_evidence,
-                ),
+                minimum_score=minimum_score,
                 segment_role=segment_name,
             ) or ""
+            primary_local_path = local_path
+            primary_selector_returned_asset = bool(local_path)
             local_path = self._enforce_payoff_evidence_category(
                 local_path=local_path,
                 effective_category=effective_category,
@@ -95,8 +135,17 @@ class AssetSelectionAgentService:
                 exclude_paths=used_paths,
                 payoff_evidence=payoff_evidence,
             )
+            exact_enforcement_changed_asset = bool(local_path) and local_path != primary_local_path
+            safe_fallback_used = False
             if not local_path:
-                local_path = self.selector.safe_fallback(seed=f"{seed}:{segment_name}:safe") or ""
+                fallback_path = self.selector.safe_fallback(seed=f"{seed}:{segment_name}:safe") or ""
+                safe_fallback_used = bool(fallback_path)
+                local_path = fallback_path
+            segment_fallback_trace[segment_name] = {
+                "primary_selector_returned_asset": primary_selector_returned_asset,
+                "safe_fallback_used": safe_fallback_used,
+                "exact_enforcement_changed_asset": exact_enforcement_changed_asset,
+            }
             selected_entry = self.selector.lookup_catalog_entry(path=local_path) if local_path else None
             background = AssetBackgroundPlan(
                 source=(selected_entry.source_type if selected_entry is not None else "local"),
@@ -137,7 +186,106 @@ class AssetSelectionAgentService:
             mode=FallbackMode.NONE.value if not missing_segments else FallbackMode.LOCAL_DEFAULT.value,
             reason="" if not missing_segments else "ASSET_SELECTION_MISSING_SEGMENT",
         )
-        return AssetSelectionResult(asset_selection=finalized, fallback=fallback)
+        return self._with_context_governance(
+            data=data,
+            result=AssetSelectionResult(asset_selection=finalized, fallback=fallback),
+            local_assets_available=local_assets_available,
+            script_plan_used=script_plan,
+            script_fallback_used=script_fallback_used,
+            selection_requests=selection_requests,
+            segment_fallback_trace=segment_fallback_trace,
+        )
+
+    def _with_context_governance(
+        self,
+        *,
+        data: AssetSelectionInput,
+        result: AssetSelectionResult,
+        local_assets_available: bool,
+        script_plan_used: ScriptPlan | None,
+        script_fallback_used: bool,
+        selection_requests: dict[str, dict[str, object]] | None = None,
+        segment_fallback_trace: dict[str, dict[str, object]] | None = None,
+    ) -> AssetSelectionResult:
+        governance = self.context_governance.evaluate(
+            data=data,
+            asset_selection=result.asset_selection,
+            local_assets_available=local_assets_available,
+            script_plan_used=script_plan_used,
+            script_fallback_used=script_fallback_used,
+            asset_fallback_used=result.fallback.used,
+            asset_fallback_reason=result.fallback.reason,
+        )
+        source_governance = self.source_governance.evaluate(
+            selector=self.selector,
+            asset_selection=result.asset_selection,
+            fallback=result.fallback,
+            local_assets_available=local_assets_available,
+        )
+        segment_intent = self.segment_intent_mapper.map(asset_selection=result.asset_selection)
+        visual_alignment = self.visual_alignment_evaluator.evaluate(
+            selector=self.selector,
+            asset_selection=result.asset_selection,
+            selection_requests=selection_requests,
+        )
+        visual_truthfulness = self.visual_truthfulness_evaluator.evaluate(
+            selector=self.selector,
+            asset_selection=result.asset_selection,
+            fallback=result.fallback,
+            visual_alignment=visual_alignment.to_dict(),
+        )
+        fallback_honesty = self.fallback_honesty_evaluator.evaluate(
+            asset_selection=result.asset_selection,
+            fallback=result.fallback,
+            segment_fallback_trace=segment_fallback_trace,
+            visual_alignment=visual_alignment.to_dict(),
+            visual_truthfulness=visual_truthfulness.to_dict(),
+        )
+        asset_diversity = self.diversity_guard.evaluate(
+            selector=self.selector,
+            asset_selection=result.asset_selection,
+            fallback=result.fallback,
+        )
+        confidence = self.confidence_calibrator.calibrate(
+            asset_context_governance=governance.to_dict(),
+            asset_source_governance=source_governance.to_dict(),
+            segment_visual_intent=segment_intent.to_dict(),
+            visual_alignment=visual_alignment.to_dict(),
+            visual_truthfulness=visual_truthfulness.to_dict(),
+            asset_fallback_honesty=fallback_honesty.to_dict(),
+            asset_diversity=asset_diversity.to_dict(),
+        )
+        asset_trace = self.trace_builder.build(
+            asset_selection=result.asset_selection,
+            fallback=result.fallback,
+            asset_context_governance=governance.to_dict(),
+            asset_source_governance=source_governance.to_dict(),
+            segment_visual_intent=segment_intent.to_dict(),
+            visual_alignment=visual_alignment.to_dict(),
+            visual_truthfulness=visual_truthfulness.to_dict(),
+            asset_fallback_honesty=fallback_honesty.to_dict(),
+            asset_diversity=asset_diversity.to_dict(),
+            confidence=confidence.confidence,
+            confidence_level=confidence.confidence_level,
+            confidence_components=confidence.confidence_components,
+            confidence_rationale=confidence.confidence_rationale,
+        )
+        return AssetSelectionResult(
+            asset_selection=result.asset_selection,
+            fallback=result.fallback,
+            asset_context_governance=governance.to_dict(),
+            asset_source_governance=source_governance.to_dict(),
+            segment_visual_intent=segment_intent.to_dict(),
+            visual_alignment=visual_alignment.to_dict(),
+            visual_truthfulness=visual_truthfulness.to_dict(),
+            asset_fallback_honesty=fallback_honesty.to_dict(),
+            asset_diversity=asset_diversity.to_dict(),
+            confidence=confidence.confidence,
+            confidence_level=confidence.confidence_level,
+            confidence_components=confidence.confidence_components,
+            confidence_rationale=confidence.confidence_rationale,
+            asset_trace=asset_trace,
+        )
 
     def _enforce_payoff_evidence_category(
         self,

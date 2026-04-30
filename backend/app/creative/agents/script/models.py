@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from app.creative.contracts.agent_common import FallbackDecision
@@ -41,9 +41,35 @@ class ScriptAgentInput:
 class ScriptAgentResult:
     script_plan: ScriptPlan
     fallback: FallbackDecision
+    context_governance: dict[str, Any] = field(default_factory=dict)
+    quality_rubric: dict[str, Any] = field(default_factory=dict)
+    hook_analysis: dict[str, Any] = field(default_factory=dict)
+    setup_analysis: dict[str, Any] = field(default_factory=dict)
+    payoff_analysis: dict[str, Any] = field(default_factory=dict)
+    diversity_analysis: dict[str, Any] = field(default_factory=dict)
+    provider_fallback_trace: dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+    confidence_level: str = "low"
+    confidence_components: dict[str, float] = field(default_factory=dict)
+    confidence_rationale: dict[str, Any] = field(default_factory=dict)
+    script_trace: dict[str, Any] = field(default_factory=dict)
+    decision_trace: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "script_plan": self.script_plan.to_dict(),
             "fallback": self.fallback.to_dict(),
+            "context_governance": dict(self.context_governance),
+            "quality_rubric": dict(self.quality_rubric),
+            "hook_analysis": dict(self.hook_analysis),
+            "setup_analysis": dict(self.setup_analysis),
+            "payoff_analysis": dict(self.payoff_analysis),
+            "diversity_analysis": dict(self.diversity_analysis),
+            "provider_fallback_trace": dict(self.provider_fallback_trace),
+            "confidence": self.confidence,
+            "confidence_level": self.confidence_level,
+            "confidence_components": dict(self.confidence_components),
+            "confidence_rationale": dict(self.confidence_rationale),
+            "script_trace": dict(self.script_trace),
+            "decision_trace": dict(self.decision_trace),
         }

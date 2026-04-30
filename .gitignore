@@ -83,6 +83,9 @@ docker-compose.netem.yml
 # --- Local model artifacts ---
 tools/piper/voices/*.onnx
 
+# --- External local tools ---
+tools/ComfyUI/
+
 # --- Perf / bench local ---
 *.wrk.log
 *.audit.txt

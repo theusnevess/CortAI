@@ -13,6 +13,22 @@ from app.creative.agents.trend_analysis.models import (
     TrendCollectorResult,
     TrendSourceRecord,
 )
+from app.creative.agents.trend_analysis.confidence_calibration import (
+    TrendConfidenceCalibration,
+    TrendConfidenceCalibrator,
+)
+from app.creative.agents.trend_analysis.downstream_utility import (
+    TrendDownstreamUtilityMapper,
+    TrendDownstreamUtilitySummary,
+)
+from app.creative.agents.trend_analysis.freshness import TrendFreshnessEvaluator, TrendValiditySummary
+from app.creative.agents.trend_analysis.provenance import TrendProvenanceBuilder
+from app.creative.agents.trend_analysis.shift_analysis import TrendShiftAnalyzer
+from app.creative.agents.trend_analysis.source_governance import (
+    TrendSourceGovernanceEvaluator,
+    TrendSourceGovernanceResult,
+)
+from app.creative.agents.trend_analysis.trace_auditability import TrendTraceBuilder
 from app.creative.agents.trend_analysis.validation import (
     TrendConfidenceScoringService,
     TrendValidationResult,
@@ -28,12 +44,31 @@ class TrendAnalysisAgentService:
     creative_center_collector: TikTokCreativeCenterCollector = field(default_factory=TikTokCreativeCenterCollector)
     validation_service: TrendValidationService = field(default_factory=TrendValidationService)
     confidence_service: TrendConfidenceScoringService = field(default_factory=TrendConfidenceScoringService)
+    source_governance_evaluator: TrendSourceGovernanceEvaluator = field(default_factory=TrendSourceGovernanceEvaluator)
+    provenance_builder: TrendProvenanceBuilder = field(default_factory=TrendProvenanceBuilder)
+    freshness_evaluator: TrendFreshnessEvaluator = field(default_factory=TrendFreshnessEvaluator)
+    confidence_calibrator: TrendConfidenceCalibrator = field(default_factory=TrendConfidenceCalibrator)
+    shift_analyzer: TrendShiftAnalyzer = field(default_factory=TrendShiftAnalyzer)
+    downstream_utility_mapper: TrendDownstreamUtilityMapper = field(default_factory=TrendDownstreamUtilityMapper)
+    trace_builder: TrendTraceBuilder = field(default_factory=TrendTraceBuilder)
 
     def load(self, data: TrendAnalysisInput) -> TrendAnalysisResult:
         try:
-            return self._load(data)
+            result = self._load(data)
         except Exception:  # noqa: BLE001
-            return self._fallback_result()
+            result = self._fallback_result()
+        return self._with_trend_trace(result)
+
+    def _with_trend_trace(self, result: TrendAnalysisResult) -> TrendAnalysisResult:
+        trend_trace = self.trace_builder.build(
+            trend_profile=result.trend_profile,
+            fallback=result.fallback,
+            validation_summary=result.validation_summary,
+            collector_trace=result.collector_trace,
+        )
+        result.collector_trace["trend_trace"] = trend_trace
+        result.validation_summary["traceability"] = self.trace_builder.validation_summary(trend_trace=trend_trace)
+        return result
 
     def _load(self, data: TrendAnalysisInput) -> TrendAnalysisResult:
         niche = (data.niche or "").strip().lower()
@@ -44,7 +79,7 @@ class TrendAnalysisAgentService:
         storage = self._resolve_storage_roots()
         collector_result = self._maybe_collect_creative_center(data)
         self._persist_collector_source_record(storage=storage, collector_result=collector_result, niche=niche)
-        source_records = self._load_source_records(
+        source_records, source_governance = self._load_source_records(
             niche=niche,
             region=data.region,
             storage=storage,
@@ -75,6 +110,7 @@ class TrendAnalysisAgentService:
                     "creative_center_refresh": collector_result.to_dict() if collector_result is not None else None,
                     "decision_trace": [],
                 },
+                source_governance=source_governance,
                 primary_failure_reason="TREND_SOURCE_ASSEMBLY_REJECTED",
             )
 
@@ -83,6 +119,27 @@ class TrendAnalysisAgentService:
             return self._fallback_result(reason="TREND_PROFILE_FALLBACK", data=data, current_time=current_time)
 
         payload = json.loads(trend_path.read_text(encoding="utf-8"))
+        profile_governance = self._evaluate_profile_source(
+            source_name=str(payload.get("trend_source") or "manual_file_legacy"),
+            source_id=str(trend_path),
+            source_class_hint="current_store",
+            region=str(payload.get("region") or data.region or "US"),
+            metadata={
+                "path_kind": "current_store",
+                "requested_region": data.region,
+                "captured_at": str(payload.get("collected_at") or payload.get("updated_at") or ""),
+                "valid_until": str(payload.get("valid_until") or ""),
+                "supported_fields": self._supported_fields_from_payload(payload),
+                "evidence_ids": self._payload_evidence_ids(payload),
+            },
+        )
+        if not profile_governance.accepted_sources:
+            return self._fallback_result(
+                reason="TREND_PROFILE_FALLBACK",
+                data=data,
+                current_time=current_time,
+                source_governance=profile_governance,
+            )
         trend_profile = self._build_trend_profile(
             payload=payload,
             niche=niche,
@@ -107,6 +164,7 @@ class TrendAnalysisAgentService:
                 "creative_center_refresh": collector_result.to_dict() if collector_result is not None else None,
                 "decision_trace": [],
             },
+            source_governance=profile_governance,
             primary_failure_reason="TREND_PROFILE_REJECTED",
         )
 
@@ -116,30 +174,64 @@ class TrendAnalysisAgentService:
         reason: str = "TREND_PROFILE_FALLBACK",
         data: TrendAnalysisInput | None = None,
         current_time: datetime | None = None,
+        source_governance: TrendSourceGovernanceResult | None = None,
     ) -> TrendAnalysisResult:
         resolved_time = current_time or self._resolve_current_time("" if data is None else data.current_time)
         region = "US" if data is None else str(data.region or "US")
+        governance = source_governance or self._evaluate_safe_default_source(region=region)
+        fallback_profile = TrendProfile(
+            niche="default",
+            dominant_hooks=["question"],
+            avg_duration="8-12",
+            pacing="baseline",
+            visual_style="phase1_baseline",
+            text_style="caption_focus",
+            region=region,
+            trend_source="safe_default",
+            confidence_scores={
+                "dominant_hooks": 0.25,
+                "avg_duration": 0.25,
+                "pacing": 0.25,
+                "visual_style": 0.25,
+            },
+            updated_at=self._to_iso(resolved_time),
+            valid_until=self._to_iso(resolved_time + timedelta(days=7)),
+            sample_size=0,
+            evidence=[],
+        )
+        provenance = self.provenance_builder.build(
+            trend_profile=fallback_profile,
+            source_governance=governance.to_dict(),
+            fallback_used=True,
+            fallback_reason=reason,
+        )
+        freshness_trace, validity = self._build_freshness_validity_trace(
+            trend_profile=fallback_profile,
+            source_governance=governance,
+            current_time=resolved_time,
+            fallback_used=True,
+            fallback_reason=reason,
+            cache_usage_mode="none",
+            decision_trace=[],
+        )
+        confidence_calibration = self._build_confidence_calibration(
+            trend_profile=fallback_profile,
+            source_governance=governance,
+            provenance=provenance.to_dict(),
+            freshness=freshness_trace,
+            validity=validity,
+            fallback_used=True,
+            fallback_reason=reason,
+        )
+        downstream_utility = self._build_downstream_utility(
+            trend_profile=fallback_profile,
+            provenance=provenance.to_dict(),
+            confidence_calibration=confidence_calibration,
+            validity=validity,
+            fallback_used=True,
+        )
         return TrendAnalysisResult(
-            trend_profile=TrendProfile(
-                niche="default",
-                dominant_hooks=["question"],
-                avg_duration="8-12",
-                pacing="baseline",
-                visual_style="phase1_baseline",
-                text_style="caption_focus",
-                region=region,
-                trend_source="safe_default",
-                confidence_scores={
-                    "dominant_hooks": 0.25,
-                    "avg_duration": 0.25,
-                    "pacing": 0.25,
-                    "visual_style": 0.25,
-                },
-                updated_at=self._to_iso(resolved_time),
-                valid_until=self._to_iso(resolved_time + timedelta(days=7)),
-                sample_size=0,
-                evidence=[],
-            ),
+            trend_profile=fallback_profile,
             fallback=FallbackDecision(
                 used=True,
                 mode=FallbackMode.SAFE_DEFAULT.value,
@@ -152,6 +244,10 @@ class TrendAnalysisAgentService:
                 "errors": [],
                 "overall_confidence": 0.25,
                 "freshness_state": "fresh",
+                "source_policy_respected": governance.policy_respected,
+                "freshness_validity": self._freshness_validity_summary(validity),
+                "confidence_calibration": confidence_calibration.to_dict(),
+                "downstream_utility": self._downstream_utility_summary(downstream_utility),
             },
             collector_trace={
                 "storage_mode": "fallback_only",
@@ -164,6 +260,12 @@ class TrendAnalysisAgentService:
                 "source_count": 0,
                 "creative_center_refresh": None,
                 "decision_trace": [],
+                "source_governance": governance.to_dict(),
+                "provenance": provenance.to_dict(),
+                "freshness": freshness_trace,
+                "validity": validity.to_dict(),
+                "confidence_calibration": confidence_calibration.to_dict(),
+                "downstream_utility": downstream_utility.to_dict(),
             },
         )
 
@@ -208,9 +310,17 @@ class TrendAnalysisAgentService:
         current_time: datetime,
         data: TrendAnalysisInput,
         collector_trace: dict[str, Any],
+        source_governance: TrendSourceGovernanceResult,
         primary_failure_reason: str,
     ) -> TrendAnalysisResult:
         primary_validation = self.validation_service.validate(trend_profile=trend_profile, current_time=current_time)
+        collector_trace["source_governance"] = source_governance.to_dict()
+        collector_trace["provenance"] = self.provenance_builder.build(
+            trend_profile=trend_profile,
+            source_governance=source_governance.to_dict(),
+            fallback_used=False,
+            fallback_reason="",
+        ).to_dict()
         collector_trace["decision_trace"].append(
             {
                 "candidate": "primary",
@@ -221,25 +331,63 @@ class TrendAnalysisAgentService:
             }
         )
         if primary_validation.decision in {"APPROVE", "HOLD"}:
+            freshness_trace, validity = self._build_freshness_validity_trace(
+                trend_profile=trend_profile,
+                source_governance=source_governance,
+                current_time=current_time,
+                fallback_used=False,
+                fallback_reason="",
+                cache_usage_mode=self._cache_usage_mode(
+                    source_governance=source_governance,
+                    fallback_used=False,
+                ),
+                decision_trace=list(collector_trace.get("decision_trace", [])),
+            )
+            collector_trace["freshness"] = freshness_trace
+            collector_trace["validity"] = validity.to_dict()
+            confidence_calibration = self._build_confidence_calibration(
+                trend_profile=trend_profile,
+                source_governance=source_governance,
+                provenance=collector_trace["provenance"],
+                freshness=freshness_trace,
+                validity=validity,
+                fallback_used=False,
+                fallback_reason="",
+            )
+            collector_trace["confidence_calibration"] = confidence_calibration.to_dict()
             collector_trace["shift_analysis"] = self._detect_shift(
                 storage=storage,
                 trend_profile=trend_profile,
                 current_time=current_time,
             )
+            downstream_utility = self._build_downstream_utility(
+                trend_profile=trend_profile,
+                provenance=collector_trace["provenance"],
+                confidence_calibration=confidence_calibration,
+                validity=validity,
+                fallback_used=False,
+            )
+            collector_trace["downstream_utility"] = downstream_utility.to_dict()
             self._persist_current_profile(storage=storage, trend_profile=trend_profile)
             self._persist_validated_cache(storage=storage, trend_profile=trend_profile)
             self._persist_snapshot(storage=storage, trend_profile=trend_profile, current_time=current_time)
             return TrendAnalysisResult(
                 trend_profile=trend_profile,
                 fallback=FallbackDecision(used=False, mode=FallbackMode.NONE.value, reason=""),
-                validation_summary=primary_validation.to_dict(),
+                validation_summary={
+                    **primary_validation.to_dict(),
+                    "source_policy_respected": source_governance.policy_respected,
+                    "freshness_validity": self._freshness_validity_summary(validity),
+                    "confidence_calibration": confidence_calibration.to_dict(),
+                    "downstream_utility": self._downstream_utility_summary(downstream_utility),
+                },
                 collector_trace=collector_trace,
             )
 
         if data.allow_cached:
             cached_result = self._load_validated_cache(storage=storage, niche=data.niche, current_time=current_time)
             if cached_result is not None:
-                cached_profile, cached_validation = cached_result
+                cached_profile, cached_validation, cached_governance = cached_result
                 collector_trace["decision_trace"].append(
                     {
                         "candidate": "validated_cache",
@@ -251,6 +399,42 @@ class TrendAnalysisAgentService:
                 )
                 collector_trace["loaded_from_cache"] = True
                 collector_trace["fallback_path"] = "validated_cache"
+                collector_trace["source_governance"] = cached_governance.to_dict()
+                collector_trace["provenance"] = self.provenance_builder.build(
+                    trend_profile=cached_profile,
+                    source_governance=cached_governance.to_dict(),
+                    fallback_used=True,
+                    fallback_reason="TREND_CACHE_FALLBACK",
+                ).to_dict()
+                freshness_trace, validity = self._build_freshness_validity_trace(
+                    trend_profile=cached_profile,
+                    source_governance=cached_governance,
+                    current_time=current_time,
+                    fallback_used=True,
+                    fallback_reason="TREND_CACHE_FALLBACK",
+                    cache_usage_mode="fallback",
+                    decision_trace=list(collector_trace.get("decision_trace", [])),
+                )
+                collector_trace["freshness"] = freshness_trace
+                collector_trace["validity"] = validity.to_dict()
+                confidence_calibration = self._build_confidence_calibration(
+                    trend_profile=cached_profile,
+                    source_governance=cached_governance,
+                    provenance=collector_trace["provenance"],
+                    freshness=freshness_trace,
+                    validity=validity,
+                    fallback_used=True,
+                    fallback_reason="TREND_CACHE_FALLBACK",
+                )
+                collector_trace["confidence_calibration"] = confidence_calibration.to_dict()
+                downstream_utility = self._build_downstream_utility(
+                    trend_profile=cached_profile,
+                    provenance=collector_trace["provenance"],
+                    confidence_calibration=confidence_calibration,
+                    validity=validity,
+                    fallback_used=True,
+                )
+                collector_trace["downstream_utility"] = downstream_utility.to_dict()
                 return TrendAnalysisResult(
                     trend_profile=cached_profile,
                     fallback=FallbackDecision(
@@ -258,13 +442,19 @@ class TrendAnalysisAgentService:
                         mode=FallbackMode.LOCAL_DEFAULT.value,
                         reason="TREND_CACHE_FALLBACK",
                     ),
-                    validation_summary=cached_validation.to_dict(),
+                    validation_summary={
+                        **cached_validation.to_dict(),
+                        "source_policy_respected": cached_governance.policy_respected,
+                        "freshness_validity": self._freshness_validity_summary(validity),
+                        "confidence_calibration": confidence_calibration.to_dict(),
+                        "downstream_utility": self._downstream_utility_summary(downstream_utility),
+                    },
                     collector_trace=collector_trace,
                 )
 
         history_result = self._load_history_fallback(storage=storage, niche=data.niche, current_time=current_time)
         if history_result is not None:
-            history_profile, history_validation = history_result
+            history_profile, history_validation, history_governance = history_result
             collector_trace["decision_trace"].append(
                 {
                     "candidate": "history",
@@ -275,6 +465,42 @@ class TrendAnalysisAgentService:
                 }
             )
             collector_trace["fallback_path"] = "history"
+            collector_trace["source_governance"] = history_governance.to_dict()
+            collector_trace["provenance"] = self.provenance_builder.build(
+                trend_profile=history_profile,
+                source_governance=history_governance.to_dict(),
+                fallback_used=True,
+                fallback_reason="TREND_HISTORY_FALLBACK",
+            ).to_dict()
+            freshness_trace, validity = self._build_freshness_validity_trace(
+                trend_profile=history_profile,
+                source_governance=history_governance,
+                current_time=current_time,
+                fallback_used=True,
+                fallback_reason="TREND_HISTORY_FALLBACK",
+                cache_usage_mode="none",
+                decision_trace=list(collector_trace.get("decision_trace", [])),
+            )
+            collector_trace["freshness"] = freshness_trace
+            collector_trace["validity"] = validity.to_dict()
+            confidence_calibration = self._build_confidence_calibration(
+                trend_profile=history_profile,
+                source_governance=history_governance,
+                provenance=collector_trace["provenance"],
+                freshness=freshness_trace,
+                validity=validity,
+                fallback_used=True,
+                fallback_reason="TREND_HISTORY_FALLBACK",
+            )
+            collector_trace["confidence_calibration"] = confidence_calibration.to_dict()
+            downstream_utility = self._build_downstream_utility(
+                trend_profile=history_profile,
+                provenance=collector_trace["provenance"],
+                confidence_calibration=confidence_calibration,
+                validity=validity,
+                fallback_used=True,
+            )
+            collector_trace["downstream_utility"] = downstream_utility.to_dict()
             return TrendAnalysisResult(
                 trend_profile=history_profile,
                 fallback=FallbackDecision(
@@ -282,14 +508,126 @@ class TrendAnalysisAgentService:
                     mode=FallbackMode.LOCAL_DEFAULT.value,
                     reason="TREND_HISTORY_FALLBACK",
                 ),
-                validation_summary=history_validation.to_dict(),
+                validation_summary={
+                    **history_validation.to_dict(),
+                    "source_policy_respected": history_governance.policy_respected,
+                    "freshness_validity": self._freshness_validity_summary(validity),
+                    "confidence_calibration": confidence_calibration.to_dict(),
+                    "downstream_utility": self._downstream_utility_summary(downstream_utility),
+                },
                 collector_trace=collector_trace,
             )
 
-        fallback = self._fallback_result(reason=primary_failure_reason, data=data, current_time=current_time)
+        fallback = self._fallback_result(
+            reason=primary_failure_reason,
+            data=data,
+            current_time=current_time,
+            source_governance=source_governance,
+        )
         fallback.collector_trace["decision_trace"] = list(collector_trace.get("decision_trace", []))
         fallback.collector_trace["fallback_path"] = "safe_default"
         return fallback
+
+    def _build_freshness_validity_trace(
+        self,
+        *,
+        trend_profile: TrendProfile,
+        source_governance: TrendSourceGovernanceResult,
+        current_time: datetime,
+        fallback_used: bool,
+        fallback_reason: str,
+        cache_usage_mode: str,
+        decision_trace: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], TrendValiditySummary]:
+        freshness_states, validity = self.freshness_evaluator.evaluate(
+            trend_profile=trend_profile,
+            source_governance=source_governance.to_dict(),
+            current_time=current_time,
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
+            cache_usage_mode=cache_usage_mode,
+            decision_trace=decision_trace,
+        )
+        counts = {
+            "fresh": 0,
+            "aging": 0,
+            "stale": 0,
+            "expired": 0,
+            "missing_timestamp": 0,
+        }
+        for state in freshness_states:
+            counts[state.freshness_status] = counts.get(state.freshness_status, 0) + 1
+        return {
+            "sources": [state.to_dict() for state in freshness_states],
+            "fresh_sources_count": counts["fresh"],
+            "aging_sources_count": counts["aging"],
+            "stale_sources_count": counts["stale"],
+            "expired_sources_count": counts["expired"],
+            "missing_timestamp_count": counts["missing_timestamp"],
+        }, validity
+
+    def _freshness_validity_summary(self, validity: TrendValiditySummary) -> dict[str, Any]:
+        return {
+            "validity_status": validity.validity_status,
+            "profile_valid": validity.profile_valid,
+            "cache_usage_mode": validity.cache_usage_mode,
+            "fallback_due_to_freshness": validity.fallback_due_to_freshness,
+        }
+
+    def _build_confidence_calibration(
+        self,
+        *,
+        trend_profile: TrendProfile,
+        source_governance: TrendSourceGovernanceResult,
+        provenance: dict[str, Any],
+        freshness: dict[str, Any],
+        validity: TrendValiditySummary,
+        fallback_used: bool,
+        fallback_reason: str,
+    ) -> TrendConfidenceCalibration:
+        return self.confidence_calibrator.calibrate(
+            trend_profile=trend_profile,
+            source_governance=source_governance.to_dict(),
+            provenance=provenance,
+            freshness=freshness,
+            validity=validity.to_dict(),
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
+        )
+
+    def _build_downstream_utility(
+        self,
+        *,
+        trend_profile: TrendProfile,
+        provenance: dict[str, Any],
+        confidence_calibration: TrendConfidenceCalibration,
+        validity: TrendValiditySummary,
+        fallback_used: bool,
+    ) -> TrendDownstreamUtilitySummary:
+        return self.downstream_utility_mapper.map(
+            trend_profile=trend_profile,
+            provenance=provenance,
+            confidence_calibration=confidence_calibration.to_dict(),
+            validity=validity.to_dict(),
+            fallback_used=fallback_used,
+        )
+
+    def _downstream_utility_summary(self, downstream_utility: TrendDownstreamUtilitySummary) -> dict[str, Any]:
+        return {
+            "utility_complete": downstream_utility.utility_complete,
+            "boundary_preserved": downstream_utility.boundary_statement
+            == "Trend provides context only; Strategy remains the control layer.",
+        }
+
+    def _cache_usage_mode(
+        self,
+        *,
+        source_governance: TrendSourceGovernanceResult,
+        fallback_used: bool,
+    ) -> str:
+        if source_governance.selected_source_class == "validated_cache":
+            return "fallback" if fallback_used else "primary"
+        return "none"
 
     def _maybe_collect_creative_center(self, data: TrendAnalysisInput) -> TrendCollectorResult | None:
         if not data.force_refresh:
@@ -360,7 +698,7 @@ class TrendAnalysisAgentService:
         storage: dict[str, Path | str],
         current_time: datetime,
         collector_result: TrendCollectorResult | None,
-    ) -> list[TrendSourceRecord]:
+    ) -> tuple[list[TrendSourceRecord], TrendSourceGovernanceResult]:
         records: list[TrendSourceRecord] = []
         manual_record = self._load_source_record_file(
             path=Path(storage["manual_curation_dir"]) / f"{niche}.json",
@@ -389,9 +727,20 @@ class TrendAnalysisAgentService:
         if collector_result is not None and collector_result.source_record is not None:
             records = [item for item in records if item.source != "creative_center"]
             records.append(collector_result.source_record)
-        records = [item for item in records if self._source_record_is_usable(item=item, current_time=current_time)]
-        records.sort(key=lambda item: (self._source_priority(item.source), item.source))
-        return records
+        usable_records = [item for item in records if self._source_record_is_usable(item=item, current_time=current_time)]
+        governance = self.source_governance_evaluator.evaluate_candidates(
+            candidates=[self._source_record_candidate(item) for item in usable_records],
+            requested_region=region,
+            selection_mode="mixed_allowed",
+        )
+        accepted_ids = {
+            decision.source_id
+            for decision in governance.accepted_sources
+            if decision.governance_status in {"accepted", "fallback_allowed"}
+        }
+        accepted_records = [item for item in usable_records if self._source_record_id(item) in accepted_ids]
+        accepted_records.sort(key=lambda item: (self._source_priority(item.source), item.source))
+        return accepted_records, governance
 
     def _load_source_record_file(
         self,
@@ -491,55 +840,15 @@ class TrendAnalysisAgentService:
     ) -> dict[str, Any]:
         baseline = self._load_previous_trend(storage=storage, niche=trend_profile.niche, current_time=current_time)
         if baseline is None:
-            return {
-                "shift_detected": False,
-                "baseline_available": False,
-                "changes": [],
-            }
+            return self.shift_analyzer.analyze(
+                current_profile=trend_profile,
+                baseline_profile=None,
+            ).to_dict()
         previous_profile, _ = baseline
-        changes: list[dict[str, object]] = []
-        if previous_profile.dominant_hooks != trend_profile.dominant_hooks:
-            changes.append(
-                {
-                    "field": "dominant_hooks",
-                    "old": list(previous_profile.dominant_hooks),
-                    "new": list(trend_profile.dominant_hooks),
-                    "significance": "high",
-                }
-            )
-        if previous_profile.pacing != trend_profile.pacing:
-            changes.append(
-                {
-                    "field": "pacing",
-                    "old": previous_profile.pacing,
-                    "new": trend_profile.pacing,
-                    "significance": "medium",
-                }
-            )
-        if previous_profile.visual_style != trend_profile.visual_style:
-            changes.append(
-                {
-                    "field": "visual_style",
-                    "old": previous_profile.visual_style,
-                    "new": trend_profile.visual_style,
-                    "significance": "medium",
-                }
-            )
-        if previous_profile.avg_duration != trend_profile.avg_duration:
-            changes.append(
-                {
-                    "field": "avg_duration",
-                    "old": previous_profile.avg_duration,
-                    "new": trend_profile.avg_duration,
-                    "significance": "medium",
-                }
-            )
-        return {
-            "shift_detected": bool(changes),
-            "baseline_available": True,
-            "changes": changes,
-            "comparison_source": previous_profile.trend_source,
-        }
+        return self.shift_analyzer.analyze(
+            current_profile=trend_profile,
+            baseline_profile=previous_profile,
+        ).to_dict()
 
     def _persist_current_profile(
         self,
@@ -588,9 +897,14 @@ class TrendAnalysisAgentService:
         storage: dict[str, Path | str],
         niche: str,
         current_time: datetime,
-    ) -> tuple[TrendProfile, TrendValidationResult] | None:
+    ) -> tuple[TrendProfile, TrendValidationResult, TrendSourceGovernanceResult] | None:
         validated_path = Path(storage["cache_dir"]) / "validated" / f"{niche}.json"
-        return self._load_profile_candidate(path=validated_path, niche=niche, current_time=current_time)
+        return self._load_profile_candidate(
+            path=validated_path,
+            niche=niche,
+            current_time=current_time,
+            source_class_hint="validated_cache",
+        )
 
     def _load_history_fallback(
         self,
@@ -598,15 +912,20 @@ class TrendAnalysisAgentService:
         storage: dict[str, Path | str],
         niche: str,
         current_time: datetime,
-    ) -> tuple[TrendProfile, TrendValidationResult] | None:
+    ) -> tuple[TrendProfile, TrendValidationResult, TrendSourceGovernanceResult] | None:
         history_dir = Path(storage["history_dir"]) / niche
         if not history_dir.exists():
             return None
         for path in sorted(history_dir.glob("*.json"), reverse=True):
-            candidate = self._load_profile_candidate(path=path, niche=niche, current_time=current_time)
+            candidate = self._load_profile_candidate(
+                path=path,
+                niche=niche,
+                current_time=current_time,
+                source_class_hint="history_snapshot",
+            )
             if candidate is None:
                 continue
-            _, validation = candidate
+            _, validation, _ = candidate
             if validation.decision in {"APPROVE", "HOLD"}:
                 return candidate
         return None
@@ -622,10 +941,16 @@ class TrendAnalysisAgentService:
             path=Path(storage["current_dir"]) / f"{niche}.json",
             niche=niche,
             current_time=current_time,
+            source_class_hint="current_store",
         )
         if current_candidate is not None:
-            return current_candidate
-        return self._load_history_fallback(storage=storage, niche=niche, current_time=current_time)
+            profile, validation, _ = current_candidate
+            return profile, validation
+        history_candidate = self._load_history_fallback(storage=storage, niche=niche, current_time=current_time)
+        if history_candidate is None:
+            return None
+        profile, validation, _ = history_candidate
+        return profile, validation
 
     def _load_profile_candidate(
         self,
@@ -633,11 +958,27 @@ class TrendAnalysisAgentService:
         path: Path,
         niche: str,
         current_time: datetime,
-    ) -> tuple[TrendProfile, TrendValidationResult] | None:
+        source_class_hint: str,
+    ) -> tuple[TrendProfile, TrendValidationResult, TrendSourceGovernanceResult] | None:
         if not path.exists():
             return None
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
+            return None
+        governance = self._evaluate_profile_source(
+            source_name=str(payload.get("trend_source") or source_class_hint),
+            source_id=str(path),
+            source_class_hint=source_class_hint,
+            region=str(payload.get("region") or "US"),
+            metadata={
+                "path_kind": source_class_hint,
+                "captured_at": str(payload.get("collected_at") or payload.get("updated_at") or ""),
+                "valid_until": str(payload.get("valid_until") or ""),
+                "supported_fields": self._supported_fields_from_payload(payload),
+                "evidence_ids": self._payload_evidence_ids(payload),
+            },
+        )
+        if not governance.accepted_sources:
             return None
         trend_profile = self._build_trend_profile(
             payload=payload,
@@ -649,7 +990,158 @@ class TrendAnalysisAgentService:
         validation = self.validation_service.validate(trend_profile=trend_profile, current_time=current_time)
         if validation.decision == "REJECT":
             return None
-        return trend_profile, validation
+        return trend_profile, validation, governance
+
+    def _source_record_candidate(self, item: TrendSourceRecord) -> dict[str, Any]:
+        return {
+            "source_id": self._source_record_id(item),
+            "source_class": self.source_governance_evaluator.classify_source(source_name=item.source),
+            "region": item.region,
+            "metadata": {
+                **dict(item.source_metadata),
+                "captured_at": item.collected_at,
+                "collected_at": item.collected_at,
+                "valid_until": self._source_record_valid_until(item),
+                "supported_fields": self._supported_fields_from_source_record(item),
+                "evidence_ids": self._evidence_ids_from_source_record(item),
+                "usable_reason": "ACCEPTED_USABLE_SOURCE_RECORD",
+            },
+        }
+
+    def _source_record_id(self, item: TrendSourceRecord) -> str:
+        return f"{item.source}:{item.niche}:{item.collected_at or 'undated'}"
+
+    def _source_record_valid_until(self, item: TrendSourceRecord) -> str:
+        if not str(item.collected_at or "").strip():
+            return ""
+        try:
+            collected_at = self._resolve_current_time(item.collected_at)
+        except ValueError:
+            return ""
+        return self._to_iso(collected_at + timedelta(days=self._source_window_days(item.source)))
+
+    def _evaluate_profile_source(
+        self,
+        *,
+        source_name: str,
+        source_id: str,
+        source_class_hint: str,
+        region: str,
+        metadata: dict[str, Any],
+    ) -> TrendSourceGovernanceResult:
+        return self.source_governance_evaluator.evaluate_candidates(
+            candidates=[
+                {
+                    "source_id": source_id,
+                    "source_class": self.source_governance_evaluator.classify_source(
+                        source_name=source_name,
+                        source_class_hint=source_class_hint,
+                    ),
+                    "region": region,
+                    "metadata": metadata,
+                }
+            ],
+            requested_region=region,
+            selection_mode="single_preferred",
+        )
+
+    def _evaluate_safe_default_source(self, *, region: str) -> TrendSourceGovernanceResult:
+        return self.source_governance_evaluator.evaluate_candidates(
+            candidates=[
+                {
+                    "source_id": "safe_default",
+                    "source_class": "safe_default",
+                    "region": region,
+                    "metadata": {
+                        "fallback_only": True,
+                        "captured_at": "",
+                        "valid_until": "",
+                        "supported_fields": [
+                            "niche",
+                            "region",
+                            "dominant_hooks",
+                            "avg_duration",
+                            "pacing",
+                            "visual_style",
+                            "text_style",
+                            "trend_source",
+                            "confidence_scores",
+                            "updated_at",
+                            "valid_until",
+                        ],
+                        "evidence_ids": [],
+                    },
+                }
+            ],
+            requested_region=region,
+            selection_mode="single_preferred",
+        )
+
+    def _supported_fields_from_source_record(self, item: TrendSourceRecord) -> list[str]:
+        supported: list[str] = ["niche", "region", "sample_size", "evidence"]
+        if item.dominant_hooks:
+            supported.append("dominant_hooks")
+        if str(item.avg_duration or "").strip():
+            supported.append("avg_duration")
+        if str(item.pacing or "").strip():
+            supported.append("pacing")
+        if str(item.visual_style or "").strip():
+            supported.append("visual_style")
+        if str(item.text_style or "").strip():
+            supported.append("text_style")
+        return sorted(set(supported))
+
+    def _evidence_ids_from_source_record(self, item: TrendSourceRecord) -> list[str]:
+        evidence_ids: list[str] = []
+        for index, evidence in enumerate(item.evidence):
+            evidence_ids.append(self._evidence_id_from_payload(evidence.to_dict(), index=index))
+        return evidence_ids
+
+    def _supported_fields_from_payload(self, payload: dict[str, Any]) -> list[str]:
+        supported: list[str] = []
+        for field_name in [
+            "niche",
+            "region",
+            "dominant_hooks",
+            "avg_duration",
+            "pacing",
+            "visual_style",
+            "text_style",
+            "trend_source",
+            "confidence_scores",
+            "updated_at",
+            "valid_until",
+            "sample_size",
+            "evidence",
+            "trend_version",
+            "collector_version",
+        ]:
+            value = payload.get(field_name)
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, (list, dict)) and not value:
+                continue
+            if value is None:
+                continue
+            supported.append(field_name)
+        return sorted(set(supported))
+
+    def _payload_evidence_ids(self, payload: dict[str, Any]) -> list[str]:
+        evidence_ids: list[str] = []
+        for index, evidence in enumerate(list(payload.get("evidence") or [])):
+            if not isinstance(evidence, dict):
+                continue
+            evidence_ids.append(self._evidence_id_from_payload(evidence, index=index))
+        return evidence_ids
+
+    def _evidence_id_from_payload(self, payload: dict[str, Any], *, index: int) -> str:
+        reference_id = str(payload.get("reference_id") or "").strip()
+        if reference_id:
+            return reference_id
+        source = str(payload.get("source") or "unknown")
+        evidence_type = str(payload.get("evidence_type") or "unknown")
+        captured_at = str(payload.get("captured_at") or "undated")
+        return f"{source}:{evidence_type}:{captured_at}:{index}"
 
     def _resolve_updated_at(self, *, payload: dict[str, Any], trend_path: Path) -> datetime:
         raw_value = str(payload.get("updated_at") or "").strip()

@@ -3,13 +3,17 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from app.content.pipeline.render import MIN_VIDEO_DURATION_S
+from app.creative.agents.video_qc.confidence_evidence import VideoQcConfidenceEvidenceEvaluator
+from app.creative.agents.video_qc.decision_semantics import VideoQcDecisionSemanticsEvaluator
+from app.creative.agents.video_qc.input_governance import VideoQcInputGovernanceEvaluator
 from app.creative.agents.video_qc.models import VideoQcDecision, VideoQcInput, VideoQcResult
+from app.creative.agents.video_qc.trace_auditability import VideoQcTraceBuilder
 
 
 def _now_iso() -> str:
@@ -39,14 +43,73 @@ class VideoQcAgentService:
             return self._evaluate(qc_input=resolved_input)
         except Exception as exc:  # noqa: BLE001
             checked_at = _now_iso()
+            fallback_input = qc_input or VideoQcInput(
+                render_job_id=render_job_id or "",
+                video_path="",
+                audio_path="",
+                metadata_path=None,
+            )
+            input_governance = VideoQcInputGovernanceEvaluator().evaluate(
+                qc_input=fallback_input,
+                probe={"width": None, "height": None, "has_audio": False, "probe_mode": "unavailable"},
+                metadata_loaded=False,
+                hard_failures=["QC_INTERNAL_ERROR"],
+            ).to_dict()
             decision = VideoQcDecision(
                 status="REJECT",
                 publishable=False,
                 hard_failures=["QC_INTERNAL_ERROR"],
                 score_summary={"overall_score": 0.0},
                 product_signals={"publishable": False},
-                decision_trace={"stage": "exception_handler"},
+                decision_trace={
+                    "stage": "exception_handler",
+                    "qc_input_governance": input_governance,
+                },
                 checked_at=checked_at,
+            )
+            confidence_evidence = VideoQcConfidenceEvidenceEvaluator().evaluate(
+                status=decision.status,
+                publishable=decision.publishable,
+                hard_failures=decision.hard_failures,
+                soft_failures=decision.soft_failures,
+                product_vetoes=decision.product_vetoes,
+                score_summary=decision.score_summary,
+                product_signals=decision.product_signals,
+                qc_input_governance=input_governance,
+                details={"probe_mode": "unavailable", "qc_input_governance": input_governance},
+            ).to_dict()
+            decision_semantics = VideoQcDecisionSemanticsEvaluator().evaluate(
+                status=decision.status,
+                publishable=decision.publishable,
+                hard_failures=decision.hard_failures,
+                soft_failures=decision.soft_failures,
+                product_vetoes=decision.product_vetoes,
+                score_summary=decision.score_summary,
+                product_signals=decision.product_signals,
+                qc_input_governance=input_governance,
+                qc_evidence_scoring=confidence_evidence["qc_evidence_scoring"],
+                confidence_calibration=confidence_evidence["confidence_calibration"],
+                details={"probe_mode": "unavailable", "qc_input_governance": input_governance},
+            ).to_dict()
+            qc_trace = VideoQcTraceBuilder().build(
+                status=decision.status,
+                publishable=decision.publishable,
+                reasons=["QC_INTERNAL_ERROR"],
+                qc_input_governance=input_governance,
+                qc_evidence_scoring=confidence_evidence["qc_evidence_scoring"],
+                confidence_calibration=confidence_evidence["confidence_calibration"],
+                decision_semantics=decision_semantics,
+                details={"probe_mode": "unavailable", "qc_input_governance": input_governance},
+            )
+            decision = replace(
+                decision,
+                decision_trace={
+                    **decision.decision_trace,
+                    "qc_evidence_scoring": confidence_evidence["qc_evidence_scoring"],
+                    "confidence_calibration": confidence_evidence["confidence_calibration"],
+                    "decision_semantics": decision_semantics,
+                    "qc_trace": qc_trace,
+                },
             )
             return VideoQcResult(
                 decision=decision,
@@ -55,9 +118,22 @@ class VideoQcAgentService:
                 checked_at=checked_at,
                 publishable=False,
                 details={
-                    "render_job_id": render_job_id or (qc_input.render_job_id if qc_input else ""),
+                    "render_job_id": fallback_input.render_job_id,
                     "error": str(exc) or exc.__class__.__name__,
+                    "qc_input_governance": input_governance,
+                    "qc_evidence_scoring": confidence_evidence["qc_evidence_scoring"],
+                    "confidence_calibration": confidence_evidence["confidence_calibration"],
+                    "decision_semantics": decision_semantics,
+                    "qc_trace": qc_trace,
                 },
+                qc_input_governance=input_governance,
+                qc_evidence_scoring=confidence_evidence["qc_evidence_scoring"],
+                decision_semantics=decision_semantics,
+                qc_trace=qc_trace,
+                confidence=confidence_evidence["confidence_calibration"]["confidence"],
+                confidence_level=confidence_evidence["confidence_calibration"]["confidence_level"],
+                confidence_components=confidence_evidence["confidence_calibration"]["confidence_components"],
+                confidence_rationale=confidence_evidence["confidence_calibration"]["confidence_rationale"],
             )
 
     def _build_input(self, *, render_job_id: str, artifacts: object | None, base_dir: Path) -> VideoQcInput:
@@ -159,6 +235,13 @@ class VideoQcAgentService:
             product_signals=product_signals,
         )
 
+        qc_input_governance = VideoQcInputGovernanceEvaluator().evaluate(
+            qc_input=qc_input,
+            probe=probe,
+            metadata_loaded=bool(metadata),
+            hard_failures=hard_failures,
+        ).to_dict()
+
         decision = self._make_decision(
             checked_at=checked_at,
             hard_failures=hard_failures,
@@ -166,10 +249,60 @@ class VideoQcAgentService:
             product_vetoes=product_vetoes,
             score_summary=score_summary,
             product_signals=product_signals,
+            qc_input_governance=qc_input_governance,
+        )
+        confidence_evidence = VideoQcConfidenceEvidenceEvaluator().evaluate(
+            status=decision.status,
+            publishable=decision.publishable,
+            hard_failures=decision.hard_failures,
+            soft_failures=decision.soft_failures,
+            product_vetoes=decision.product_vetoes,
+            score_summary=score_summary,
+            product_signals=product_signals,
+            qc_input_governance=qc_input_governance,
+            details=details,
+        ).to_dict()
+        decision_semantics = VideoQcDecisionSemanticsEvaluator().evaluate(
+            status=decision.status,
+            publishable=decision.publishable,
+            hard_failures=decision.hard_failures,
+            soft_failures=decision.soft_failures,
+            product_vetoes=decision.product_vetoes,
+            score_summary=score_summary,
+            product_signals=product_signals,
+            qc_input_governance=qc_input_governance,
+            qc_evidence_scoring=confidence_evidence["qc_evidence_scoring"],
+            confidence_calibration=confidence_evidence["confidence_calibration"],
+            details=details,
+        ).to_dict()
+        reasons = [*decision.hard_failures, *decision.product_vetoes, *decision.soft_failures]
+        qc_trace = VideoQcTraceBuilder().build(
+            status=decision.status,
+            publishable=decision.publishable,
+            reasons=reasons,
+            qc_input_governance=qc_input_governance,
+            qc_evidence_scoring=confidence_evidence["qc_evidence_scoring"],
+            confidence_calibration=confidence_evidence["confidence_calibration"],
+            decision_semantics=decision_semantics,
+            details=details,
+        )
+        decision = replace(
+            decision,
+            decision_trace={
+                **decision.decision_trace,
+                "qc_evidence_scoring": confidence_evidence["qc_evidence_scoring"],
+                "confidence_calibration": confidence_evidence["confidence_calibration"],
+                "decision_semantics": decision_semantics,
+                "qc_trace": qc_trace,
+            },
         )
         details["score_summary"] = score_summary
         details["product_signals"] = product_signals
-        reasons = [*decision.hard_failures, *decision.product_vetoes, *decision.soft_failures]
+        details["qc_input_governance"] = qc_input_governance
+        details["qc_evidence_scoring"] = confidence_evidence["qc_evidence_scoring"]
+        details["confidence_calibration"] = confidence_evidence["confidence_calibration"]
+        details["decision_semantics"] = decision_semantics
+        details["qc_trace"] = qc_trace
         return VideoQcResult(
             decision=decision,
             status=decision.status,
@@ -177,6 +310,14 @@ class VideoQcAgentService:
             checked_at=checked_at,
             publishable=decision.publishable,
             details=details,
+            qc_input_governance=qc_input_governance,
+            qc_evidence_scoring=confidence_evidence["qc_evidence_scoring"],
+            decision_semantics=decision_semantics,
+            qc_trace=qc_trace,
+            confidence=confidence_evidence["confidence_calibration"]["confidence"],
+            confidence_level=confidence_evidence["confidence_calibration"]["confidence_level"],
+            confidence_components=confidence_evidence["confidence_calibration"]["confidence_components"],
+            confidence_rationale=confidence_evidence["confidence_calibration"]["confidence_rationale"],
         )
 
     def _collect_metadata_failures(
@@ -327,6 +468,7 @@ class VideoQcAgentService:
         product_vetoes: list[str],
         score_summary: dict[str, float],
         product_signals: dict[str, Any],
+        qc_input_governance: dict[str, Any],
     ) -> VideoQcDecision:
         if hard_failures or product_vetoes:
             status = "REJECT"
@@ -353,6 +495,7 @@ class VideoQcAgentService:
                 "hard_failure_count": len(set(hard_failures)),
                 "soft_failure_count": len(set(soft_failures)),
                 "product_veto_count": len(set(product_vetoes)),
+                "qc_input_governance": qc_input_governance,
             },
             checked_at=checked_at,
         )

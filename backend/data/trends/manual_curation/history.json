@@ -1,0 +1,48 @@
+{
+  "niche": "history",
+  "region": "US",
+  "source": "manual_curation",
+  "collected_at": "2026-04-03T00:00:00Z",
+  "updated_at": "2026-04-03T00:00:00Z",
+  "valid_until": "2026-04-17T00:00:00Z",
+  "sample_size": 6,
+  "dominant_hooks": ["story_opening", "contradiction", "question"],
+  "avg_duration": "10-14s",
+  "pacing": "baseline",
+  "visual_style": "archive_dark",
+  "text_style": "large_caption_focus",
+  "evidence": [
+    {
+      "evidence_type": "manual_top_video",
+      "source": "manual_curation",
+      "reference_id": "history_seed_001",
+      "reference_url": "https://example.com/history_seed_001",
+      "captured_at": "2026-04-03T00:00:00Z",
+      "region": "US",
+      "metadata": {
+        "rank": 1,
+        "notes": "Contradictory archive framing with restrained investigative pacing."
+      }
+    },
+    {
+      "evidence_type": "manual_top_video",
+      "source": "manual_curation",
+      "reference_id": "history_seed_002",
+      "reference_url": "https://example.com/history_seed_002",
+      "captured_at": "2026-04-03T00:00:00Z",
+      "region": "US",
+      "metadata": {
+        "rank": 2,
+        "notes": "Proof-first historical reveal using document-centered visuals."
+      }
+    }
+  ],
+  "source_metadata": {
+    "curation_method": "human_structured_review",
+    "curator_id": "trend_seed_v1",
+    "sample_window": "last_14_days",
+    "record_version": "manual-curation-v1"
+  },
+  "trend_version": "2.0",
+  "collector_version": "manual-curation-v1"
+}
