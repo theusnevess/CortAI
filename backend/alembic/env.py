@@ -11,6 +11,7 @@ from alembic import context # Contexto do Alembic
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 # Importa a Base e os Modelos (para o Alembic "ver" as tabelas)
+from app.config.runtime import require_async_database_url
 from app.db.base import Base
 from app.db.models import User, Video, VideoSegment, Clip
 # --------------------------------------------------------------------------------------------------------------------------------
@@ -29,9 +30,7 @@ def get_url():
     """
     Pega a URL do banco das variáveis de ambiente.
     """
-
-    # O container Docker já tem essa variável, mas deixamos um fallback seguro
-    return os.getenv("DATABASE_URL", "postgresql://cortai_admin:cortai_secret_pass_123@db:5432/cortai_db").replace("postgresql://", "postgresql+asyncpg://")
+    return require_async_database_url()
 
 # --------------------------------------------------------------------------------------------------------------------------------
 

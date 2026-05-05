@@ -61,8 +61,29 @@ class ExperimentService:
             raise ValueError("EXPERIMENT_SCOPE_INVALID")
         if status not in ALLOWED_STATUSES:
             raise ValueError("EXPERIMENT_STATUS_INVALID")
+        experiment_id = _experiment_id(name=normalized_name, scope=scope)
+        existing = get_by_key("experiment_id", experiment_id, path=self.experiments_path)
+        if existing is not None:
+            current = Experiment(
+                experiment_id=str(existing["experiment_id"]),
+                name=str(existing["name"]),
+                scope=str(existing["scope"]),
+                variant_a=dict(existing["variant_a"]),
+                variant_b=dict(existing["variant_b"]),
+                status=str(existing["status"]),
+                created_at=str(existing["created_at"]),
+            )
+            if (
+                current.name == normalized_name
+                and current.scope == scope
+                and current.variant_a == dict(variant_a)
+                and current.variant_b == dict(variant_b)
+                and current.status == status
+            ):
+                return current, "NOOP"
+            raise ValueError("EXPERIMENT_DEFINITION_CONFLICT")
         record = Experiment(
-            experiment_id=_experiment_id(name=normalized_name, scope=scope),
+            experiment_id=experiment_id,
             name=normalized_name,
             scope=scope,
             variant_a=dict(variant_a),
@@ -119,8 +140,29 @@ class ExperimentService:
     ) -> tuple[ExperimentResult, str]:
         exp = self._coerce_experiment(experiment)
         assignment, _ = self.assign(experiment=exp, subject_key=subject_key, assigned_at=recorded_at)
+        result_id = _result_id(experiment_id=exp.experiment_id, subject_key=subject_key, window_id=window_id)
+        existing = get_by_key("result_id", result_id, path=self.results_path)
+        if existing is not None:
+            current = ExperimentResult(
+                result_id=str(existing["result_id"]),
+                experiment_id=str(existing["experiment_id"]),
+                subject_key=str(existing["subject_key"]),
+                variant=str(existing["variant"]),
+                window_id=str(existing["window_id"]),
+                metrics=dict(existing["metrics"]),
+                recorded_at=str(existing["recorded_at"]),
+            )
+            if (
+                current.experiment_id == exp.experiment_id
+                and current.subject_key == subject_key
+                and current.variant == assignment.variant
+                and current.window_id == window_id
+                and current.metrics == dict(metrics)
+            ):
+                return current, "NOOP"
+            raise ValueError("EXPERIMENT_RESULT_CONFLICT")
         record = ExperimentResult(
-            result_id=_result_id(experiment_id=exp.experiment_id, subject_key=subject_key, window_id=window_id),
+            result_id=result_id,
             experiment_id=exp.experiment_id,
             subject_key=subject_key,
             variant=assignment.variant,

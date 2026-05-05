@@ -4,9 +4,8 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote
 
-import httpx
+from app.assets.comfyui_image_service import ComfyUIImageError, ComfyUIImageService
 from PIL import Image, ImageStat
 
 
@@ -37,8 +36,8 @@ class BackgroundGeneratorService:
         target = self.base_dir / f"{render_job_id}.jpg"
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        if self.provider == "pollinations":
-            return self._generate_pollinations(prompt=prompt, target=target)
+        if self.provider == "comfyui":
+            return self._generate_comfyui(prompt=prompt, target=target, render_job_id=render_job_id)
         return None
 
     def pick_local_asset(self, *, theme: str, render_job_id: str, variant: str = "hook") -> Path | None:
@@ -118,27 +117,24 @@ class BackgroundGeneratorService:
             penalty += 25
         return (contrast * 1.6) - (abs(mean - 74) * 0.55) - penalty + jitter
 
-    def _generate_pollinations(self, *, prompt: str, target: Path) -> str | None:
-        api_key = os.getenv("POLLINATIONS_API_KEY", "").strip()
-        if not api_key:
+    def _generate_comfyui(self, *, prompt: str, target: Path, render_job_id: str) -> str | None:
+        service = ComfyUIImageService(base_dir=self.base_dir)
+        if not service.available():
             return None
-
-        url = (
-            "https://enter.pollinations.ai/api/generate/image/"
-            f"{quote(prompt)}?model=flux&width=1024&height=1792"
-        )
-        headers = {"Authorization": f"Bearer {api_key}"}
         try:
-            with httpx.Client(timeout=self.timeout_s, follow_redirects=True) as client:
-                response = client.get(url, headers=headers)
-                response.raise_for_status()
-                content_type = str(response.headers.get("content-type") or "").lower()
-                if "image" not in content_type:
-                    raise BackgroundGenerationError(f"POLLINATIONS_INVALID_CONTENT_TYPE:{content_type}")
-                target.write_bytes(response.content)
-                return str(target)
-        except Exception as exc:  # noqa: BLE001
-            raise BackgroundGenerationError(f"POLLINATIONS_GENERATION_FAILED: {exc}") from exc
+            result = service.generate_image(
+                prompt=prompt,
+                render_job_id=render_job_id,
+                segment_name="background",
+                seed=f"{render_job_id}:background",
+            )
+            generated = Path(result.image_path)
+            if not generated.exists():
+                return None
+            target.write_bytes(generated.read_bytes())
+            return str(target)
+        except ComfyUIImageError as exc:
+            raise BackgroundGenerationError(f"COMFYUI_GENERATION_FAILED: {exc}") from exc
 
     def _build_prompt(self, *, script_text: str, theme: str) -> str:
         text = " ".join(script_text.split())

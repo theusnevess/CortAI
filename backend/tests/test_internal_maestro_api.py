@@ -126,21 +126,21 @@ def _make_fake_orchestrator(*, status: str, step: str | None, error: str | None,
 
 @pytest.mark.anyio
 async def test_internal_maestro_run_requires_gate(client, maestro_store, monkeypatch):
-    monkeypatch.delenv("EXPOSE_C1_HEALTH_STATUS", raising=False)
+    monkeypatch.setenv("CORTAI_INTERNAL_CONTROL_PLANE_TOKEN", "test-internal-token")
 
     response = await client.post("/internal/maestro/run", json={"source_ref": "https://example.com/video"})
 
-    assert response.status_code == 404
+    assert response.status_code == 401
     assert maestro_store == {}
 
 
 @pytest.mark.anyio
 async def test_internal_maestro_demo_persists_done_job_and_get_returns_it(client, maestro_store, monkeypatch):
-    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+    monkeypatch.setenv("CORTAI_INTERNAL_CONTROL_PLANE_TOKEN", "test-internal-token")
 
     response = await client.post(
         "/internal/maestro/run?demo=1",
-        headers={"X-Internal-Status": "1"},
+        headers={"Authorization": "Bearer test-internal-token"},
         json={"source_ref": "https://example.com/video"},
     )
 
@@ -153,7 +153,7 @@ async def test_internal_maestro_demo_persists_done_job_and_get_returns_it(client
 
     get_response = await client.get(
         f"/internal/maestro/jobs/{job_id}",
-        headers={"X-Internal-Status": "1"},
+        headers={"Authorization": "Bearer test-internal-token"},
     )
 
     assert get_response.status_code == 200
@@ -173,7 +173,7 @@ async def test_internal_maestro_demo_persists_done_job_and_get_returns_it(client
 
 @pytest.mark.anyio
 async def test_internal_maestro_real_mode_persists_failed_job(client, maestro_store, monkeypatch):
-    monkeypatch.setenv("EXPOSE_C1_HEALTH_STATUS", "1")
+    monkeypatch.setenv("CORTAI_INTERNAL_CONTROL_PLANE_TOKEN", "test-internal-token")
     monkeypatch.setattr(
         "app.api.v1.endpoints.internal_maestro.MaestroOrchestrator",
         _make_fake_orchestrator(
@@ -186,7 +186,7 @@ async def test_internal_maestro_real_mode_persists_failed_job(client, maestro_st
 
     response = await client.post(
         "/internal/maestro/run",
-        headers={"X-Internal-Status": "1"},
+        headers={"Authorization": "Bearer test-internal-token"},
         json={"source_ref": "https://example.com/video", "job_id": "job-test-123"},
     )
 
@@ -205,7 +205,7 @@ async def test_internal_maestro_real_mode_persists_failed_job(client, maestro_st
 
 @pytest.mark.anyio
 async def test_internal_maestro_get_requires_gate(client, maestro_store, monkeypatch):
-    monkeypatch.delenv("EXPOSE_C1_HEALTH_STATUS", raising=False)
+    monkeypatch.setenv("CORTAI_INTERNAL_CONTROL_PLANE_TOKEN", "test-internal-token")
     maestro_store["job-1"] = _Record(
         job_id="job-1",
         source_ref="https://example.com/video",
@@ -215,4 +215,4 @@ async def test_internal_maestro_get_requires_gate(client, maestro_store, monkeyp
 
     response = await client.get("/internal/maestro/jobs/job-1")
 
-    assert response.status_code == 404
+    assert response.status_code == 401

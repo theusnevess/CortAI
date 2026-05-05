@@ -4,7 +4,7 @@ from time import perf_counter_ns
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1.endpoints import metrics, observability, status, internal_observability_ui, ops_dashboard, operator_actions, strategy_observatory
+from app.api.v1.endpoints import metrics, observability, status, internal_observability_ui, ops_dashboard, strategy_observatory
 from app.version import get_app_version
 from app.ops.readiness import evaluate_readiness
 from fastapi.responses import JSONResponse
@@ -43,7 +43,6 @@ async def capture_asgi_entry_time(request: Request, call_next):
 app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])
 app.include_router(observability.router, prefix="/api/v1/observability", tags=["observability"])
 app.include_router(ops_dashboard.router, prefix="/api/v1/ops", tags=["ops"])
-app.include_router(operator_actions.router, prefix="/api/v1/ops/actions", tags=["ops-actions"])
 app.include_router(strategy_observatory.router, prefix="/api/v1/ops/strategy", tags=["ops-strategy"])
 app.include_router(status.router, prefix="/api/v1", tags=["status"])
 app.include_router(internal_observability_ui.router)

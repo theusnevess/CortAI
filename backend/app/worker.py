@@ -1,10 +1,9 @@
-import os # Acessa as variáveis de ambiente do SO
 from celery import Celery
 from celery.schedules import crontab # Cria um worker capaz de processar tarefas assíncronas
 
-# Pega o endereço do Redis das variáveis de ambiente
-# Se não houver variável, usa localhost como fallback do
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+from app.config.runtime import require_worker_broker_url
+
+REDIS_URL = require_worker_broker_url()
 
 # Cria a instância do Celery
 celery_app = Celery(

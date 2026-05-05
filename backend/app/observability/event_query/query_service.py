@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 import os
 
+from app.config.runtime import cursor_signing_policy_from_env
 from app.observability.event_query.cursor import (
     CursorLast,
     SeekCursor,
@@ -53,9 +54,7 @@ class EventQueryService:
         self.forensics_enabled = forensics_enabled
         self.forensics_writer_allowlist = forensics_writer_allowlist or {"admin", "ci"}
         if cursor_signing_policy is None:
-            enforcement = os.getenv("CURSOR_SIGNATURE_ENFORCEMENT", "").strip().lower() in {"1", "true", "yes"}
-            secret = os.getenv("CURSOR_SIGNATURE_SECRET", "dev-secret").encode("utf-8")
-            cursor_signing_policy = SigningPolicy(enabled=enforcement, secret=secret)
+            cursor_signing_policy = cursor_signing_policy_from_env()
         self.cursor_signing_policy = cursor_signing_policy
 
     def get_events(

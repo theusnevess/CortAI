@@ -39,6 +39,8 @@ jobs:
 
       - name: Pytest focal (no conftest / no DB)
         working-directory: backend
+        env:
+          REDIS_URL: redis://localhost:6379/0
         run: |
           python -m pytest -q \
             tests/test_maestro_orchestrator.py \

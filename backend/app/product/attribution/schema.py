@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any
 
 ALLOWED_POLICY_STAGES = {"GROWTH", "MONETIZATION", "RECOVERY"}
 
-REQUIRED_FIELDS = (
+REQUIRED_BASE_FIELDS = (
     "attribution_id",
     "account_id",
     "publish_id",
@@ -21,9 +21,18 @@ REQUIRED_FIELDS = (
     "generated_at",
 )
 
+OPTIONAL_ENRICHMENT_FIELDS = (
+    "dominant_failure_reason",
+    "effective_duration_s",
+    "rare_fact_placement_s",
+    "likes",
+    "follows",
+    "rpm",
+)
+
 
 class AttributionValidationError(ValueError):
-    """Erro de contrato para violações do schema de content attribution."""
+    """Erro de contrato para violacoes do schema de content attribution."""
 
 
 def _require_non_empty_str(record: dict[str, Any], field: str) -> str:
@@ -56,11 +65,11 @@ def _coerce_float(record: dict[str, Any], field: str, *, required: bool = False)
 
 
 def validate_content_attribution(record: dict[str, Any]) -> dict[str, Any]:
-    """Valida o payload canônico do content attribution v1.0."""
+    """Valida o payload canonico do content attribution v1.0."""
     if not isinstance(record, dict):
         raise AttributionValidationError("ContractViolation: record must be an object")
 
-    for field in REQUIRED_FIELDS:
+    for field in REQUIRED_BASE_FIELDS:
         if field not in record:
             raise AttributionValidationError(f"ContractViolation: missing required field '{field}'")
 

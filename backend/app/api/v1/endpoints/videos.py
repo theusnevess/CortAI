@@ -1,4 +1,5 @@
 import os
+from app.security.ssrf import SSRFValidationError, validate_external_fetch_url
 from fastapi import APIRouter, HTTPException, Depends # Importa dependências do FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession # Importa sessão assíncrona do SQLAlchemy
 from sqlalchemy.future import select # Função select para consultas
@@ -41,6 +42,14 @@ async def create_video(request: VideoCreateRequest, db: AsyncSession = Depends(g
     3. Atualiza o Banco com o resultado
     """
     try:
+        try:
+            safe_url = validate_external_fetch_url(request.url).normalized_url
+        except SSRFValidationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "unsafe_source_url", "reason": exc.reason},
+            ) from exc
+
         # Pega o usuário padrão
         user = await get_default_user(db)
 
@@ -48,7 +57,7 @@ async def create_video(request: VideoCreateRequest, db: AsyncSession = Depends(g
         new_video = Video(
             user_id=user.id,
             title="Processando...", # Será atualizado depois
-            source_url=request.url,
+            source_url=safe_url,
             status="downloading"
         )
         db.add(new_video)
@@ -58,7 +67,7 @@ async def create_video(request: VideoCreateRequest, db: AsyncSession = Depends(g
         print(f"💾 Vídeo salvo no banco com ID: {new_video.id}")
 
         # Enfileira a task Celery para processar o vídeo em background
-        process_video_task.delay(str(new_video.id), request.url)
+        process_video_task.delay(str(new_video.id), safe_url)
 
         # Retorna a resposta inicial
         return {
@@ -67,6 +76,8 @@ async def create_video(request: VideoCreateRequest, db: AsyncSession = Depends(g
             "message": "Vídeo enfileirado para processamento"
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         # Se der erro, tenta marcar como falha no banco
         if 'new_video' in locals():

@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import create_engine # create_engine para criar engine de DB
 from sqlalchemy.orm import sessionmaker # sessionmaker para criar sessões
 import logging # Importa logging para registro de logs
+from app.config.runtime import require_database_url
 
 # Importa fcntl para bloqueio de arquivos, mas lida com a ausência em sistemas não Unix (como Windows) definindo fcntl como None se a importação falhar. 
 # O bloqueio de arquivos é usado para garantir que apenas um processo acesse um arquivo JSONL específico por vez, evitando corrupção de dados em cenários de concorrência.
@@ -242,10 +243,16 @@ def aggregate_daily_metrics(target_date: str | None = None):
         return {"status": "error", "error": str(e), "metric_date": metric_date.isoformat()}
 
 
-# Cria engine síncrona usando DATABASE_URL (para uso em workers)
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://cortai_admin:cortai_secret_pass_123@db:5432/cortai_db")
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine)
+_engine = None
+_SessionLocal = None
+
+
+def _get_sessionmaker():
+    global _engine, _SessionLocal
+    if _engine is None:
+        _engine = create_engine(require_database_url())
+        _SessionLocal = sessionmaker(bind=_engine)
+    return _SessionLocal
 
 # Define a task Celery para processar vídeos
 @celery_app.task(name="collector.process_video")
@@ -258,7 +265,7 @@ def process_video_task(video_id: str, url: str):
     - url: URL a ser baixada
     """
     agent = CollectorAgent()
-    session = SessionLocal()
+    session = _get_sessionmaker()()
     try:
         # Marca como downloading (caso não esteja)
         try:

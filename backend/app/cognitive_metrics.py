@@ -12,18 +12,23 @@ from typing import Any
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
+from app.config.runtime import require_database_url
 from app.db.models import CognitiveMetricsDaily, MetricsEndpointDaily, ObservationRecord
 from app.observations import persist_observation
 from app.schemas.observation import Observation
 from app.slo_contract import SLO_ENDPOINT_THRESHOLDS
 from app.state_from_observation import persist_state_from_observation
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://cortai_admin:cortai_secret_pass_123@db:5432/cortai_db",
-)
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine)
+_engine = None
+_SessionLocal = None
+
+
+def _get_sessionmaker():
+    global _engine, _SessionLocal
+    if _engine is None:
+        _engine = create_engine(require_database_url())
+        _SessionLocal = sessionmaker(bind=_engine)
+    return _SessionLocal
 
 DECISION_LOG_PATH = "storage/decision_log.jsonl"
 OUTCOME_LOG_PATH = "storage/outcome_log.jsonl"
@@ -475,7 +480,7 @@ def aggregate_daily_metrics_for_date(metric_date: date) -> dict:
     start_dt = datetime.combine(metric_date, time.min)
     end_dt = start_dt + timedelta(days=1)
 
-    session = SessionLocal()
+    session = _get_sessionmaker()()
     try:
         rows = (
             session.query(ObservationRecord)

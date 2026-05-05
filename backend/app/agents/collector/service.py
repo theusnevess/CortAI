@@ -11,7 +11,36 @@ import yt_dlp  # Biblioteca para download de videos
 from slugify import slugify  # Para criar nomes de arquivos seguros
 
 from app.agents.collector.errors import CollectorError
+from app.security.ssrf import (
+    SSRFValidationError,
+    redact_url_for_log,
+    validate_external_fetch_url,
+)
 from app.services.storage import MinioService  # Servico de armazenamento MinIO
+
+
+SAFE_PRE_CROSSING_EXTERNAL_CALL_AUTHORIZED = False
+SAFE_PRE_CROSSING_CREDENTIAL_ACCESS_AUTHORIZED = False
+SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED = False
+SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED = False
+SAFE_PRE_CROSSING_STORAGE_TRANSFER_AUTHORIZED = False
+
+
+def _blocked_collector_result(url: str, *, reason: str) -> dict:
+    err = CollectorError(
+        "external_boundary_blocked",
+        "Coleta bloqueada por SAFE_PRE_CROSSING.",
+        retryable=False,
+        cause=reason,
+    )
+    return {
+        "title": None,
+        "duration": None,
+        "minio_path": None,
+        "source_type": None,
+        "metadata": {"original_url": url},
+        "error": err.to_dict(),
+    }
 
 
 
@@ -90,28 +119,52 @@ class CollectorAgent:
         os.makedirs(self.download_path, exist_ok=True) # Garante que o diretório de download exista
 
     def process(self, url: str) -> dict:
-        if not isinstance(url, str) or not url.strip() or not re.match(r"^https?://", url.strip()):
-            err = _classify_collector_exc(ValueError(f"Invalid source_ref: {url!r}"))
+        try:
+            safe_url = validate_external_fetch_url(url).normalized_url
+        except SSRFValidationError as exc:
+            err = _classify_collector_exc(ValueError(f"Unsafe source_ref: {exc.reason}"))
             return {
                 "title": None,
                 "duration": None,
                 "minio_path": None,
                 "source_type": None,
-                "metadata": {"original_url": url},
+                "metadata": {"original_url": redact_url_for_log(url)},
                 "error": err.to_dict(),
             }
 
-        url = url.strip()
+        url = safe_url
+        if not SAFE_PRE_CROSSING_EXTERNAL_CALL_AUTHORIZED:
+            return _blocked_collector_result(
+                url,
+                reason="CORTAI_EXTERNAL_BOUNDARY_BLOCKED_SAFE_PRE_CROSSING",
+            )
+        if not SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED:
+            return _blocked_collector_result(
+                url,
+                reason="CORTAI_REQUEST_TRANSFORMATION_BLOCKED_SAFE_PRE_CROSSING",
+            )
+        if not SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED:
+            return _blocked_collector_result(
+                url,
+                reason="CORTAI_TRANSPORT_PAYLOAD_BLOCKED_SAFE_PRE_CROSSING",
+            )
+        if not SAFE_PRE_CROSSING_STORAGE_TRANSFER_AUTHORIZED:
+            return _blocked_collector_result(
+                url,
+                reason="CORTAI_STORAGE_TRANSFER_BLOCKED_SAFE_PRE_CROSSING",
+            )
         if self.storage is None:
             self.storage = MinioService()
         print(f"⬇️ Iniciando download: {url}")
         
         # Tenta localizar o cookies.txt na pasta 'backend' relativa a este módulo
-        cookie_file = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'cookies.txt'))
-        if os.path.exists(cookie_file):
-            print(f"🍪 Arquivo de cookies encontrado em: {cookie_file}")
-        else:
-            print(f"⚠️ AVISO: Arquivo de cookies não encontrado em: {cookie_file}")
+        cookie_file = ''
+        if SAFE_PRE_CROSSING_CREDENTIAL_ACCESS_AUTHORIZED:
+            cookie_file = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'cookies.txt'))
+            if os.path.exists(cookie_file):
+                print(f"🍪 Arquivo de cookies encontrado em: {cookie_file}")
+            else:
+                print(f"⚠️ AVISO: Arquivo de cookies não encontrado em: {cookie_file}")
 
         video_id = str(uuid.uuid4())
         output_template = f"{self.download_path}/{video_id}.%(ext)s"
@@ -134,7 +187,7 @@ class CollectorAgent:
         ydl_opts['compat_opts'] = ['no-certifi']
 
         # Se temos cookies, passa para o yt-dlp para suportar vídeos privados/restritos
-        if os.path.exists(cookie_file):
+        if cookie_file and os.path.exists(cookie_file):
             ydl_opts['cookiefile'] = cookie_file
         
         # Flag para indicar que devemos usar o downloader Playwright como último recurso

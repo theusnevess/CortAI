@@ -52,9 +52,9 @@ jobs:
           cat > .env << EOF
           # Database
           DB_USER=cortai_admin
-          DB_PASSWORD=${{ secrets.CORTAI_DB_PASSWORD }}
+          DB_PASSWORD=${{ secrets.CORTAI_CI_DB_PASSWORD }}
           DB_NAME=cortai_db
-          DATABASE_URL=postgresql://cortai_admin:${{ secrets.CORTAI_DB_PASSWORD }}@db:5432/cortai_db
+          DATABASE_URL=postgresql://cortai_admin:${{ secrets.CORTAI_CI_DB_PASSWORD }}@db:5432/cortai_db
           
           # Redis
           REDIS_URL=redis://redis:6379/0
