@@ -57,6 +57,52 @@ _PUBLIC_SIGNAL_FORBIDDEN_SUBSTRINGS = (
     "/storage/",
 )
 _public_webhook_last_state: str | None = None
+SAFE_PRE_CROSSING_EXTERNAL_CALL_AUTHORIZED = False
+SAFE_PRE_CROSSING_CREDENTIAL_ACCESS_AUTHORIZED = False
+SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED = False
+SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED = False
+
+_STATUS_ROUTER_REGISTRATION_WIRING_POINT: dict[str, object] = {
+    "id": "status_router_registration_candidate",
+    "surface": "backend/app/api/v1/endpoints/status.py",
+    "boundary": "non_executing_router_registration",
+    "runtime_integration_authorized": False,
+    "runtime_execution_authorized": False,
+    "external_call_authorized": False,
+    "credential_access_authorized": False,
+    "request_transformation_authorized": False,
+    "transport_payload_authorized": False,
+}
+_STATUS_DEPENDENCY_ACTIVATION_WIRING_POINT: dict[str, object] = {
+    "id": "status_dependency_activation_candidate",
+    "surface": "backend/app/api/v1/endpoints/status.py",
+    "boundary": "non_executing_dependency_activation",
+    "runtime_integration_authorized": False,
+    "runtime_execution_authorized": False,
+    "external_call_authorized": False,
+    "credential_access_authorized": False,
+    "request_transformation_authorized": False,
+    "transport_payload_authorized": False,
+    "F_003_fixture_debt_carried_forward": True,
+}
+
+
+def get_status_runtime_wiring_candidates() -> tuple[dict[str, object], ...]:
+    return (
+        dict(_STATUS_ROUTER_REGISTRATION_WIRING_POINT),
+        dict(_STATUS_DEPENDENCY_ACTIVATION_WIRING_POINT),
+    )
+
+
+def _ensure_public_webhook_authorized() -> None:
+    if not SAFE_PRE_CROSSING_EXTERNAL_CALL_AUTHORIZED:
+        raise RuntimeError("CORTAI_EXTERNAL_BOUNDARY_BLOCKED_SAFE_PRE_CROSSING")
+    if not SAFE_PRE_CROSSING_CREDENTIAL_ACCESS_AUTHORIZED:
+        raise RuntimeError("CORTAI_CREDENTIAL_ACCESS_BLOCKED_SAFE_PRE_CROSSING")
+    if not SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED:
+        raise RuntimeError("CORTAI_REQUEST_TRANSFORMATION_BLOCKED_SAFE_PRE_CROSSING")
+    if not SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED:
+        raise RuntimeError("CORTAI_TRANSPORT_PAYLOAD_BLOCKED_SAFE_PRE_CROSSING")
 
 
 def _new_db_stats() -> dict[str, int]:
@@ -260,6 +306,7 @@ def _build_public_webhook_headers(raw_body: bytes) -> dict[str, str]:
     """
     Monta headers do webhook com assinatura opcional por HMAC-SHA256.
     """
+    _ensure_public_webhook_authorized()
     headers = {"Content-Type": "application/json"}
     secret = str(os.getenv("STATUS_WEBHOOK_SECRET") or "").strip()
     if not secret:
@@ -273,6 +320,7 @@ async def _send_public_status_webhook(url: str, payload: dict) -> None:
     """
     Envia webhook de status com timeout curto, sem retry no v1.
     """
+    _ensure_public_webhook_authorized()
     started_ns = perf_counter_ns()
     raw_body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     headers = _build_public_webhook_headers(raw_body)

@@ -18,6 +18,18 @@ DEFAULT_HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
 }
+SAFE_PRE_CROSSING_EXTERNAL_CALL_AUTHORIZED = False
+SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED = False
+SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED = False
+
+
+def _ensure_asset_http_fetch_authorized() -> None:
+    if not SAFE_PRE_CROSSING_EXTERNAL_CALL_AUTHORIZED:
+        raise RuntimeError('CORTAI_EXTERNAL_BOUNDARY_BLOCKED_SAFE_PRE_CROSSING')
+    if not SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED:
+        raise RuntimeError('CORTAI_REQUEST_TRANSFORMATION_BLOCKED_SAFE_PRE_CROSSING')
+    if not SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED:
+        raise RuntimeError('CORTAI_TRANSPORT_PAYLOAD_BLOCKED_SAFE_PRE_CROSSING')
 
 
 @dataclass(frozen=True)
@@ -127,6 +139,7 @@ def normalize_and_store(*, image_bytes: bytes, source_type: str, category: str, 
 
 
 def download_bytes(url: str, *, headers: dict[str, str] | None = None, timeout: float = 120.0) -> bytes:
+    _ensure_asset_http_fetch_authorized()
     merged_headers = dict(DEFAULT_HEADERS)
     if headers:
         merged_headers.update(headers)
@@ -137,6 +150,7 @@ def download_bytes(url: str, *, headers: dict[str, str] | None = None, timeout: 
 
 
 def resolve_og_image(page_url: str, *, timeout: float = 60.0, headers: dict[str, str] | None = None) -> str:
+    _ensure_asset_http_fetch_authorized()
     merged_headers = dict(DEFAULT_HEADERS)
     if headers:
         merged_headers.update(headers)

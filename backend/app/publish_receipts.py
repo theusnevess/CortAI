@@ -1,4 +1,3 @@
-import os
 import re
 from datetime import datetime
 from typing import Optional
@@ -6,12 +5,9 @@ from typing import Optional
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.config.runtime import require_database_url
 from app.db.models import PublishReceipt
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://cortai_admin:cortai_secret_pass_123@db:5432/cortai_db",
-)
 _engine = None
 _SessionLocal = None
 
@@ -22,7 +18,7 @@ def _get_sessionmaker():
     """
     global _engine, _SessionLocal
     if _engine is None:
-        _engine = create_engine(DATABASE_URL)
+        _engine = create_engine(require_database_url())
         _SessionLocal = sessionmaker(bind=_engine)
     return _SessionLocal
 

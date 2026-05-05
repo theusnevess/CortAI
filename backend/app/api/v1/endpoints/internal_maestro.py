@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.dependencies.control_plane_auth import require_internal_control_plane
 from app.api.v1.endpoints.metrics import _emit_metrics_endpoint_timing
 from app.db.session import get_db
 from app.maestro.orchestrator import MaestroOrchestrator
@@ -17,9 +18,12 @@ from app.maestro.repository import (
     update_job_failure,
     update_job_success,
 )
-from app.observability.runtime_health import should_include_internal_status
 
-router = APIRouter(prefix="/internal", tags=["internal"])
+router = APIRouter(
+    prefix="/internal",
+    tags=["internal"],
+    dependencies=[Depends(require_internal_control_plane)],
+)
 
 
 class _DemoCollector:
@@ -135,10 +139,6 @@ async def run_internal_maestro(
     demo_mode = False
     persisted_job_id: str | None = None
     try:
-        if not should_include_internal_status(request):
-            status_code = 404
-            raise HTTPException(status_code=404, detail="Not Found")
-
         demo_mode = str(request.query_params.get("demo", "")).strip() == "1"
         source_ref = payload.source_ref
         persisted_job_id = (
@@ -209,9 +209,6 @@ async def get_internal_maestro_job(
     db: AsyncSession = Depends(get_db),
 ):
     """Consulta o estado persistido de um job do Maestro via endpoint interno."""
-
-    if not should_include_internal_status(request):
-        raise HTTPException(status_code=404, detail="Not Found")
 
     record = await get_job_by_id(db, job_id)
     if record is None:

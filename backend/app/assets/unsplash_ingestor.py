@@ -12,6 +12,23 @@ from app.assets.catalog_registry import ROOT
 API_URL = 'https://api.unsplash.com/search/photos'
 
 
+SAFE_PRE_CROSSING_EXTERNAL_CALL_AUTHORIZED = False
+SAFE_PRE_CROSSING_CREDENTIAL_ACCESS_AUTHORIZED = False
+SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED = False
+SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED = False
+
+
+def _ensure_unsplash_external_boundary_authorized() -> None:
+    if not SAFE_PRE_CROSSING_EXTERNAL_CALL_AUTHORIZED:
+        raise RuntimeError('CORTAI_EXTERNAL_BOUNDARY_BLOCKED_SAFE_PRE_CROSSING')
+    if not SAFE_PRE_CROSSING_CREDENTIAL_ACCESS_AUTHORIZED:
+        raise RuntimeError('CORTAI_CREDENTIAL_ACCESS_BLOCKED_SAFE_PRE_CROSSING')
+    if not SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED:
+        raise RuntimeError('CORTAI_REQUEST_TRANSFORMATION_BLOCKED_SAFE_PRE_CROSSING')
+    if not SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED:
+        raise RuntimeError('CORTAI_TRANSPORT_PAYLOAD_BLOCKED_SAFE_PRE_CROSSING')
+
+
 @dataclass
 class UnsplashIngestor:
     access_key: str = ''
@@ -19,9 +36,12 @@ class UnsplashIngestor:
 
     def __post_init__(self) -> None:
         if not self.access_key:
+            if not SAFE_PRE_CROSSING_CREDENTIAL_ACCESS_AUTHORIZED:
+                return
             self.access_key = os.getenv('UNSPLASH_ACCESS_KEY', '').strip()
 
     def search(self, *, query: str, per_page: int = 20) -> list[dict]:
+        _ensure_unsplash_external_boundary_authorized()
         if not self.access_key:
             raise RuntimeError('UNSPLASH_ACCESS_KEY missing')
         headers = {'Authorization': f'Client-ID {self.access_key}'}
@@ -32,6 +52,7 @@ class UnsplashIngestor:
         return list(data.get('results', []))
 
     def ingest_query(self, *, query: str, category: str, subtype: str, tags: list[str], limit: int = 3, metadata: dict | None = None) -> list[dict]:
+        _ensure_unsplash_external_boundary_authorized()
         rows = self.search(query=query, per_page=max(limit, 10))
         ingested = []
         for index, row in enumerate(rows[:limit], start=1):
@@ -52,6 +73,7 @@ class UnsplashIngestor:
         return ingested
 
     def ingest_page(self, *, page_url: str, category: str, subtype: str, tags: list[str], asset_name: str, metadata: dict | None = None) -> dict:
+        _ensure_unsplash_external_boundary_authorized()
         image_url = resolve_og_image(page_url)
         content = download_bytes(image_url)
         return normalize_and_store(

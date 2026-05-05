@@ -175,6 +175,13 @@ class AccountHealthAgentService:
         )
 
     def _fallback_result(self, *, data: AccountHealthInput | None = None, reason: str) -> AccountHealthResult:
+        fallback_status = AccountHealthStatus.HOLD.value
+        fallback_reasons = ["FALLBACK_FAIL_CLOSED", reason]
+        fallback_constraints: dict[str, object] = {
+            "block_generation": True,
+            "fail_closed": True,
+        }
+        fallback_triggered_conditions = ["fallback_fail_closed"]
         telemetry_summary = self.telemetry_enricher.enrich(data).to_dict()
         risk_summary = self.risk_component_scorer.score(data, telemetry_summary).to_dict()
         temporal_result = self.temporal_analyzer.analyze(
@@ -183,13 +190,13 @@ class AccountHealthAgentService:
             risk_summary=risk_summary,
         ).to_dict()
         confidence_result = self.confidence_calibrator.calibrate(
-            decision_status=AccountHealthStatus.SAFE.value,
+            decision_status=fallback_status,
             telemetry_summary=telemetry_summary,
             risk_summary=risk_summary,
             temporal_health=temporal_result,
         ).to_dict()
         degraded_decision = self.degraded_input_policy.evaluate(
-            original_decision=AccountHealthStatus.SAFE.value,
+            original_decision=fallback_status,
             telemetry_summary=telemetry_summary,
             risk_summary=risk_summary,
             confidence_result=confidence_result,
@@ -197,9 +204,9 @@ class AccountHealthAgentService:
             fallback_used=True,
         ).to_dict()
         constraint_rationale = self.constraint_rationale_builder.build(
-            recommended_constraints={},
-            final_decision=AccountHealthStatus.SAFE.value,
-            reasons=["fallback_default"],
+            recommended_constraints=fallback_constraints,
+            final_decision=fallback_status,
+            reasons=fallback_reasons,
             risk_summary=risk_summary,
             confidence_result=confidence_result,
             temporal_health=temporal_result,
@@ -208,10 +215,10 @@ class AccountHealthAgentService:
             fallback_used=True,
         )
         health_trace = self.health_trace_builder.build(
-            final_decision=AccountHealthStatus.SAFE.value,
-            reasons=["fallback_default"],
-            recommended_constraints={},
-            triggered_conditions=["fallback_safe_default"],
+            final_decision=fallback_status,
+            reasons=fallback_reasons,
+            recommended_constraints=fallback_constraints,
+            triggered_conditions=fallback_triggered_conditions,
             threshold_evaluations=self._build_threshold_evaluations(data),
             telemetry_summary=telemetry_summary,
             risk_summary=risk_summary,
@@ -225,22 +232,22 @@ class AccountHealthAgentService:
         input_summary = self._build_input_summary(data, telemetry_summary=telemetry_summary)
         return AccountHealthResult(
             decision=AccountHealthDecision(
-                status=AccountHealthStatus.SAFE.value,
-                reasons=["fallback_default"],
-                recommended_constraints={},
+                status=fallback_status,
+                reasons=fallback_reasons,
+                recommended_constraints=fallback_constraints,
             ),
             fallback=FallbackDecision(
                 used=True,
-                mode=FallbackMode.SAFE_DEFAULT.value,
+                mode=FallbackMode.CONTROLLED_REJECT.value,
                 reason=reason,
             ),
             input_summary=input_summary,
             decision_trace=self._build_decision_trace(
                 data=data,
-                status=AccountHealthStatus.SAFE.value,
-                reasons=["fallback_default"],
-                constraints={},
-                triggered_conditions=["fallback_safe_default"],
+                status=fallback_status,
+                reasons=fallback_reasons,
+                constraints=fallback_constraints,
+                triggered_conditions=fallback_triggered_conditions,
                 threshold_evaluations=self._build_threshold_evaluations(data),
                 fallback_used=True,
                 fallback_reason=reason,
@@ -424,3 +431,18 @@ class AccountHealthAgentService:
             "fallback_used": fallback_used,
             "fallback_reason": fallback_reason,
         }
+
+
+def get_account_health_service_registration_candidate() -> dict[str, object]:
+    return {
+        "id": "account_health_service_registration_candidate",
+        "surface": "backend/app/creative/agents/account_health/service.py",
+        "registration_target": "AccountHealthAgentService",
+        "boundary": "non_executing_service_registration",
+        "runtime_integration_authorized": False,
+        "runtime_execution_authorized": False,
+        "external_call_authorized": False,
+        "credential_access_authorized": False,
+        "request_transformation_authorized": False,
+        "transport_payload_authorized": False,
+    }

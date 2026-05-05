@@ -6,11 +6,15 @@ Runtime documentation is organized by responsibility and lifecycle stage.
 
 - `docs\runtime\architecture/` - 2 files
 - `docs\runtime\baselines/` - 11 files
-- `docs\runtime\full-system-audit/` - 3 files
+- `docs\runtime\full-system-audit/` - 7 files
 - `docs\runtime\phase-2-6/` - 22 files
 - `docs\runtime\phase-3/` - 2 files
 - `docs\runtime\publisher/` - 13 files
+- `docs\runtime\runtime-integration/` - 3 files
 - `docs\runtime\sandbox/` - 51 files
+- `docs\runtime\wave-3/` - 75 files
+
+Wave 3 audit artifacts are indexed in `docs/runtime/wave-3/README.md`.
 
 ## File Map
 

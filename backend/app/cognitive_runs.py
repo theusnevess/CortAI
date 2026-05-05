@@ -1,5 +1,4 @@
 import json
-import os
 import logging
 from contextlib import contextmanager
 from datetime import datetime
@@ -7,6 +6,7 @@ from datetime import datetime
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.config.runtime import require_database_url
 from app.db.models import CognitiveRun
 from app.schemas.observation import Observation
 
@@ -20,9 +20,16 @@ logger = logging.getLogger(__name__)
 
 STATE_LOG_PATH = "storage/state_log.jsonl"
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://cortai_admin:cortai_secret_pass_123@db:5432/cortai_db")
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine)
+_engine = None
+_SessionLocal = None
+
+
+def _get_sessionmaker():
+    global _engine, _SessionLocal
+    if _engine is None:
+        _engine = create_engine(require_database_url())
+        _SessionLocal = sessionmaker(bind=_engine)
+    return _SessionLocal
 
 
 @contextmanager
@@ -99,7 +106,7 @@ def persist_cognitive_run_from_observation(observation: Observation) -> None:
         state_facts = last_state.get("facts") or {}
         video_id = state_facts.get("video_id")
 
-    session = SessionLocal()
+    session = _get_sessionmaker()()
     try:
         existing = session.get(CognitiveRun, process_id)
         if existing:

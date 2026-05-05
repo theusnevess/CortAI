@@ -1,0 +1,643 @@
+{
+  "artifact_type": "cortai_full_repo_critical_checklist_outputs",
+  "generated_at": "2026-05-01",
+  "execution_mode": "audit_only_static",
+  "system_state_assumed": {
+    "current_system_state": "SAFE_PRE_CROSSING",
+    "runtime_integration_authorized": false,
+    "runtime_wiring_authorized": false,
+    "external_call_authorized": false,
+    "implementation_authorized": false,
+    "production_ready": false
+  },
+  "scope": {
+    "repo_root": "c:\\Users\\Mathe\\Documents\\LUMA Cognitive Systems\\CortAI\\CortAI 1.0",
+    "files_scanned_excluding_caches": 1158,
+    "excluded_paths": [
+      ".git/**",
+      "backend/.venv/**",
+      "**/__pycache__/**",
+      "**/*.pyc"
+    ],
+    "out_directory_present": false,
+    "secret_value_policy": "Values from .env were not read or printed."
+  },
+  "overall": {
+    "passed": false,
+    "verdict": "HOLD_CRITICAL",
+    "blocking_failure": true,
+    "critical_findings": [
+      "Positive implementation authorization declarations conflict with the mandatory global false state for this checklist execution.",
+      "Runtime/Kernel candidate paths contain CortAI domain imports and hook/setup/payoff semantics.",
+      "Runtime paths contain HTTP/network capabilities and credential access capability while external calls remain unauthorized.",
+      "Account Health fallback can emit SAFE under exception/cold-start fallback."
+    ],
+    "next_allowed_step": "CortAI Auditor + CortAI Architect review. No Engineer, runtime wiring, external call, Publisher wiring or production step is authorized by this audit."
+  },
+  "process_outputs": [
+    {
+      "id": "scope_file_count",
+      "command_summary": "rg --files excluding .git, backend/.venv, __pycache__, pyc",
+      "output": {
+        "file_count": 1158
+      }
+    },
+    {
+      "id": "mandatory_state_sources",
+      "command_summary": "rg SAFE_PRE_CROSSING and non-authorization flags in docs/runtime and docs/obsidian",
+      "output": {
+        "safe_pre_crossing_found": true,
+        "false_flags_found": true,
+        "representative_sources": [
+          "docs/obsidian/CortAI_System_State_Definition.md",
+          "docs/obsidian/CortAI_Full_Repo_Critical_Checklist.md",
+          "docs/runtime/FULL_SYSTEM_EXTREME_AUDIT_CHECKLIST.md",
+          "docs/runtime/CortAI_Runtime_Integration_Authorization_Gate.md"
+        ]
+      }
+    },
+    {
+      "id": "positive_authorization_scan",
+      "command_summary": "rg positive authorization fragments for runtime integration, runtime wiring, external call, implementation and production readiness",
+      "output": {
+        "direct_doc_conflicts": [
+          {
+            "path": "docs/runtime/sandbox/validation-call/offline-preparation/EXTERNAL_SANDBOX_VALIDATION_CALL_OFFLINE_PREPARATION_IMPLEMENTATION_AUTHORIZATION.md",
+            "lines": [
+              53,
+              288
+            ],
+            "detected_field": "implementation_authorized",
+            "detected_value": "true",
+            "classification": "blocking_contradiction_against_this_checklist_state"
+          },
+          {
+            "path": "docs/active/PHASE_3_PUBLISHER_AND_SANDBOX_RECORD.md",
+            "lines": [
+              16855,
+              17090
+            ],
+            "detected_field": "implementation_authorized",
+            "detected_value": "true",
+            "classification": "blocking_contradiction_against_this_checklist_state"
+          }
+        ],
+        "test_code_positive_literals": [
+          "tests/gates/sandbox/run_external_sandbox_first_authorization_gate.py",
+          "tests/gates/sandbox/run_external_sandbox_validation_call_implementation_authorization_gate.py",
+          "tests/gates/sandbox/run_external_sandbox_validation_call_pre_implementation_gate.py"
+        ],
+        "test_code_classification": "appears to be forbidden-token sentinel logic, not a direct state declaration; retained as audit evidence"
+      }
+    },
+    {
+      "id": "runtime_network_scan",
+      "command_summary": "rg imports/usages of requests, httpx, aiohttp, urllib, socket in backend/app",
+      "output": {
+        "capability_detected": true,
+        "representative_matches": [
+          "backend/app/content/script_gen/service.py: imports httpx; reads GROQ_API_KEY; builds Authorization Bearer; posts to Groq and Ollama-compatible endpoint",
+          "backend/app/creative/agents/trend_analysis/collectors.py: imports httpx; TikTok Creative Center public URL; client.get",
+          "backend/app/assets/unsplash_ingestor.py: imports httpx and creates client",
+          "backend/app/assets/pixabay_ingestor.py: imports httpx and creates client",
+          "backend/app/assets/pexels_ingestor.py: imports httpx and creates client",
+          "backend/app/assets/ingestion_common.py: imports httpx and creates client",
+          "backend/app/assets/comfyui_image_service.py: imports httpx and creates client",
+          "backend/app/agents/collector/service.py: imports socket and requests",
+          "backend/app/api/v1/endpoints/status.py: imports httpx and creates AsyncClient"
+        ],
+        "classification": "HOLD_CRITICAL"
+      }
+    },
+    {
+      "id": "publisher_network_scan",
+      "command_summary": "rg network imports in Publisher and publish-record paths",
+      "output": {
+        "requests_httpx_aiohttp_urllib_socket_imports_found": false,
+        "publisher_paths_scanned": [
+          "backend/app/creative/agents/publisher",
+          "backend/app/agents/publisher",
+          "backend/app/content/pipeline/publish.py",
+          "backend/app/data/schemas/publish_record.py",
+          "backend/app/data/publish_records"
+        ],
+        "classification": "PASS_WITH_MONITORING"
+      }
+    },
+    {
+      "id": "kernel_runtime_domain_scan",
+      "command_summary": "rg domain imports and semantic media terms in backend/app/runtime and backend/app/core",
+      "output": {
+        "domain_coupling_detected": true,
+        "representative_matches": [
+          "backend/app/runtime/asset_router.py imports app.creative.contracts.creative_pack and uses hook/setup/payoff",
+          "backend/app/runtime/asset_selector.py contains hook/setup/payoff semantic scoring",
+          "backend/app/runtime/rollout/pilot_runner.py imports ContentPipelineService, LocalScriptGeneratorService, publish records and metrics",
+          "backend/app/runtime/scheduler/* contains hook-type/feed composition logic"
+        ],
+        "classification": "HOLD_CRITICAL"
+      }
+    },
+    {
+      "id": "creative_orchestrator_scan",
+      "command_summary": "Inspect CreativeOrchestratorService and QC governance flow",
+      "output": {
+        "account_health_hold_blocks": true,
+        "defer_publish_manifest_before_qc": true,
+        "qc_approve_finalizes_local_manifest": true,
+        "qc_hold_reject_mark_non_publishable": true,
+        "classification": "PASS_WITH_MONITORING"
+      }
+    },
+    {
+      "id": "account_health_scan",
+      "command_summary": "Inspect AccountHealthAgentService HOLD and fallback behavior",
+      "output": {
+        "explicit_hold_blocks": true,
+        "fallback_safe_default_detected": true,
+        "rationale": "Fallback path emits SAFE for exception/cold-start fallback; this conflicts with missing evidence not success.",
+        "classification": "HOLD_HIGH"
+      }
+    },
+    {
+      "id": "content_pipeline_publish_scan",
+      "command_summary": "Inspect StubPublishAdapter, finalize_publish, mark_non_publishable and READY/publishable flow",
+      "output": {
+        "stub_manifest_only": true,
+        "network_call_in_publish_adapter": false,
+        "ready_publishable_flags_exist": true,
+        "qc_controls_manifest_finalization": true,
+        "classification": "PASS_WITH_MONITORING"
+      }
+    },
+    {
+      "id": "sandbox_offline_preparation_scan",
+      "command_summary": "Inspect sandbox validation envelope, boundary, simulation and controlled binding flags",
+      "output": {
+        "execution_capability_none_found": true,
+        "transport_capability_none_found": true,
+        "non_transportable_true_found": true,
+        "binding_active_false_found": true,
+        "http_client_allowed_false_found": true,
+        "endpoint_allowed_false_found": true,
+        "upload_scheduler_authorized_false_found": true,
+        "classification": "PASS_WITH_MONITORING"
+      }
+    },
+    {
+      "id": "runtime_authorization_chain_artifacts",
+      "command_summary": "Test-Path expected runtime integration authorization artifacts",
+      "output": {
+        "chain_exists": true,
+        "plan_exists": true,
+        "gate_exists": true,
+        "runner_exists": false,
+        "gate_review_exists": false,
+        "classification": "PASS_WITH_MONITORING"
+      }
+    },
+    {
+      "id": "residual_scan",
+      "command_summary": "rg required production/runtime residual identifiers",
+      "output": {
+        "required_residual_identifiers_found": true,
+        "representative_sources": [
+          "docs/obsidian/CortAI_Full_Repo_Critical_Checklist.md",
+          "docs/runtime/CortAI_Runtime_Integration_Authorization_Chain.md",
+          "docs/runtime/CortAI_Runtime_Integration_Authorization_Plan.md",
+          "docs/runtime/CortAI_Runtime_Integration_Authorization_Gate.md",
+          "tests/gates/system/run_full_system_extreme_audit_gate.py"
+        ],
+        "closure_integrity_fully_verified": false,
+        "classification": "HOLD"
+      }
+    },
+    {
+      "id": "tests_execution",
+      "command_summary": "No pytest/unittest execution was performed",
+      "output": {
+        "tests_run": false,
+        "reason": "The requested execution was the checklist audit and artifact generation; static test evidence was scanned, but no test suite was executed.",
+        "classification": "HOLD"
+      }
+    }
+  ],
+  "blocks": [
+    {
+      "block_name": "0. Roteamento entre chats",
+      "status": "PASS",
+      "passed": true,
+      "evidence": [
+        "This execution produced audit artifacts and did not route to implementation."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "The next allowed step is Auditor + Architect before any Engineer for authorization/runtime/Publisher topics."
+      ]
+    },
+    {
+      "block_name": "1. Estado global",
+      "status": "HOLD_CRITICAL",
+      "passed": false,
+      "evidence": [
+        "SAFE_PRE_CROSSING and false flags are present in current state docs.",
+        "Positive implementation authorization declarations exist in offline-preparation authorization artifacts."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "The mandatory state for this checklist requires implementation authorization to remain false."
+      ]
+    },
+    {
+      "block_name": "2. Nao-autorizacao",
+      "status": "HOLD_CRITICAL",
+      "passed": false,
+      "evidence": [
+        "Positive implementation authorization artifacts exist.",
+        "Runtime paths contain external-call and credential-access capability."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "Plan/gate/readiness/test evidence cannot promote authority; the repo contains at least one scoped promotion artifact that contradicts this checklist's mandatory state."
+      ]
+    },
+    {
+      "block_name": "3. Arquitetura em camadas",
+      "status": "HOLD_CRITICAL",
+      "passed": false,
+      "evidence": [
+        "backend/app/runtime imports creative/content/product-layer services and contains domain semantics."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "Runtime/Kernel boundary is not cleanly layer-neutral."
+      ]
+    },
+    {
+      "block_name": "4. Kernel",
+      "status": "HOLD_CRITICAL",
+      "passed": false,
+      "evidence": [
+        "backend/app/runtime/asset_router.py imports creative contracts.",
+        "backend/app/runtime/asset_selector.py contains hook/setup/payoff semantics."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "If backend/app/runtime is treated as Kernel/runtime core, the Kernel neutrality checklist fails."
+      ]
+    },
+    {
+      "block_name": "5. Runtime Behavior",
+      "status": "HOLD_HIGH",
+      "passed": false,
+      "evidence": [
+        "backend/app/runtime/executor.py exists and performs lease/idempotency/event emission.",
+        "backend/app/runtime/rollout/pilot_runner.py imports domain pipeline/script services."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "Fail-closed runtime behavior cannot be passed while rollout/runtime is coupled to domain execution surfaces."
+      ]
+    },
+    {
+      "block_name": "6. CortAI Domain",
+      "status": "HOLD_HIGH",
+      "passed": false,
+      "evidence": [
+        "Domain paths contain Script/Trend HTTP clients.",
+        "Creative Orchestrator calls ContentPipelineService local pipeline execution."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "Domain intent and external/runtime execution boundaries are not fully separable under the current static evidence."
+      ]
+    },
+    {
+      "block_name": "7. Runtime Facade",
+      "status": "HOLD",
+      "passed": false,
+      "evidence": [
+        "No unambiguous thin Runtime Facade boundary was proven by this audit."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "Missing evidence cannot be passed."
+      ]
+    },
+    {
+      "block_name": "8. Creative Orchestrator",
+      "status": "PASS_WITH_MONITORING",
+      "passed": true,
+      "evidence": [
+        "Account Health HOLD returns a HOLD pipeline output.",
+        "Pipeline uses defer_publish_manifest before QC.",
+        "QC HOLD/REJECT calls mark_non_publishable."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "The audited path coordinates and applies local governance; it does not show external platform execution."
+      ]
+    },
+    {
+      "block_name": "9. Account Health",
+      "status": "HOLD_HIGH",
+      "passed": false,
+      "evidence": [
+        "Explicit HOLD conditions set block_generation.",
+        "Fallback path emits SAFE default on evaluation exception or cold start."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "Missing or failed health evidence must not become success."
+      ]
+    },
+    {
+      "block_name": "10. Strategy",
+      "status": "HOLD",
+      "passed": false,
+      "evidence": [
+        "Strategy docs and code exist, but full Strategy boundary proof was not executed."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "Insufficient evidence for a positive pass."
+      ]
+    },
+    {
+      "block_name": "11. Learning Agent",
+      "status": "HOLD",
+      "passed": false,
+      "evidence": [
+        "Learning modules and tests exist.",
+        "No test/replay execution was performed in this audit."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "Static evidence only is insufficient for all Learning Agent claims."
+      ]
+    },
+    {
+      "block_name": "12. Trend Analysis",
+      "status": "HOLD_CRITICAL",
+      "passed": false,
+      "evidence": [
+        "Trend collector imports httpx, has TikTok Creative Center URL, and calls client.get."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "External collection capability exists while external call authorization is false."
+      ]
+    },
+    {
+      "block_name": "13. Script Agent",
+      "status": "HOLD_CRITICAL",
+      "passed": false,
+      "evidence": [
+        "Script generation imports httpx.",
+        "Script generation reads Groq key from environment and constructs Authorization Bearer.",
+        "Script generation posts to Groq and Ollama-compatible endpoints."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "Provider availability and credential access capability cannot be treated as authorized execution."
+      ]
+    },
+    {
+      "block_name": "14. Voice Agent",
+      "status": "HOLD",
+      "passed": false,
+      "evidence": [
+        "Voice agent files exist and TTS pipeline files exist.",
+        "No runtime/test proof was executed."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "Static evidence was insufficient to pass every Voice/TTS boundary assertion."
+      ]
+    },
+    {
+      "block_name": "15. Asset Selection",
+      "status": "HOLD_HIGH",
+      "passed": false,
+      "evidence": [
+        "Asset selection semantic logic appears under backend/app/runtime."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "Domain asset semantics in runtime path violates the layer boundary expected by the checklist."
+      ]
+    },
+    {
+      "block_name": "16. Editor",
+      "status": "HOLD",
+      "passed": false,
+      "evidence": [
+        "Editor agent files and tests exist.",
+        "No execution proof was collected."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "Insufficient evidence for a positive pass."
+      ]
+    },
+    {
+      "block_name": "17. Video QC",
+      "status": "PASS_WITH_MONITORING",
+      "passed": true,
+      "evidence": [
+        "Video QC status is APPROVE/HOLD/REJECT.",
+        "publishable is true only when status is APPROVE and product signal is true.",
+        "Input governance states QC evaluates final artifacts and does not repair or publish."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "The inspected QC path preserves local decision semantics."
+      ]
+    },
+    {
+      "block_name": "18. Publisher Governance",
+      "status": "PASS_WITH_MONITORING",
+      "passed": true,
+      "evidence": [
+        "No network library imports were found in Publisher/publish-record paths scanned.",
+        "Sandbox adapter and boundary modules force external capability flags to false or none."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "Publisher remains non-external in the inspected implementation paths."
+      ]
+    },
+    {
+      "block_name": "19. Content Pipeline",
+      "status": "PASS_WITH_MONITORING",
+      "passed": true,
+      "evidence": [
+        "StubPublishAdapter creates local PublishManifest only.",
+        "No upload/API/scheduler code was found in publish.py.",
+        "defer_publish_manifest is used before QC in Creative Orchestrator."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "READY/publishable exists but is local manifest semantics in inspected paths."
+      ]
+    },
+    {
+      "block_name": "20. Sandbox / Offline Preparation",
+      "status": "PASS_WITH_MONITORING",
+      "passed": true,
+      "evidence": [
+        "External sandbox boundary emits execution_capability none and transport_capability none.",
+        "Validation envelope is non_transportable.",
+        "Controlled binding sets binding_active false."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "Sandbox preparation code appears inerte, but global authorization conflict remains tracked in state blocks."
+      ]
+    },
+    {
+      "block_name": "21. External Call Boundary",
+      "status": "HOLD_CRITICAL",
+      "passed": false,
+      "evidence": [
+        "HTTP/network libraries and clients exist in runtime/application paths.",
+        "Script provider path includes credential access and Authorization header construction."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "External calls are not authorized in SAFE_PRE_CROSSING."
+      ]
+    },
+    {
+      "block_name": "22. Credentials / Secrets",
+      "status": "HOLD_CRITICAL",
+      "passed": false,
+      "evidence": [
+        ".env exists and is gitignored; values were not read.",
+        "Script generation reads provider key from environment and builds Authorization Bearer."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "Credential value access capability exists and absence of exposed values was not fully proven without reading secrets."
+      ]
+    },
+    {
+      "block_name": "23. Traces / Audit / OUT",
+      "status": "HOLD",
+      "passed": false,
+      "evidence": [
+        "OUT directory was absent.",
+        "Existing docs contain audit/report models."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "Append-only behavior and complete trace integrity were not proven."
+      ]
+    },
+    {
+      "block_name": "24. Testes",
+      "status": "HOLD",
+      "passed": false,
+      "evidence": [
+        "Static test files exist for publisher sandbox, QC, account health, and gates.",
+        "No test suite was executed."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "Test passing cannot be asserted."
+      ]
+    },
+    {
+      "block_name": "25. Docs / Obsidian",
+      "status": "HOLD_CRITICAL",
+      "passed": false,
+      "evidence": [
+        "Docs contain SAFE_PRE_CROSSING and non-authorization language.",
+        "Docs also contain scoped positive implementation authorization that conflicts with this checklist's global mandatory state."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "Documentation consistency is not preserved under the assumed state."
+      ]
+    },
+    {
+      "block_name": "26. Runtime Integration Authorization Chain",
+      "status": "PASS_WITH_MONITORING",
+      "passed": true,
+      "evidence": [
+        "Authorization Chain exists.",
+        "Authorization Plan exists.",
+        "Authorization Gate exists.",
+        "Runner and Gate Review do not exist."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "The existing Chain/Plan/Gate remain audit-only/planning-only; runner absence means no runner behavior was validated."
+      ]
+    },
+    {
+      "block_name": "27. Full-System Audit",
+      "status": "HOLD",
+      "passed": false,
+      "evidence": [
+        "This JSON and paired Markdown report provide explicit block evidence.",
+        "Critical failures are present."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "Full-system audit cannot pass with blocking findings."
+      ]
+    },
+    {
+      "block_name": "28. Residuals",
+      "status": "HOLD",
+      "passed": false,
+      "evidence": [
+        "Required residual identifiers appear in docs and gate scripts.",
+        "Closure integrity and monitoring completeness were not fully verified."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "Missing evidence cannot become pass."
+      ]
+    },
+    {
+      "block_name": "29. Mudanca de estado",
+      "status": "PASS_WITH_MONITORING",
+      "passed": true,
+      "evidence": [
+        "This audit did not propose or execute a state transition."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "State remains SAFE_PRE_CROSSING by this artifact."
+      ]
+    },
+    {
+      "block_name": "30. Severidade",
+      "status": "HOLD_CRITICAL",
+      "passed": false,
+      "evidence": [
+        "Kernel/runtime domain coupling.",
+        "External-call and credential-access capability.",
+        "Non-authorization matrix contradiction."
+      ],
+      "blocking_failure": true,
+      "rationale": [
+        "At least three critical classes are present."
+      ]
+    },
+    {
+      "block_name": "31. Proximo uso",
+      "status": "PASS",
+      "passed": true,
+      "evidence": [
+        "Next step is documented as Auditor + Architect before any Engineer."
+      ],
+      "blocking_failure": false,
+      "rationale": [
+        "The result preserves routing discipline."
+      ]
+    }
+  ]
+}

@@ -24,6 +24,42 @@ class ScriptGenerationError(RuntimeError):
     """Raised when structured script generation fails."""
 
 
+SAFE_PRE_CROSSING_EXTERNAL_CALL_AUTHORIZED = False
+SAFE_PRE_CROSSING_CREDENTIAL_ACCESS_AUTHORIZED = False
+SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED = False
+SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED = False
+SAFE_PRE_CROSSING_RUNTIME_WIRING_AUTHORIZED = False
+
+
+def _raise_safe_pre_crossing_block(reason: str) -> None:
+    raise ScriptGenerationError(reason)
+
+
+def _ensure_external_call_authorized() -> None:
+    if not SAFE_PRE_CROSSING_EXTERNAL_CALL_AUTHORIZED:
+        _raise_safe_pre_crossing_block("CORTAI_EXTERNAL_BOUNDARY_BLOCKED_SAFE_PRE_CROSSING")
+
+
+def _ensure_credential_access_authorized() -> None:
+    if not SAFE_PRE_CROSSING_CREDENTIAL_ACCESS_AUTHORIZED:
+        _raise_safe_pre_crossing_block("CORTAI_CREDENTIAL_ACCESS_BLOCKED_SAFE_PRE_CROSSING")
+
+
+def _ensure_request_transformation_authorized() -> None:
+    if not SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED:
+        _raise_safe_pre_crossing_block("CORTAI_REQUEST_TRANSFORMATION_BLOCKED_SAFE_PRE_CROSSING")
+
+
+def _ensure_transport_payload_authorized() -> None:
+    if not SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED:
+        _raise_safe_pre_crossing_block("CORTAI_TRANSPORT_PAYLOAD_BLOCKED_SAFE_PRE_CROSSING")
+
+
+def _ensure_runtime_wiring_authorized() -> None:
+    if not SAFE_PRE_CROSSING_RUNTIME_WIRING_AUTHORIZED:
+        _raise_safe_pre_crossing_block("CORTAI_RUNTIME_WIRING_BLOCKED_SAFE_PRE_CROSSING")
+
+
 GENERIC_RE = re.compile(r"^(Automated|Manual) pilot content for ", re.IGNORECASE)
 ANTI_CLICHE_PHRASES = (
     "NOBODY COULD EXPLAIN IT",
@@ -208,6 +244,8 @@ class LocalScriptGeneratorService:
         errors: list[str] = []
         preferred = (request.preferred_provider or "").strip().lower()
         providers = self._provider_order(preferred)
+        if not providers:
+            errors.append("provider_execution_blocked_safe_pre_crossing")
 
         for provider in providers:
             attempts = 2 if provider == "groq" else 1
@@ -235,15 +273,19 @@ class LocalScriptGeneratorService:
         return self._deterministic_fallback(request=request, prompt=prompt, errors=errors)
 
     def _provider_order(self, preferred: str) -> list[str]:
-        groq_key = os.getenv("GROQ_API_KEY", "").strip()
+        groq_key = ""
         order: list[str] = []
-        if preferred == "groq" and groq_key:
+        groq_allowed = SAFE_PRE_CROSSING_EXTERNAL_CALL_AUTHORIZED and SAFE_PRE_CROSSING_CREDENTIAL_ACCESS_AUTHORIZED
+        ollama_allowed = SAFE_PRE_CROSSING_RUNTIME_WIRING_AUTHORIZED and SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED
+        if groq_allowed:
+            groq_key = os.getenv("GROQ_API_KEY", "").strip()
+        if preferred == "groq" and groq_allowed and groq_key:
             order.append("groq")
-        if preferred == "ollama":
+        if preferred == "ollama" and ollama_allowed:
             order.append("ollama")
-        if groq_key and "groq" not in order:
+        if groq_allowed and groq_key and "groq" not in order:
             order.append("groq")
-        if "ollama" not in order:
+        if ollama_allowed and "ollama" not in order:
             order.append("ollama")
         return order
 
@@ -254,6 +296,10 @@ class LocalScriptGeneratorService:
         request: ScriptGenerationRequest,
         provider_attempt_trace: list[str] | tuple[str, ...] = (),
     ) -> ScriptGenerationResponse:
+        _ensure_external_call_authorized()
+        _ensure_credential_access_authorized()
+        _ensure_request_transformation_authorized()
+        _ensure_transport_payload_authorized()
         api_key = os.getenv("GROQ_API_KEY", "").strip()
         if not api_key:
             raise ScriptGenerationError("GROQ_API_KEY_MISSING")
@@ -299,6 +345,9 @@ class LocalScriptGeneratorService:
         request: ScriptGenerationRequest,
         provider_attempt_trace: list[str] | tuple[str, ...] = (),
     ) -> ScriptGenerationResponse:
+        _ensure_runtime_wiring_authorized()
+        _ensure_request_transformation_authorized()
+        _ensure_transport_payload_authorized()
         payload = {
             "model": self.model,
             "prompt": prompt,

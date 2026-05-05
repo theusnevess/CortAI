@@ -7,6 +7,7 @@ from datetime import datetime
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.config.runtime import require_database_url
 from app.db.models import ObservationRecord
 from app.schemas.observation import Observation
 
@@ -19,10 +20,6 @@ AUDIT_LOG_PATH = "storage/audit_log.jsonl"
 OUTCOME_LOG_PATH = "storage/outcome_log.jsonl"
 OBSERVATION_LOG_PATH = "storage/observation_log.jsonl"
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://cortai_admin:cortai_secret_pass_123@db:5432/cortai_db",
-)
 _engine = None
 _SessionLocal = None
 logger = logging.getLogger(__name__)
@@ -87,7 +84,7 @@ def _persist_observation_postgres(observation: Observation) -> None:
     """
     global _engine, _SessionLocal
     if _engine is None:
-        _engine = create_engine(DATABASE_URL)
+        _engine = create_engine(require_database_url())
         _SessionLocal = sessionmaker(bind=_engine)
 
     session = _SessionLocal()

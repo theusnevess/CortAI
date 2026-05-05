@@ -16,6 +16,8 @@ from app.creative.agents.trend_analysis.models import TrendAnalysisInput, TrendC
 from app.creative.agents.trend_analysis.service import TrendAnalysisAgentService
 from app.creative.contracts.creative_pack import TrendEvidenceReference
 
+SAFE_PRE_CROSSING_GUARD_BLOCK = "CORTAI_EXTERNAL_BOUNDARY_BLOCKED_SAFE_PRE_CROSSING"
+
 
 class TrendAnalysisAgentPhase2Tests(unittest.TestCase):
     def test_creative_center_collector_parses_public_trend_discovery_html(self) -> None:
@@ -49,18 +51,17 @@ class TrendAnalysisAgentPhase2Tests(unittest.TestCase):
             def close(self) -> None:
                 return None
 
-        collector = TikTokCreativeCenterCollector(http_client_factory=lambda **_: _FakeClient())
-        result = collector.collect(TrendAnalysisInput(niche="horror", region="US", force_refresh=True))
+        client_created = False
 
-        self.assertFalse(result.used_stub)
-        self.assertIsNotNone(result.source_record)
-        self.assertEqual(result.trace["status"], "COLLECTED")
-        self.assertEqual(result.trace["hashtags_count"], 5)
-        self.assertEqual(result.trace["songs_count"], 5)
-        self.assertEqual(result.source_record.source, "creative_center")
-        self.assertEqual(result.source_record.source_metadata["hashtags"][0], "aprilfools")
-        self.assertEqual(result.source_record.source_metadata["songs"][0]["title"], "Classic classical gymnopedie solo piano(1034554)")
-        self.assertEqual(result.source_record.evidence[0].evidence_type, "creative_center_hashtag")
+        def _client_factory(**_):  # noqa: ANN001
+            nonlocal client_created
+            client_created = True
+            return _FakeClient()
+
+        collector = TikTokCreativeCenterCollector(http_client_factory=_client_factory)
+        with self.assertRaisesRegex(RuntimeError, SAFE_PRE_CROSSING_GUARD_BLOCK):
+            collector.collect(TrendAnalysisInput(niche="horror", region="US", force_refresh=True))
+        self.assertFalse(client_created)
 
     def test_repo_seed_manual_curation_files_are_canonical_and_approved(self) -> None:
         service = TrendAnalysisAgentService()

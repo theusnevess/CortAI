@@ -12,6 +12,20 @@ from app.creative.agents.trend_analysis.models import TrendAnalysisInput, TrendC
 from app.creative.contracts.creative_pack import TrendEvidenceReference
 
 
+SAFE_PRE_CROSSING_EXTERNAL_CALL_AUTHORIZED = False
+SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED = False
+SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED = False
+
+
+def _ensure_external_collection_authorized() -> None:
+    if not SAFE_PRE_CROSSING_EXTERNAL_CALL_AUTHORIZED:
+        raise RuntimeError("CORTAI_EXTERNAL_BOUNDARY_BLOCKED_SAFE_PRE_CROSSING")
+    if not SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED:
+        raise RuntimeError("CORTAI_REQUEST_TRANSFORMATION_BLOCKED_SAFE_PRE_CROSSING")
+    if not SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED:
+        raise RuntimeError("CORTAI_TRANSPORT_PAYLOAD_BLOCKED_SAFE_PRE_CROSSING")
+
+
 @dataclass
 class TikTokCreativeCenterCollector:
     collector_version: str = "creative-center-public-v1"
@@ -22,6 +36,7 @@ class TikTokCreativeCenterCollector:
     http_client_factory: Callable[..., Any] = field(default=httpx.Client)
 
     def collect(self, data: TrendAnalysisInput) -> TrendCollectorResult:
+        _ensure_external_collection_authorized()
         current_time = self._now_iso()
         client = self.http_client_factory(
             timeout=self.timeout_s,

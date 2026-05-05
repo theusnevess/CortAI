@@ -16,6 +16,20 @@ class ComfyUIImageError(RuntimeError):
     """Raised when local ComfyUI generation or regeneration fails."""
 
 
+SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED = False
+SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED = False
+SAFE_PRE_CROSSING_RUNTIME_WIRING_AUTHORIZED = False
+
+
+def _ensure_comfyui_runtime_authorized() -> None:
+    if not SAFE_PRE_CROSSING_RUNTIME_WIRING_AUTHORIZED:
+        raise ComfyUIImageError("CORTAI_RUNTIME_WIRING_BLOCKED_SAFE_PRE_CROSSING")
+    if not SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED:
+        raise ComfyUIImageError("CORTAI_REQUEST_TRANSFORMATION_BLOCKED_SAFE_PRE_CROSSING")
+    if not SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED:
+        raise ComfyUIImageError("CORTAI_TRANSPORT_PAYLOAD_BLOCKED_SAFE_PRE_CROSSING")
+
+
 @dataclass(frozen=True)
 class ComfyUIImageResult:
     image_path: str
@@ -44,6 +58,11 @@ class ComfyUIImageService:
     poll_interval_s: float = 1.0
 
     def available(self) -> bool:
+        if not (
+            SAFE_PRE_CROSSING_RUNTIME_WIRING_AUTHORIZED
+            and SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED
+        ):
+            return False
         try:
             with httpx.Client(timeout=5.0) as client:
                 response = client.get(f"{self.base_url.rstrip('/')}/system_stats")
@@ -60,6 +79,7 @@ class ComfyUIImageService:
         segment_name: str,
         seed: str = "",
     ) -> ComfyUIImageResult:
+        _ensure_comfyui_runtime_authorized()
         prompt_id = self._queue_prompt(
             workflow=self._txt2img_workflow(
                 prompt=prompt,
@@ -86,6 +106,7 @@ class ComfyUIImageService:
         render_job_id: str,
         segment_name: str,
     ) -> ComfyUIImageResult:
+        _ensure_comfyui_runtime_authorized()
         image_path = Path(input_image_path)
         if not image_path.exists():
             raise ComfyUIImageError("COMFYUI_EDIT_INPUT_MISSING")
@@ -110,6 +131,7 @@ class ComfyUIImageService:
         )
 
     def _txt2img_workflow(self, *, prompt: str, seed: int, filename_prefix: str) -> dict[str, Any]:
+        _ensure_comfyui_runtime_authorized()
         return {
             "4": {
                 "class_type": "CheckpointLoaderSimple",
@@ -153,6 +175,7 @@ class ComfyUIImageService:
         }
 
     def _queue_prompt(self, *, workflow: dict[str, Any]) -> str:
+        _ensure_comfyui_runtime_authorized()
         payload = {
             "prompt": workflow,
             "client_id": str(uuid.uuid4()),
@@ -170,6 +193,7 @@ class ComfyUIImageService:
         return prompt_id
 
     def _wait_for_image(self, *, prompt_id: str) -> dict[str, Any]:
+        _ensure_comfyui_runtime_authorized()
         deadline = time.time() + self.timeout_s
         last_payload: dict[str, Any] = {}
         while time.time() < deadline:
@@ -191,6 +215,7 @@ class ComfyUIImageService:
         raise ComfyUIImageError(f"COMFYUI_TIMEOUT:{json.dumps(last_payload)[:300]}")
 
     def _download_image(self, *, image_info: dict[str, Any]) -> bytes:
+        _ensure_comfyui_runtime_authorized()
         filename = str(image_info.get("filename") or "").strip()
         if not filename:
             raise ComfyUIImageError("COMFYUI_IMAGE_FILENAME_MISSING")

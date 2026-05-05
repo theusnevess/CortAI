@@ -76,7 +76,7 @@ class AccountHealthAgentPhase2Tests(unittest.TestCase):
         self.assertTrue(result.decision_trace["threshold_evaluations"]["hold_on_low_performance_streak"])
         self.assertEqual(result.decision_trace["final_status"], "HOLD")
 
-    def test_fallback_never_returns_hold(self) -> None:
+    def test_fallback_returns_hold_fail_closed(self) -> None:
         service = AccountHealthAgentService()
 
         result = service.evaluate(
@@ -90,8 +90,11 @@ class AccountHealthAgentPhase2Tests(unittest.TestCase):
         )
 
         self.assertTrue(result.fallback.used)
-        self.assertEqual(result.decision.status, "SAFE")
-        self.assertEqual(result.decision.reasons, ["fallback_default"])
+        self.assertEqual(result.decision.status, "HOLD")
+        self.assertEqual(result.decision.reasons, ["FALLBACK_FAIL_CLOSED", "ACCOUNT_HEALTH_COLD_START"])
+        self.assertTrue(result.decision.recommended_constraints["block_generation"])
+        self.assertTrue(result.decision.recommended_constraints["fail_closed"])
+        self.assertEqual(result.fallback.mode, "CONTROLLED_REJECT")
         self.assertEqual(result.fallback.reason, "ACCOUNT_HEALTH_COLD_START")
         self.assertTrue(result.decision_trace["fallback_used"])
         self.assertEqual(result.decision_trace["fallback_reason"], "ACCOUNT_HEALTH_COLD_START")

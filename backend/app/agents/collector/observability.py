@@ -11,6 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.agents.collector.utils import parse_minio_path
+from app.config.runtime import require_database_url
 from app.db.models import ObservationRecord
 
 logger = logging.getLogger(__name__)
@@ -30,11 +31,7 @@ def _get_sessionmaker():
     """Cria a sessao sincrona de forma lazy para emissao best-effort."""
     global _engine, _SessionLocal
     if _engine is None:
-        database_url = os.getenv(
-            "DATABASE_URL",
-            "postgresql://cortai_admin:cortai_secret_pass_123@db:5432/cortai_db",
-        )
-        _engine = create_engine(database_url)
+        _engine = create_engine(require_database_url())
         _SessionLocal = sessionmaker(bind=_engine)
     return _SessionLocal
 
