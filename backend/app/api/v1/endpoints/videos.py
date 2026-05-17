@@ -6,7 +6,6 @@ from sqlalchemy.future import select # Função select para consultas
 from pydantic import BaseModel # BaseModel do Pydantic para validação de dados
 from app.db.session import get_db # Função para obter a sessão do banco de dados
 from app.db.models import User, Video # Importa os modelos User e Video
-from app.tasks.collector_tasks import process_video_task # Task Celery para processar vídeos
 import uuid # Biblioteca para manipulação de UUIDs
 
 router = APIRouter() # Cria um roteador para os endpoints de vídeo
@@ -67,6 +66,8 @@ async def create_video(request: VideoCreateRequest, db: AsyncSession = Depends(g
         print(f"💾 Vídeo salvo no banco com ID: {new_video.id}")
 
         # Enfileira a task Celery para processar o vídeo em background
+        from app.tasks.collector_tasks import process_video_task
+
         process_video_task.delay(str(new_video.id), safe_url)
 
         # Retorna a resposta inicial

@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
 
-from app.cognitive_metrics import SessionLocal
+from app.cognitive_metrics import _get_sessionmaker, aggregate_daily_metrics_for_date
 from app.db.models import MetricsEndpointDaily, ObservationRecord
 from app.main import app
 from app.perf.p2b1_synthetic import (
@@ -18,7 +18,16 @@ from app.perf.p2b1_synthetic import (
     seed_synthetic_timing_observations,
     write_summary_csv,
 )
-from app.tasks.collector_tasks import aggregate_daily_metrics
+
+
+def _open_metrics_session():
+    return _get_sessionmaker()()
+
+
+def _aggregate_daily_metrics(target_date: str | None = None):
+    metric_date = date.fromisoformat(target_date) if target_date else date.today() - timedelta(days=1)
+    payload = aggregate_daily_metrics_for_date(metric_date)
+    return {"status": "done", **payload, "metric_date": metric_date.isoformat()}
 
 
 def _count_csv_rows(path: Path) -> int:
@@ -32,7 +41,7 @@ def _cleanup_metric_date(metric_date: date) -> None:
     """
     Remove dados sinteticos residuais para manter teste reprodutivel.
     """
-    with SessionLocal() as session:
+    with _open_metrics_session() as session:
         session.execute(
             delete(ObservationRecord).where(
                 ObservationRecord.process_id.like(f"P2B1_SYNTH_{metric_date.isoformat()}_%")
@@ -72,14 +81,14 @@ def test_p2b1_synthetic_aggregation_alert_dedupe_and_endpoints():
     metric_date = date.today() - timedelta(days=1)
     _cleanup_metric_date(metric_date)
     try:
-        with SessionLocal() as session:
+        with _open_metrics_session() as session:
             inserted = seed_synthetic_timing_observations(session=session, metric_date=metric_date)
         assert inserted > 0
 
-        result_first = aggregate_daily_metrics(metric_date.isoformat())
+        result_first = _aggregate_daily_metrics(metric_date.isoformat())
         assert result_first["status"] == "done"
 
-        with SessionLocal() as session:
+        with _open_metrics_session() as session:
             timing_count = count_events_for_date(
                 session,
                 metric_date=metric_date,
@@ -100,10 +109,10 @@ def test_p2b1_synthetic_aggregation_alert_dedupe_and_endpoints():
         assert len(daily_rows) >= 3
         assert alert_count_first > 0
 
-        result_second = aggregate_daily_metrics(metric_date.isoformat())
+        result_second = _aggregate_daily_metrics(metric_date.isoformat())
         assert result_second["status"] == "done"
 
-        with SessionLocal() as session:
+        with _open_metrics_session() as session:
             alert_count_second = count_events_for_date(
                 session,
                 metric_date=metric_date,

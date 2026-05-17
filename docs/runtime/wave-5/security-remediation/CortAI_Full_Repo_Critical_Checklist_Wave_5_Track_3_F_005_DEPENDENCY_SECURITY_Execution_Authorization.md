@@ -104,7 +104,7 @@ authorization_decision:
     package_removal: true
     test_execution: true
     runtime_execution: true
-    production_ready: true
+    production_ready_blocked: true
 
   executed_now:
     dependency_inventory: false

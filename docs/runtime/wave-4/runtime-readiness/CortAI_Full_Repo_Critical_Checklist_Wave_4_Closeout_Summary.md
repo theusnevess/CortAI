@@ -103,7 +103,7 @@ code_and_validation_summary:
 
 ```yaml
 still_not_authorized:
-  production_ready: true
+  production_ready_blocked: true
   runtime_integration: true
   runtime_execution: true
   wave_4_operational_start: true

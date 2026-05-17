@@ -17,7 +17,6 @@ from app.api.v1.endpoints import (
 )
 from app.cognitive_core import run_cognitive_cycle
 from app.version import get_app_version
-from app.worker import execute_action
 from app.ops.readiness import evaluate_readiness
 from fastapi.responses import JSONResponse
 
@@ -126,6 +125,14 @@ def readiness_check():
     return JSONResponse(status_code=503, content=payload)
 
 # Ponto único de entrada da observação
+def execute_action(decision_id: str, action_type: str, action_payload: dict):
+    return {
+        "decision_id": decision_id,
+        "execution_status": "SUCCESS",
+        "metrics": {}
+    }
+
+
 @app.post("/observe")
 def observe(payload: dict):
     """

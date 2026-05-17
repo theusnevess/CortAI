@@ -29,6 +29,8 @@ SAFE_PRE_CROSSING_CREDENTIAL_ACCESS_AUTHORIZED = False
 SAFE_PRE_CROSSING_REQUEST_TRANSFORMATION_AUTHORIZED = False
 SAFE_PRE_CROSSING_TRANSPORT_PAYLOAD_AUTHORIZED = False
 SAFE_PRE_CROSSING_RUNTIME_WIRING_AUTHORIZED = False
+LOCAL_STRUCTURED_PROVIDER = "local_structured"
+LOCAL_STRUCTURED_MODEL = "deterministic_narrative_rules_v1"
 
 
 def _raise_safe_pre_crossing_block(reason: str) -> None:
@@ -246,6 +248,14 @@ class LocalScriptGeneratorService:
         providers = self._provider_order(preferred)
         if not providers:
             errors.append("provider_execution_blocked_safe_pre_crossing")
+            try:
+                return self._generate_with_local_structured(
+                    request=request,
+                    prompt=prompt,
+                    provider_attempt_trace=errors,
+                )
+            except ScriptGenerationError as exc:
+                errors.append(f"{LOCAL_STRUCTURED_PROVIDER}:{exc}")
 
         for provider in providers:
             attempts = 2 if provider == "groq" else 1
@@ -271,6 +281,35 @@ class LocalScriptGeneratorService:
                         break
 
         return self._deterministic_fallback(request=request, prompt=prompt, errors=errors)
+
+    def _generate_with_local_structured(
+        self,
+        *,
+        request: ScriptGenerationRequest,
+        prompt: str,
+        provider_attempt_trace: list[str] | tuple[str, ...] = (),
+    ) -> ScriptGenerationResponse:
+        context = request.context
+        mode = self._select_narrative_mode(context)
+        payload = self._local_structured_payload(context=context, mode=mode)
+        payload = self._finalize_payload(payload, context=context)
+        self._validate_payload(payload)
+        script_plan = ScriptPlan(
+            hook=payload.hook,
+            setup=payload.setup,
+            payoff=payload.payoff,
+            generation_mode=LOCAL_STRUCTURED_PROVIDER,
+        )
+        return ScriptGenerationResponse(
+            script_plan=script_plan,
+            payload=payload,
+            provider_used=LOCAL_STRUCTURED_PROVIDER,
+            model_used=LOCAL_STRUCTURED_MODEL,
+            prompt_used=prompt,
+            raw_output=json.dumps(payload.to_dict(), ensure_ascii=True, sort_keys=True),
+            fallback=FallbackDecision(used=False, mode=FallbackMode.NONE.value, reason=""),
+            provider_attempt_trace=tuple(provider_attempt_trace),
+        )
 
     def _provider_order(self, preferred: str) -> list[str]:
         groq_key = ""
@@ -848,6 +887,9 @@ class LocalScriptGeneratorService:
             ),
             provider_attempt_trace=tuple(errors),
         )
+
+    def _local_structured_payload(self, *, context: ScriptGenerationContext, mode: str) -> StructuredScriptPayload:
+        return self._fallback_payload(context=context, mode=mode)
 
     def _fallback_payload(self, *, context: ScriptGenerationContext, mode: str) -> StructuredScriptPayload:
         topic_phrase = self._topic_phrase(context.topic, default=context.niche or "this place")

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 import sys
 import os
+import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -36,7 +38,8 @@ from app.creative.orchestrator.service import CreativeOrchestratorService
 from app.runtime.asset_selector import AssetSelector
 
 
-BATCH_DIR = ROOT / "OUT" / "manual_pipeline_batch_10_run"
+BATCH_NAME = os.getenv("CORTAI_MANUAL_BATCH_ID", "manual_pipeline_batch_10_run")
+BATCH_DIR = ROOT / "OUT" / BATCH_NAME
 RUNTIME_DIR = BATCH_DIR / "runtime"
 FINAL_JSON = BATCH_DIR / "all_agents_all_videos_outputs.json"
 
@@ -182,6 +185,16 @@ def _build_orchestrator(seed_paths: dict[str, Path]) -> CreativeOrchestratorServ
 
 
 def _script_runtime_diagnostics() -> dict[str, Any]:
+    if os.getenv("CORTAI_MANUAL_BATCH_ALLOW_RUNTIME_DIAGNOSTICS", "0") != "1":
+        return {
+            "diagnostics_skipped": True,
+            "reason": "DISABLED_BY_DEFAULT_FOR_SAFE_OFFLINE_BATCH",
+            "groq_key_presence_checked": False,
+            "ollama_health_checked": False,
+            "real_generation_preferred": False,
+            "fallback_residual_expected": True,
+        }
+
     ollama_base_url = os.getenv("CORTAI_OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
     ollama_healthy = False
     try:
@@ -262,6 +275,68 @@ def _ffprobe(path: Path) -> dict[str, Any]:
     }
 
 
+def _audio_non_silent_probe(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {
+            "path": str(path),
+            "probe_ok": False,
+            "audio_is_non_silent": False,
+            "reason": "AUDIO_FILE_MISSING",
+        }
+    try:
+        with wave.open(str(path), "rb") as reader:
+            sample_width = reader.getsampwidth()
+            channels = reader.getnchannels()
+            frame_count = reader.getnframes()
+            raw = reader.readframes(frame_count)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "path": str(path),
+            "probe_ok": False,
+            "audio_is_non_silent": False,
+            "reason": f"WAVE_READ_FAILED:{type(exc).__name__}",
+        }
+
+    if not raw or sample_width not in {1, 2, 4}:
+        return {
+            "path": str(path),
+            "probe_ok": False,
+            "audio_is_non_silent": False,
+            "sample_width": sample_width,
+            "channels": channels,
+            "frame_count": frame_count,
+            "reason": "UNSUPPORTED_OR_EMPTY_PCM",
+        }
+
+    max_abs = 0
+    sum_squares = 0.0
+    sample_count = 0
+    for offset in range(0, len(raw) - sample_width + 1, sample_width):
+        chunk = raw[offset : offset + sample_width]
+        if sample_width == 1:
+            sample = int(chunk[0]) - 128
+        else:
+            sample = int.from_bytes(chunk, byteorder="little", signed=True)
+        abs_sample = abs(sample)
+        max_abs = max(max_abs, abs_sample)
+        sum_squares += float(sample * sample)
+        sample_count += 1
+
+    rms = math.sqrt(sum_squares / sample_count) if sample_count else 0.0
+    audio_is_non_silent = max_abs >= 100 and rms >= 5.0
+    return {
+        "path": str(path),
+        "probe_ok": True,
+        "audio_is_non_silent": audio_is_non_silent,
+        "sample_width": sample_width,
+        "channels": channels,
+        "frame_count": frame_count,
+        "sample_count": sample_count,
+        "max_abs_sample": max_abs,
+        "rms_sample": round(rms, 3),
+    }
+
+
 def _resolve_path(value: str | None) -> str | None:
     if not value:
         return None
@@ -273,6 +348,26 @@ def _resolve_path(value: str | None) -> str | None:
 
 def _safe_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _script_generation_mode(script: dict[str, Any]) -> str:
+    return str(_safe_dict(script.get("script_plan")).get("generation_mode") or "")
+
+
+def _script_provider_from_mode(generation_mode: str) -> str:
+    mode = str(generation_mode or "").strip().lower()
+    if mode == "local_structured":
+        return "local_structured"
+    if mode.startswith("fallback"):
+        return "fallback"
+    if mode.endswith("_structured"):
+        return mode.removesuffix("_structured")
+    return mode or "unknown"
+
+
+def _tts_trace(execution: dict[str, Any]) -> dict[str, Any]:
+    trace = _safe_dict(_safe_dict(_safe_dict(execution.get("pipeline_output")).get("result")).get("tts_trace"))
+    return trace
 
 
 def _collect_fallbacks(execution: dict[str, Any], script: dict[str, Any], voice: dict[str, Any], editor: dict[str, Any]) -> list[str]:
@@ -288,8 +383,8 @@ def _collect_fallbacks(execution: dict[str, Any], script: dict[str, Any], voice:
         fallbacks.append(f"voice:{_safe_dict(voice.get('fallback')).get('reason') or 'VOICE_FALLBACK'}")
     if bool(_safe_dict(editor.get("fallback")).get("used")):
         fallbacks.append(f"editor:{_safe_dict(editor.get('fallback')).get('reason') or 'EDITOR_FALLBACK'}")
-    tts_trace = _safe_dict(_safe_dict(execution.get("pipeline_output")).get("result")).get("tts_trace")
-    if isinstance(tts_trace, dict) and bool(tts_trace.get("fallback_used")):
+    tts_trace = _tts_trace(execution)
+    if tts_trace and bool(tts_trace.get("fallback_used")):
         fallbacks.append(f"tts:{tts_trace.get('fallback_reason') or 'TTS_FALLBACK'}")
     return fallbacks
 
@@ -399,11 +494,22 @@ def _run_batch() -> dict[str, Any]:
     orchestrator = _build_orchestrator(seed_paths)
     script_runtime = _script_runtime_diagnostics()
     start_slot = datetime(2026, 4, 4, 12, 0, 0, tzinfo=timezone.utc)
+    piper_binary = shutil.which("piper") or shutil.which("piper.exe")
+    piper_model = Path(os.getenv("CORTAI_PIPER_MODEL", "tools/piper/voices/en_US-lessac-high.onnx"))
+    piper_model_path = piper_model if piper_model.is_absolute() else ROOT / piper_model
+    runtime_precheck = {
+        "piper_binary_available": bool(piper_binary),
+        "piper_binary_path": piper_binary,
+        "piper_voice_model_available": piper_model_path.exists(),
+        "piper_voice_model_path": str(piper_model_path),
+        "docker_network_mode": os.getenv("CORTAI_DOCKER_NETWORK_MODE", "unknown"),
+    }
     runs: list[dict[str, Any]] = []
     previous_niche: str | None = None
 
     for index, spec in enumerate(RUN_SPECS, start=1):
-        if previous_niche is not None and spec["niche"] != previous_niche:
+        reset_assets_per_run = os.getenv("CORTAI_MANUAL_BATCH_RESET_ASSET_SIGNATURES_PER_RUN", "0") == "1"
+        if reset_assets_per_run or (previous_niche is not None and spec["niche"] != previous_niche):
             AssetSelector._global_video_signatures.clear()
             AssetSelector._global_failed_sequences_prevented.clear()
         previous_niche = spec["niche"]
@@ -453,6 +559,14 @@ def _run_batch() -> dict[str, Any]:
         video_path = _resolve_path(str(artifacts.get("video") or "")) if artifacts else None
         video_probe = _ffprobe(Path(video_path)) if video_path and Path(video_path).exists() else {"path": video_path, "probe_ok": False}
         audio_probe = _ffprobe(Path(audio_path)) if audio_path and Path(audio_path).exists() else {"path": audio_path, "probe_ok": False}
+        audio_non_silent_probe = (
+            _audio_non_silent_probe(Path(audio_path))
+            if audio_path and Path(audio_path).exists()
+            else {"path": audio_path, "probe_ok": False, "audio_is_non_silent": False, "reason": "AUDIO_FILE_MISSING"}
+        )
+        tts_trace = _tts_trace(execution_payload)
+        visual_trace = _safe_dict(pipeline_result.get("visual_trace"))
+        solution_validation = _safe_dict(visual_trace.get("video_solution_validation"))
 
         agent_views = _build_agent_views(execution_payload)
         script = agent_views["script"]
@@ -463,17 +577,46 @@ def _run_batch() -> dict[str, Any]:
         experiment = agent_views["experiment"]
 
         qc = _safe_dict(execution_payload.get("video_qc"))
+        script_generation_mode = _script_generation_mode(script)
+        script_provider_used = _script_provider_from_mode(script_generation_mode)
+        script_fallback_used = script_generation_mode.startswith("fallback")
         status_summary = {
             "pipeline_status": str(pipeline_result.get("status") or ("EXCEPTION" if error_summary else "")),
             "qc_status": str(qc.get("status") or ""),
             "publishable": bool(qc.get("publishable")) if qc else False,
             "fallbacks_used": _collect_fallbacks(execution_payload, script, voice, editor),
             "valid_video": bool(video_probe.get("probe_ok")),
+            "script_provider_used": script_provider_used,
+            "script_generation_mode": script_generation_mode,
+            "script_fallback_used": script_fallback_used,
+            "tts_provider_requested": tts_trace.get("provider_requested"),
+            "tts_provider_executed": tts_trace.get("provider_executed"),
+            "silent_fallback_used": tts_trace.get("provider_executed") == "silent",
+            "audio_is_non_silent": bool(audio_non_silent_probe.get("audio_is_non_silent")),
+            "asset_signature_rebuild_used": bool(solution_validation.get("rebuild_used")),
+            "asset_signature_failure_code": str(solution_validation.get("failure_code") or ""),
+            "asset_signature_initial_failure_code": str(solution_validation.get("initial_failure_code") or ""),
         }
 
         run_record = {
             "run_id": spec["run_id"],
             "input": run_input,
+            "complete_execution_output": execution_payload,
+            "complete_agent_outputs": {
+                "account_health": _safe_dict(execution_payload.get("account_health")),
+                "trend_analysis": _safe_dict(execution_payload.get("trend_analysis")),
+                "learning": _safe_dict(execution_payload.get("learning")),
+                "novelty": novelty,
+                "strategy": _safe_dict(execution_payload.get("strategy")),
+                "experiment": experiment,
+                "script": script,
+                "voice": voice,
+                "asset_selection": asset,
+                "editor": editor,
+                "pipeline_output": pipeline_output,
+                "video_qc": qc,
+                "creative_pack": _safe_dict(execution_payload.get("creative_pack")),
+            },
             "account_health": _safe_dict(execution_payload.get("account_health")),
             "trend_analysis": _safe_dict(execution_payload.get("trend_analysis")),
             "learning": _safe_dict(execution_payload.get("learning")),
@@ -502,6 +645,7 @@ def _run_batch() -> dict[str, Any]:
                 "creative_pack_path": str(creative_pack_path) if creative_pack_path.exists() else None,
                 "video_probe": video_probe,
                 "audio_probe": audio_probe,
+                "audio_non_silent_probe": audio_non_silent_probe,
                 "metadata_exists": metadata_path.exists(),
             },
             "status_summary": status_summary,
@@ -515,18 +659,78 @@ def _run_batch() -> dict[str, Any]:
         "failed_runs": sum(1 for run in runs if str(_safe_dict(run.get("status_summary")).get("pipeline_status") or "") in {"EXCEPTION", "FAILED", "ERROR"}),
         "valid_video_count": sum(1 for run in runs if bool(_safe_dict(run.get("status_summary")).get("valid_video"))),
         "publishable_count": sum(1 for run in runs if bool(_safe_dict(run.get("status_summary")).get("publishable"))),
+        "script_fallback_count": sum(1 for run in runs if bool(_safe_dict(run.get("status_summary")).get("script_fallback_used"))),
+        "local_structured_script_count": sum(1 for run in runs if _safe_dict(run.get("status_summary")).get("script_provider_used") == "local_structured"),
+        "local_structured_generation_mode_count": sum(1 for run in runs if _safe_dict(run.get("status_summary")).get("script_generation_mode") == "local_structured"),
+        "audio_non_silent_count": sum(1 for run in runs if bool(_safe_dict(run.get("status_summary")).get("audio_is_non_silent"))),
+        "silent_fallback_count": sum(1 for run in runs if bool(_safe_dict(run.get("status_summary")).get("silent_fallback_used"))),
+        "piper_requested_count": sum(1 for run in runs if _safe_dict(run.get("status_summary")).get("tts_provider_requested") == "piper"),
+        "piper_executed_count": sum(1 for run in runs if _safe_dict(run.get("status_summary")).get("tts_provider_executed") == "piper"),
         "fallback_usage_count": sum(len(list(_safe_dict(run.get("status_summary")).get("fallbacks_used") or [])) for run in runs),
         "experiment_assignment_count": sum(1 for run in runs if _safe_dict(_safe_dict(run.get("experiment")).get("experiment_assignment"))),
         "experiment_result_recording_count": sum(1 for run in runs if _safe_dict(_safe_dict(run.get("experiment")).get("experiment_result"))),
+        "asset_signature_rebuild_count": sum(1 for run in runs if bool(_safe_dict(run.get("status_summary")).get("asset_signature_rebuild_used"))),
+        "asset_runtime_repeated_signature_count": sum(
+            1
+            for run in runs
+            if "ASSET_RUNTIME_REPEATED_SIGNATURE" in str(_safe_dict(run.get("error")).get("message") or "")
+            or _safe_dict(run.get("status_summary")).get("asset_signature_failure_code") == "ASSET_RUNTIME_REPEATED_SIGNATURE"
+        ),
+        "asset_signature_initial_repeated_signature_count": sum(
+            1
+            for run in runs
+            if _safe_dict(run.get("status_summary")).get("asset_signature_initial_failure_code") == "ASSET_RUNTIME_REPEATED_SIGNATURE"
+        ),
     }
 
+    asset_triplets: list[tuple[str, str, str]] = []
+    asset_paths: list[str] = []
+    for run in runs:
+        asset_plan = _safe_dict(_safe_dict(run.get("asset")).get("asset_plan"))
+        if not asset_plan:
+            asset_plan = _safe_dict(_safe_dict(_safe_dict(run.get("complete_execution_output")).get("creative_pack")).get("asset_plan"))
+        triplet = (
+            str(asset_plan.get("hook_asset") or ""),
+            str(asset_plan.get("setup_asset") or ""),
+            str(asset_plan.get("payoff_asset") or ""),
+        )
+        if all(triplet):
+            asset_triplets.append(triplet)
+            asset_paths.extend(triplet)
+    if asset_paths:
+        unique_asset_paths = set(asset_paths)
+        summary["unique_visual_signature_count"] = len(set(asset_triplets))
+        summary["asset_slot_count"] = len(asset_paths)
+        summary["unique_asset_path_count"] = len(unique_asset_paths)
+        summary["asset_reuse_ratio"] = round(1.0 - (len(unique_asset_paths) / len(asset_paths)), 4)
+
+    signature_metrics = [
+        _safe_dict(
+            _safe_dict(
+                _safe_dict(
+                    _safe_dict(run.get("complete_execution_output"))
+                    .get("pipeline_output")
+                ).get("result")
+            ).get("visual_trace")
+        ).get("video_solution_validation")
+        for run in runs
+    ]
+    signature_metrics = [
+        _safe_dict(item).get("signature_metrics")
+        for item in signature_metrics
+        if _safe_dict(item).get("signature_metrics")
+    ]
+    if signature_metrics:
+        summary["asset_signature_metrics_latest"] = signature_metrics[-1]
+
     return {
-        "batch_id": "manual_pipeline_batch_10_run",
+        "batch_id": BATCH_NAME,
         "system_version": "CORTAI_RUNTIME_V2_5",
         "governance_mode": "FROZEN_AND_VALIDATED_BASELINE_EXECUTION",
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "total_runs": len(RUN_SPECS),
         "runs_completed": len(runs),
+        "runtime_precheck": runtime_precheck,
         "script_runtime_diagnostics": script_runtime,
         "summary": summary,
         "runs": runs,

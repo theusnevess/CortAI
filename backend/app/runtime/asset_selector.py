@@ -828,11 +828,16 @@ class AssetSelector:
                 self._clear_sequence_context(seed=seed, segment_role=segment_role)
         return selected_path
 
-    def safe_fallback(self, *, seed: str) -> str | None:
+    def safe_fallback(self, *, seed: str, exclude_paths: set[str] | None = None) -> str | None:
         catalog = self._load_catalog()
         if not catalog:
             return None
-        eligible = [entry for entry in catalog if self._is_runtime_eligible_entry(entry=entry)]
+        exclude = exclude_paths or set()
+        eligible = [
+            entry
+            for entry in catalog
+            if self._is_runtime_eligible_entry(entry=entry) and entry.path not in exclude
+        ]
         if not eligible:
             return None
         ranked = sorted(

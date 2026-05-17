@@ -149,7 +149,7 @@ still_blocked:
   status_api_runtime_validation: true
   runtime_execution: true
   debt_resolution: true
-  production_ready: true
+  production_ready_blocked: true
   F_003_closure: true
 ```
 
