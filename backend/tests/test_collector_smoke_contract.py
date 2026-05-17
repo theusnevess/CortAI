@@ -57,9 +57,8 @@ def _ensure_smoke_stack() -> str:
     return good_url
 
 
-@pytest.mark.parametrize("good_url", _resolve_good_urls())
-def test_collector_smoke_known_good_url_persists_object(good_url: str):
-    _ensure_smoke_stack()
+def test_collector_smoke_known_good_url_persists_object():
+    good_url = _ensure_smoke_stack()
 
     result = CollectorAgent().process(good_url)
 

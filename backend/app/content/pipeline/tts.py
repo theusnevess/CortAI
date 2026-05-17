@@ -52,7 +52,7 @@ class TtsAdapter:
 class StubTtsAdapter(TtsAdapter):
     """TTS local com modos configuraveis e fallback deterministico."""
 
-    SUPPORTED_PROVIDERS = {"piper", "openai", "edge", "pyttsx3"}
+    SUPPORTED_PROVIDERS = {"piper", "openai", "edge", "pyttsx3", "silent"}
 
     def __init__(self, *, base_dir: Path = Path("OUT/content")) -> None:
         self.base_dir = base_dir
@@ -134,7 +134,9 @@ class StubTtsAdapter(TtsAdapter):
         del attempt_count
         normalized_provider = self._normalize_provider(provider)
         started = time.perf_counter()
-        if normalized_provider == "piper":
+        if normalized_provider == "silent":
+            result = self._generate_silent_audio(script_text=script_text, render_job_id=render_job_id)
+        elif normalized_provider == "piper":
             result = self._try_piper_tts(
                 script_text=script_text,
                 voice_profile=voice_profile,
@@ -198,7 +200,15 @@ class StubTtsAdapter(TtsAdapter):
         inter_segment_pause_ms: list[int] | None = None,
     ) -> TtsResponse | None:
         del language
-        piper_cmd = shutil.which("piper")
+        configured_piper_cmd = os.getenv("CORTAI_PIPER_BIN")
+        piper_cmd = None
+        if configured_piper_cmd:
+            configured_path = Path(configured_piper_cmd)
+            if configured_path.exists():
+                piper_cmd = str(configured_path)
+            else:
+                piper_cmd = shutil.which(configured_piper_cmd)
+        piper_cmd = piper_cmd or shutil.which("piper")
         if not piper_cmd:
             piper_cmd = shutil.which("piper.exe")
         if not piper_cmd:

@@ -1,0 +1,42 @@
+[
+ {
+  "RuleID": "generic-api-key",
+  "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+  "StartLine": 216,
+  "EndLine": 216,
+  "StartColumn": 4,
+  "EndColumn": 72,
+  "Match": "Track_1_AUTH_BOUNDARY: REDACTED",
+  "Secret": "REDACTED",
+  "File": "/repo/docs/runtime/wave-5/security-remediation/CortAI_Full_Repo_Critical_Checklist_Wave_5_Final_Security_Retest_Execution_Review.md",
+  "SymlinkFile": "",
+  "Commit": "",
+  "Entropy": 3.936742,
+  "Author": "",
+  "Email": "",
+  "Date": "",
+  "Message": "",
+  "Tags": [],
+  "Fingerprint": "/repo/docs/runtime/wave-5/security-remediation/CortAI_Full_Repo_Critical_Checklist_Wave_5_Final_Security_Retest_Execution_Review.md:generic-api-key:216"
+ },
+ {
+  "RuleID": "generic-api-key",
+  "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+  "StartLine": 142,
+  "EndLine": 142,
+  "StartColumn": 6,
+  "EndColumn": 74,
+  "Match": "Track_1_AUTH_BOUNDARY: REDACTED",
+  "Secret": "REDACTED",
+  "File": "/repo/docs/runtime/wave-5/security-remediation/CortAI_Full_Repo_Critical_Checklist_Wave_5_W5_RET_001_Owner_Attestation_Wait_State_Review.md",
+  "SymlinkFile": "",
+  "Commit": "",
+  "Entropy": 3.936742,
+  "Author": "",
+  "Email": "",
+  "Date": "",
+  "Message": "",
+  "Tags": [],
+  "Fingerprint": "/repo/docs/runtime/wave-5/security-remediation/CortAI_Full_Repo_Critical_Checklist_Wave_5_W5_RET_001_Owner_Attestation_Wait_State_Review.md:generic-api-key:142"
+ }
+]

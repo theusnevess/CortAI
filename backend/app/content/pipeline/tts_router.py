@@ -31,12 +31,19 @@ class TtsRouter:
         attempt_count: int,
     ) -> TtsRouterResult:
         fallback_reasons: list[str] = []
-        fallback_order = list(voice_plan.runtime_constraints.fallback_order or [voice_plan.provider, "piper"])
-        if not fallback_order:
-            fallback_order = [voice_plan.provider]
-        requested_provider = self._normalize_provider(voice_plan.provider)
-        if requested_provider not in fallback_order:
-            fallback_order.insert(0, requested_provider)
+        forced_provider = self._forced_provider_from_env()
+        if forced_provider:
+            requested_provider = forced_provider
+            fallback_order = [forced_provider]
+        else:
+            fallback_order = list(voice_plan.runtime_constraints.fallback_order or [voice_plan.provider, "piper"])
+            if not fallback_order:
+                fallback_order = [voice_plan.provider]
+            requested_provider = self._normalize_provider(voice_plan.provider)
+            if requested_provider not in fallback_order:
+                fallback_order.insert(0, requested_provider)
+        if os.getenv("CORTAI_ALLOW_SILENT_TTS_FALLBACK", "0") == "1" and "silent" not in fallback_order:
+            fallback_order.append("silent")
 
         for provider in fallback_order:
             started = perf_counter()
@@ -131,6 +138,12 @@ class TtsRouter:
         if normalized in {"edge_tts", "edge-tts"}:
             return "edge"
         return normalized
+
+    def _forced_provider_from_env(self) -> str | None:
+        mode = self._normalize_provider(os.getenv("CORTAI_TTS_MODE", ""))
+        if mode in {"piper", "openai", "edge", "pyttsx3", "silent"}:
+            return mode
+        return None
 
     def _voice_id_for_provider(self, *, provider: str, voice_plan: VoicePlan) -> str:
         normalized_provider = self._normalize_provider(provider)

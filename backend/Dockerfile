@@ -38,6 +38,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
+# Local offline TTS runtime used by controlled Docker batches.
+ENV PIPER_TTS_VERSION=1.4.1
+RUN pip install "piper-tts==${PIPER_TTS_VERSION}" "pathvalidate==3.3.1"
+
 # -------------------------
 # Application code
 # -------------------------

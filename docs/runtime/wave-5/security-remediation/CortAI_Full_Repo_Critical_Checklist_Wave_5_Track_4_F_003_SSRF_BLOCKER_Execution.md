@@ -49,7 +49,7 @@ not_authorized:
   runtime_execution: true
   external_calls: true
   credential_access: true
-  production_ready: true
+  production_ready_blocked: true
 ```
 
 ## 3. Files Changed

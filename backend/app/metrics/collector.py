@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -46,7 +46,7 @@ EventEmitter = Callable[[str, dict[str, Any]], None]
 
 @dataclass
 class MetricsCollectorService:
-    provider: MetricsProviderClient = StubMetricsProviderAdapter()
+    provider: MetricsProviderClient = field(default_factory=StubMetricsProviderAdapter)
     metrics_path: Path = DEFAULT_METRICS_PATH
     publish_records_path: Path = Path("OUT/data/publish_records/publish_records.jsonl")
     event_path: Path = Path("OUT/events/events.jsonl")

@@ -63,7 +63,7 @@ authorization_lineage:
     real_env_value_read: true
     database_connection: true
     redis_connection: true
-    production_ready: true
+    production_ready_blocked: true
 ```
 
 ## 3. Files Changed

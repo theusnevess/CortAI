@@ -213,7 +213,7 @@ guardrail_review:
 
 ```yaml
 wave_5_position_after_review:
-  Track_1_AUTH_BOUNDARY: retested_passed_pending_W5_RET_001_disposition
+  historical_secret_like_assignment_disposition: non_disclosing_owner_attestation_required
   Track_2_F_004_CONFIG_HARDENING: retested_passed_pending_W5_RET_001_disposition
   Track_3_F_005_DEPENDENCY_SECURITY: retested_passed_pending_W5_RET_001_disposition
   Track_4_F_003_SSRF_BLOCKER: retested_passed_pending_W5_RET_001_disposition

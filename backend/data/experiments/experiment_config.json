@@ -1,0 +1,15 @@
+{
+  "name": "controlled_quality_batch_narrative_mode",
+  "scope": "CREATIVE_PACK",
+  "status": "ACTIVE",
+  "variant_a": {
+    "variant_type": "narrative_shape",
+    "hook_style": "official_warning",
+    "narrative_mode": "official_warning"
+  },
+  "variant_b": {
+    "variant_type": "narrative_shape",
+    "hook_style": "witness_report",
+    "narrative_mode": "witness_report"
+  }
+}
